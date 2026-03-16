@@ -100,6 +100,45 @@ fn check_hardware_support() -> Result<(), String> {
 }
 
 fn main() -> eframe::Result {
+    // Attach to parent console so eprintln! works when launched from a
+    // terminal. Rust's std::io::stderr() calls GetStdHandle internally,
+    // which returns the new console handle after AttachConsole succeeds.
+    // We use SetStdHandle to make sure the Windows handle table is updated.
+    #[cfg(target_os = "windows")]
+    {
+        extern "system" {
+            fn AttachConsole(process_id: u32) -> i32;
+            fn CreateFileW(
+                name: *const u16, access: u32, share: u32,
+                security: *mut core::ffi::c_void, disposition: u32,
+                flags: u32, template: *mut core::ffi::c_void,
+            ) -> *mut core::ffi::c_void;
+            fn SetStdHandle(std_handle: u32, handle: *mut core::ffi::c_void) -> i32;
+        }
+        const ATTACH_PARENT_PROCESS: u32 = 0xFFFFFFFF;
+        const GENERIC_WRITE: u32 = 0x40000000;
+        const FILE_SHARE_WRITE: u32 = 0x00000002;
+        const OPEN_EXISTING: u32 = 3;
+        const STD_OUTPUT_HANDLE: u32 = 0xFFFFFFF5u32; // -11 as u32
+        const STD_ERROR_HANDLE: u32 = 0xFFFFFFF4u32;  // -12 as u32
+        const INVALID_HANDLE: *mut core::ffi::c_void = (-1isize) as *mut core::ffi::c_void;
+        if unsafe { AttachConsole(ATTACH_PARENT_PROCESS) } != 0 {
+            // Open CONOUT$ via CreateFileW and set as stdout/stderr
+            let conout: [u16; 8] = [b'C' as u16, b'O' as u16, b'N' as u16, b'O' as u16,
+                                     b'U' as u16, b'T' as u16, b'$' as u16, 0];
+            let h = unsafe {
+                CreateFileW(conout.as_ptr(), GENERIC_WRITE, FILE_SHARE_WRITE,
+                            core::ptr::null_mut(), OPEN_EXISTING, 0, core::ptr::null_mut())
+            };
+            if h != INVALID_HANDLE && !h.is_null() {
+                unsafe {
+                    SetStdHandle(STD_OUTPUT_HANDLE, h);
+                    SetStdHandle(STD_ERROR_HANDLE, h);
+                }
+            }
+        }
+    }
+
     // Set up a panic hook that shows a message box on Windows
     #[cfg(target_os = "windows")]
     {

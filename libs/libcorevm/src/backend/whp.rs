@@ -37,8 +37,13 @@ pub extern "C" fn corevm_set_whp_debug_callback(
     }
 }
 
-/// Write a debug line. Routes to the registered callback if set, otherwise to a log file.
+/// Write a debug line. Routes to the registered callback if set, otherwise to
+/// stderr + a log file so output is visible in the console when launched from
+/// a terminal.
 fn whp_debug(args: core::fmt::Arguments) {
+    // Always print to stderr so the developer can see output in the console.
+    eprintln!("[whp] {}", args);
+
     let cb_ptr = WHP_DEBUG_CB.load(core::sync::atomic::Ordering::Acquire);
     if !cb_ptr.is_null() {
         let msg = std::format!("{}\n", args);
@@ -727,6 +732,11 @@ pub struct WhpBackend {
     /// Set by the FFI handler after dispatching to the device.
     /// Applied at the top of run_vcpu before re-entering the guest.
     pending_mmio_read: Option<(u64, u8)>,
+    /// Set to true when the last vCPU exit was InterruptWindow.
+    /// Used by poll_irqs to bypass the RFLAGS.IF check for PIC injection,
+    /// because WHP reports IF=0 at InterruptWindow exits despite the guest
+    /// being interruptible (WHP quirk).
+    pub last_exit_interrupt_window: bool,
 }
 
 unsafe impl Send for WhpBackend {}
@@ -888,6 +898,7 @@ impl WhpBackend {
                 lapic: SoftLapic::new(),
                 ioapic: SoftIoapic::new(),
                 pending_mmio_read: None,
+                last_exit_interrupt_window: false,
             })
         }
     }
@@ -1227,24 +1238,32 @@ impl WhpBackend {
     /// PendingEvent can only hold one event at a time, so we inject the first
     /// and re-queue the rest for the next interrupt window.
     fn deliver_ioapic_pending(&mut self) {
+        self.deliver_ioapic_pending_inner(false);
+    }
+
+    /// Deliver pending IOAPIC interrupts. When `force` is true, skip the
+    /// RFLAGS.IF check — used from the InterruptWindow handler where WHP
+    /// reports IF=0 despite the guest being interruptible (WHP quirk).
+    fn deliver_ioapic_pending_inner(&mut self, force: bool) {
         let pending = self.ioapic.take_pending();
         if pending.is_empty() { return; }
 
-        // Check RFLAGS.IF — can only inject ExtInt if interrupts are enabled
-        let mut rflags_val = [WHV_REGISTER_VALUE::default()];
-        let if_set = if self.get_regs_raw(0, &[REG_RFLAGS], &mut rflags_val).is_ok() {
-            (unsafe { rflags_val[0].reg64 } & 0x200) != 0
-        } else {
-            false
-        };
-
-        if !if_set {
-            // Can't inject now — put them all back and request interrupt window
-            for intr in pending {
-                self.ioapic.pending.push(intr);
+        if !force {
+            // Check RFLAGS.IF — only inject if interrupts are enabled.
+            // PendingEvent ExtInt is delivered by WHP when IF=1, but setting
+            // it at the wrong time (e.g. before IDT is ready) can cause
+            // triple faults when the guest next enables interrupts.
+            let mut rflags_val = [WHV_REGISTER_VALUE::default()];
+            let if_set = if self.get_regs_raw(0, &[REG_RFLAGS], &mut rflags_val).is_ok() {
+                (unsafe { rflags_val[0].reg64 } & 0x200) != 0
+            } else {
+                false
+            };
+            if !if_set {
+                for intr in pending { self.ioapic.pending.push(intr); }
+                let _ = self.request_interrupt_window(0, true);
+                return;
             }
-            let _ = self.request_interrupt_window(0, true);
-            return;
         }
 
         // For level-triggered interrupts, try WHvRequestInterrupt first.
@@ -1356,6 +1375,17 @@ impl WhpBackend {
         self.ioapic.set_irq(pin, level);
         self.deliver_ioapic_pending();
     }
+
+    /// Check if there is already a pending event (ExtInt) on the given vCPU.
+    /// Used to avoid PIC injection overwriting a pending IOAPIC delivery.
+    pub fn has_pending_event(&mut self, vcpu_id: u32) -> bool {
+        let mut val = [WHV_REGISTER_VALUE::default()];
+        if self.get_regs_raw(vcpu_id, &[REG_PENDING_EVENT], &mut val).is_ok() {
+            (unsafe { val[0].reg128[0] } & 1) != 0 // EventPending bit
+        } else {
+            false
+        }
+    }
 }
 
 impl VmBackend for WhpBackend {
@@ -1460,6 +1490,7 @@ impl VmBackend for WhpBackend {
         if FIRST.swap(false, core::sync::atomic::Ordering::Relaxed) {
             whp_debug(format_args!("run_vcpu entered for the first time"));
         }
+        self.last_exit_interrupt_window = false;
         let mut inner_loops = 0u32;
         loop {
             // Break out of inner loop periodically so the vmmanager can advance
@@ -1998,8 +2029,11 @@ impl VmBackend for WhpBackend {
                     // Guest is now interruptible (IF=1). Disable the notification
                     // and deliver any re-queued IOAPIC interrupts before returning
                     // to vm.rs for PIC interrupt injection.
+                    // Use force=true because WHP reports RFLAGS.IF=0 at this
+                    // exit despite the guest actually being interruptible.
                     let _ = self.request_interrupt_window(id, false);
-                    self.deliver_ioapic_pending();
+                    self.deliver_ioapic_pending_inner(true);
+                    self.last_exit_interrupt_window = true;
                     return Ok(VmExitReason::InterruptWindow);
                 }
                 WHV_EXIT_REASON_UNSUPPORTED_FEATURE => {

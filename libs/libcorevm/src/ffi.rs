@@ -408,15 +408,33 @@ pub extern "C" fn corevm_pit_advance(handle: u64, ticks: u32) -> u32 {
                 return 0;
             };
             if fires > 0 {
-                if !vm.pic_ptr.is_null() {
-                    let pic = unsafe { &mut *vm.pic_ptr };
-                    pic.raise_irq(0);
-                }
-                // Also route through IOAPIC (pin 2 = remapped IRQ 0 per MADT)
+                // Route PIT timer through IOAPIC *or* PIC, not both.
+                // Using both causes PendingEvent conflicts: the PIC injection
+                // in poll_irqs overwrites the IOAPIC injection with a different
+                // vector, breaking Linux's check_timer() which expects the
+                // IOAPIC vector specifically.
                 #[cfg(feature = "windows")]
                 {
-                    vm.backend.ioapic_set_irq(2, true);
-                    vm.backend.ioapic_set_irq(2, false);
+                    let redir2 = vm.backend.ioapic.redir_entry(2);
+                    let ioapic_active = (redir2 & (1 << 16)) == 0; // pin 2 unmasked
+                    if ioapic_active {
+                        // APIC mode: deliver through IOAPIC only
+                        vm.backend.ioapic_set_irq(2, true);
+                        vm.backend.ioapic_set_irq(2, false);
+                    } else {
+                        // Pre-APIC / PIC mode: deliver through PIC only
+                        if !vm.pic_ptr.is_null() {
+                            let pic = unsafe { &mut *vm.pic_ptr };
+                            pic.raise_irq(0);
+                        }
+                    }
+                }
+                #[cfg(not(feature = "windows"))]
+                {
+                    if !vm.pic_ptr.is_null() {
+                        let pic = unsafe { &mut *vm.pic_ptr };
+                        pic.raise_irq(0);
+                    }
                 }
             }
             fires
@@ -783,12 +801,47 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
 
             // Software PIC injection (non-Linux only).
             // On KVM/Linux the in-kernel irqchip handles injection automatically.
+            // On WHP, skip if IOAPIC already wrote a PendingEvent — injecting a
+            // PIC vector would overwrite it with a different vector, breaking APIC
+            // mode interrupt routing (e.g. check_timer expects IOAPIC vector).
             #[cfg(not(feature = "linux"))]
             if !vm.pic_ptr.is_null() {
+                #[cfg(feature = "windows")]
+                let skip_pic = vm.backend.has_pending_event(0);
+                #[cfg(not(feature = "windows"))]
+                let skip_pic = false;
+
+                // On WHP, reading RFLAGS.IF at InterruptWindow exits returns 0
+                // despite the guest being interruptible (WHP quirk). Use the
+                // last_exit_interrupt_window flag to bypass the IF check in that
+                // case, so PIC interrupts get delivered during check_timer's
+                // PIC/ExtINT fallback path.
+                #[cfg(feature = "windows")]
+                let force_inject = vm.backend.last_exit_interrupt_window;
+                #[cfg(not(feature = "windows"))]
+                let force_inject = false;
+
                 let if_set = vm.get_vcpu_regs(0)
                     .map(|r| r.rflags & 0x200 != 0)
                     .unwrap_or(false);
-                if if_set {
+                let can_inject = !skip_pic && (force_inject || if_set);
+
+                // Debug: log PIC injection decisions (limited)
+                #[cfg(feature = "windows")]
+                {
+                    static PIC_DBG: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                    let pic = unsafe { &*vm.pic_ptr };
+                    if pic.get_interrupt_vector().is_some() {
+                        let n = PIC_DBG.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 100 || n % 500 == 0 {
+                            eprintln!("[pic] #{} skip={} force={} IF={} can={} pending_ev={}",
+                                n, skip_pic, force_inject, if_set, can_inject,
+                                vm.backend.has_pending_event(0));
+                        }
+                    }
+                }
+
+                if can_inject {
                     let pic = unsafe { &mut *vm.pic_ptr };
                     if let Some(vector) = pic.get_interrupt_vector() {
                         if vm.inject_interrupt(0, vector).is_ok() {
@@ -800,7 +853,7 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                             }
                         }
                     }
-                } else {
+                } else if !skip_pic {
                     let pic = unsafe { &*vm.pic_ptr };
                     if pic.get_interrupt_vector().is_some() {
                         let _ = vm.request_interrupt_window(0, true);

@@ -597,7 +597,14 @@ fn build_hpet_table() -> Vec<u8> {
 
 fn build_madt_with_cpus(num_cpus: u32) -> Vec<u8> {
     let num_cpus = num_cpus.max(1).min(32);
-    let len: u32 = 44 + (num_cpus * 8) + 12 + 40; // header + N*LAPIC + IOAPIC + 4*override
+    // On KVM the in-kernel PIT delivers on GSI 0, so we omit the IRQ 0→GSI 2
+    // override (4 overrides × 10 = 40 bytes).  On WHP/anyOS the userspace PIT
+    // delivers on IOAPIC pin 2, so we *need* the override (5 × 10 = 50 bytes).
+    #[cfg(feature = "linux")]
+    let override_bytes: u32 = 40;
+    #[cfg(not(feature = "linux"))]
+    let override_bytes: u32 = 50;
+    let len: u32 = 44 + (num_cpus * 8) + 12 + override_bytes;
     let mut t = vec![0u8; len as usize];
     write_acpi_header(&mut t, 0, b"APIC", len, 3);
     // Local APIC address
@@ -625,10 +632,20 @@ fn build_madt_with_cpus(num_cpus: u32) -> Vec<u8> {
     off += 12;
 
     // Interrupt Source Overrides (type=2, len=10)
-    // Note: IRQ 0 → GSI 2 override deliberately omitted.
-    // KVM's in-kernel PIT delivers timer interrupts at GSI 0 (IRQ 0).
-    // With the override, Linux would configure IOAPIC pin 2 for timer
-    // but KVM delivers on pin 0, causing timer interrupts to be lost.
+    // KVM's in-kernel PIT delivers timer interrupts at GSI 0 (IRQ 0),
+    // so the IRQ 0 → GSI 2 override is omitted on Linux.
+    // On WHP/anyOS the userspace PIT delivers on IOAPIC pin 2, so the
+    // override is required — without it Linux programs pin 0 for the
+    // timer and hits "IO-APIC + timer doesn't work!" panic.
+    #[cfg(not(feature = "linux"))]
+    let overrides: &[(u8, u32, u16)] = &[
+        (0, 2, 0x0000), // IRQ 0 → GSI 2 (conforming, edge-triggered)
+        (5, 5, 0x000D),
+        (9, 9, 0x000D),
+        (10, 10, 0x000D),
+        (11, 11, 0x000D),
+    ];
+    #[cfg(feature = "linux")]
     let overrides: &[(u8, u32, u16)] = &[
         (5, 5, 0x000D),
         (9, 9, 0x000D),
