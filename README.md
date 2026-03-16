@@ -23,7 +23,7 @@ without depending on QEMU or any external emulator.
 
 <br>
 
-> CoreVM is the virtual machine engine behind [anyOS](https://github.com/nicosommelier/anyos). It runs as a standalone Linux/Windows application (with KVM or Hyper-V acceleration) and also compiles as a `no_std` library for embedded use inside the anyOS kernel — where every instruction is decoded and executed in pure software without hardware virtualization.
+> CoreVM is the virtual machine engine behind [anyOS](https://github.com/nicosommelier/anyos). It runs as a standalone Linux/Windows application (with KVM or Hyper-V acceleration) and also compiles as a `no_std` library for embedded use inside the anyOS kernel — where hardware virtualization is provided by the anyOS VMd, which leverages VT-x and AMD-V directly, without relying on KVM or WHP.
 
 ---
 
@@ -34,7 +34,7 @@ without depending on QEMU or any external emulator.
 - **Full x86 ISA** — 16-bit real mode, 32-bit protected mode, 64-bit long mode
 - **Paging support** — 2-level (32-bit), PAE (3-level), and 4-level (long mode) page table walks with NX, WP, U/S enforcement
 - **JIT compiler** — two-phase acceleration: decode cache for hot basic blocks + native x86-64 code compilation
-- **Multi-backend architecture** — KVM (Linux), Hyper-V/WHP (Windows), pure software interpreter (anyOS / bare-metal)
+- **Multi-backend architecture** — KVM (Linux), Hyper-V/WHP (Windows), anyOS VMd hardware-accelerated (anyOS)
 
 ### PC Hardware Emulation
 
@@ -139,7 +139,7 @@ CoreVM supports three execution backends, selected at compile time via Cargo fea
 |---------|---------|----------|-------------|
 | **KVM** | `linux` | Linux | Hardware-accelerated via `/dev/kvm`. Guest code runs natively on the CPU; device emulation and I/O handled in userspace. |
 | **WHP** | `windows` | Windows | Hardware-accelerated via Windows Hypervisor Platform (Hyper-V). |
-| **anyOS** | `anyos` | anyOS | Pure software interpreter. Every instruction decoded and executed without hardware virtualization. `no_std` compatible. |
+| **anyOS** | `anyos` | anyOS | Hardware-accelerated via anyOS VMd (VT-x / AMD-V). Guest code runs natively on the CPU; no software interpreter. `no_std` compatible. |
 
 ### `no_std` Design
 
@@ -247,7 +247,7 @@ corevm/
 |---------|-------------|
 | `linux` | Enable KVM backend + SLIRP networking + file I/O |
 | `windows` | Enable WHP backend + file I/O |
-| `anyos` | Enable anyOS software interpreter backend (default, `no_std`) |
+| `anyos` | Enable anyOS VMd hardware-accelerated backend (default, `no_std`) |
 | `std` | Enable standard library (auto-enabled by `linux`/`windows`) |
 | `host_test` | Enable host-side test utilities |
 
