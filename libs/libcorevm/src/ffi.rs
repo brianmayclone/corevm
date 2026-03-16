@@ -12,7 +12,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::vm::Vm;
 use crate::backend::types::*;
-#[cfg(feature = "linux")]
+#[cfg(any(feature = "linux", feature = "windows"))]
 use crate::backend::VmBackend;
 use crate::backend::VmExitReason;
 
@@ -204,13 +204,17 @@ pub extern "C" fn corevm_create_vcpu(handle: u64, vcpu_id: u32) -> i32 {
             Ok(()) => {
                 // APs (vcpu_id > 0): set to INIT_RECEIVED so they wait
                 // for SIPI from the BSP.
-                // TODO: SMP boot hangs after handle_smp — BSP spin-waits
-                // without VM exits. Needs further debugging.
                 #[cfg(feature = "linux")]
                 if vcpu_id > 0 {
                     let apic_base = 0xFEE0_0000u64 | (1 << 11);
                     let _ = vm.backend.set_msrs(vcpu_id, &[(0x1B, apic_base)]);
                     let _ = vm.backend.set_mp_state(vcpu_id, 2);
+                }
+                // On WHP, APs have APIC_BASE set by create_vcpu already.
+                // Put them in HLT state so they wait for SIPI via startup IPI.
+                #[cfg(feature = "windows")]
+                if vcpu_id > 0 {
+                    vm.backend.set_ap_halted(vcpu_id);
                 }
                 0
             }
@@ -574,6 +578,11 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                             let pic = unsafe { &mut *vm.pic_ptr };
                             pic.raise_irq(4);
                         }
+                        #[cfg(feature = "windows")]
+                        {
+                            vm.backend.ioapic_set_irq(4, true);
+                            vm.backend.ioapic_set_irq(4, false);
+                        }
                     }
                 }
             }
@@ -604,18 +613,36 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         }
                     }
                 }
-                #[cfg(not(feature = "linux"))]
+                #[cfg(feature = "windows")]
+                {
+                    if ahci.msi_enabled {
+                        if want_asserted {
+                            let _ = vm.backend.signal_msi(ahci.msi_address, ahci.msi_data);
+                            ahci.clear_irq();
+                            injected += 1;
+                        }
+                    } else {
+                        if want_asserted && !vm.ahci_irq_asserted {
+                            if !vm.pic_ptr.is_null() {
+                                let pic = unsafe { &mut *vm.pic_ptr };
+                                pic.raise_irq(11);
+                            }
+                            vm.backend.ioapic_set_irq(11, true);
+                            vm.ahci_irq_asserted = true;
+                            injected += 1;
+                        } else if !want_asserted && vm.ahci_irq_asserted {
+                            vm.backend.ioapic_set_irq(11, false);
+                            vm.ahci_irq_asserted = false;
+                        }
+                    }
+                }
+                #[cfg(not(any(feature = "linux", feature = "windows")))]
                 {
                     if want_asserted {
                         ahci.clear_irq();
                         if !vm.pic_ptr.is_null() {
                             let pic = unsafe { &mut *vm.pic_ptr };
                             pic.raise_irq(11);
-                        }
-                        #[cfg(feature = "windows")]
-                        {
-                            vm.backend.ioapic_set_irq(11, true);
-                            vm.backend.ioapic_set_irq(11, false);
                         }
                     }
                 }
@@ -648,15 +675,12 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                 #[cfg(feature = "linux")]
                 {
                     if e1000.msi_enabled {
-                        // MSI mode: edge-triggered, fire once per interrupt
                         if want_asserted {
                             let _ = vm.backend.signal_msi(e1000.msi_address, e1000.msi_data);
-                            // Clear ICR bits that were serviced
                             e1000.regs[0x00C0 / 4] &= !ims;
                             injected += 1;
                         }
                     } else {
-                        // Legacy IRQ 11 (level-triggered, shared with AHCI)
                         if want_asserted && !vm.e1000_irq_asserted {
                             vm.e1000_irq_asserted = true;
                             let _ = vm.backend.set_irq_line(11, true);
@@ -669,7 +693,32 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         }
                     }
                 }
-                #[cfg(not(feature = "linux"))]
+                #[cfg(feature = "windows")]
+                {
+                    if e1000.msi_enabled {
+                        if want_asserted {
+                            let _ = vm.backend.signal_msi(e1000.msi_address, e1000.msi_data);
+                            e1000.regs[0x00C0 / 4] &= !ims;
+                            injected += 1;
+                        }
+                    } else {
+                        if want_asserted && !vm.e1000_irq_asserted {
+                            vm.e1000_irq_asserted = true;
+                            if !vm.pic_ptr.is_null() {
+                                let pic = unsafe { &mut *vm.pic_ptr };
+                                pic.raise_irq(11);
+                            }
+                            vm.backend.ioapic_set_irq(11, true);
+                            injected += 1;
+                        } else if !want_asserted && vm.e1000_irq_asserted {
+                            vm.e1000_irq_asserted = false;
+                            if !vm.ahci_irq_asserted {
+                                vm.backend.ioapic_set_irq(11, false);
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(any(feature = "linux", feature = "windows")))]
                 {
                     if want_asserted {
                         if !vm.pic_ptr.is_null() {
@@ -722,6 +771,11 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         if !vm.pic_ptr.is_null() {
                             let pic = unsafe { &mut *vm.pic_ptr };
                             pic.raise_irq(9);
+                        }
+                        #[cfg(feature = "windows")]
+                        {
+                            vm.backend.ioapic_set_irq(9, true);
+                            vm.backend.ioapic_set_irq(9, false);
                         }
                     }
                 }
@@ -826,6 +880,47 @@ pub extern "C" fn corevm_ahci_poll_irq(handle: u64) {
             }
         }
     }
+    #[cfg(feature = "windows")]
+    {
+        if ahci.msi_enabled {
+            // MSI mode: inject via WHvRequestInterrupt with decoded MSI address/data
+            if want_asserted {
+                match vm.backend.signal_msi(ahci.msi_address, ahci.msi_data) {
+                    Ok(_) => {},
+                    Err(_e) => {
+                        // Fallback to legacy IRQ
+                        if !vm.ahci_irq_asserted {
+                            if !vm.pic_ptr.is_null() {
+                                let pic = unsafe { &mut *vm.pic_ptr };
+                                pic.raise_irq(11);
+                            }
+                            vm.backend.ioapic_set_irq(11, true);
+                            vm.ahci_irq_asserted = true;
+                        }
+                    }
+                }
+                ahci.clear_irq();
+                // Deassert legacy IRQ line if it was still asserted
+                if vm.ahci_irq_asserted {
+                    vm.backend.ioapic_set_irq(11, false);
+                    vm.ahci_irq_asserted = false;
+                }
+            }
+        } else {
+            // Legacy level-triggered mode
+            if want_asserted && !vm.ahci_irq_asserted {
+                if !vm.pic_ptr.is_null() {
+                    let pic = unsafe { &mut *vm.pic_ptr };
+                    pic.raise_irq(11);
+                }
+                vm.backend.ioapic_set_irq(11, true);
+                vm.ahci_irq_asserted = true;
+            } else if !want_asserted && vm.ahci_irq_asserted {
+                vm.backend.ioapic_set_irq(11, false);
+                vm.ahci_irq_asserted = false;
+            }
+        }
+    }
 }
 
 /// Check if the guest has requested a system reset (e.g. PS/2 0xFE, port 0xCF9).
@@ -871,33 +966,20 @@ pub extern "C" fn corevm_pic_debug(handle: u64) -> u32 {
 
 /// Poll LAPIC timer (TSC-based). Injects interrupt if timer fired and IF=1.
 /// Returns the vector injected (>0) or 0.
-/// NOTE: In XApic mode (WHP), the LAPIC timer is handled internally by WHP.
-/// This function is only active for the software LAPIC path.
+///
+/// On WHP with XApic mode, the LAPIC timer is handled entirely by WHP's
+/// internal LAPIC emulation — no software polling needed. The SoftLapic in
+/// WhpBackend never receives guest MMIO writes, so polling it is a no-op.
+///
+/// On KVM, the in-kernel LAPIC handles the timer internally too.
+///
+/// This function is only useful for the anyOS backend's software LAPIC.
 #[no_mangle]
 pub extern "C" fn corevm_lapic_timer_advance(handle: u64, _ticks: u64) -> u32 {
-    #[cfg(not(feature = "windows"))]
-    { let _ = (handle, _ticks); return 0; }
-
-    #[cfg(feature = "windows")]
-    match get_vm(handle) {
-        Some(vm) => {
-            vm.backend.lapic.poll_timer();
-            if let Some(vector) = vm.backend.lapic.take_timer_irq() {
-                if vm.get_vcpu_regs(0)
-                    .map(|r| r.rflags & 0x200 != 0)
-                    .unwrap_or(false)
-                {
-                    if vm.inject_interrupt(0, vector).is_ok() {
-                        return vector as u32;
-                    }
-                }
-                vm.backend.lapic.timer_irq_pending = true;
-                let _ = vm.request_interrupt_window(0, true);
-            }
-            0
-        }
-        None => 0,
-    }
+    // WHP XApic mode and KVM in-kernel LAPIC both handle the timer internally.
+    // Only the anyOS software LAPIC path would need polling here.
+    let _ = (handle, _ticks);
+    0
 }
 
 /// Debug: return LAPIC timer state.
@@ -1310,9 +1392,10 @@ pub extern "C" fn corevm_setup_standard_devices(handle: u64) -> i32 {
         Some(vm) => {
             vm.setup_standard_devices();
             // Map VGA LFB as a hypervisor memory region for fast access.
-            #[cfg(feature = "linux")]
+            #[cfg(any(feature = "linux", feature = "windows"))]
             if let Err(_) = vm.setup_vga_lfb_mapping() {
-                eprintln!("[corevm] Warning: failed to map VGA LFB as KVM region");
+                #[cfg(feature = "std")]
+                eprintln!("[corevm] Warning: failed to map VGA LFB as hypervisor region");
             }
             0
         }
@@ -1469,6 +1552,14 @@ pub extern "C" fn corevm_setup_e1000(handle: u64, mac: *const u8) -> i32 {
         e1000.irq_callback = Some(alloc::boxed::Box::new(move |asserted: bool| {
             let backend = unsafe { &mut *(backend_addr as *mut crate::backend::kvm::KvmBackend) };
             let _ = backend.set_irq_line(11, asserted);
+        }));
+    }
+    #[cfg(feature = "windows")]
+    {
+        let backend_addr = &mut vm.backend as *mut crate::backend::whp::WhpBackend as usize;
+        e1000.irq_callback = Some(alloc::boxed::Box::new(move |asserted: bool| {
+            let backend = unsafe { &mut *(backend_addr as *mut crate::backend::whp::WhpBackend) };
+            backend.ioapic_set_irq(11, asserted);
         }));
     }
 
@@ -1897,7 +1988,20 @@ pub extern "C" fn corevm_ioapic_pin_state(handle: u64, pin: u32) -> u64 {
             Err(_) => u64::MAX,
         }
     }
-    #[cfg(not(feature = "linux"))]
+    #[cfg(feature = "windows")]
+    {
+        match get_vm(handle) {
+            Some(vm) => {
+                if (pin as usize) < 24 {
+                    vm.backend.ioapic.redir_entry(pin as u8)
+                } else {
+                    u64::MAX
+                }
+            }
+            None => u64::MAX,
+        }
+    }
+    #[cfg(not(any(feature = "linux", feature = "windows")))]
     {
         let _ = (handle, pin);
         u64::MAX

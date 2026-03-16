@@ -324,9 +324,11 @@ impl Vm {
 
         // I/O APIC and Local APIC MMIO.
         // On Linux/KVM with KVM_CREATE_IRQCHIP, these are handled in-kernel.
-        // Registering userspace handlers would intercept accesses and prevent
-        // the in-kernel IRQCHIP from working (no timer interrupts, etc.).
-        #[cfg(not(feature = "linux"))]
+        // On Windows/WHP with XApic mode, the LAPIC is handled by WHP internally
+        // (no MMIO exits at 0xFEE00000) and the IOAPIC is handled by the
+        // SoftIoapic in the WHP backend (intercepted in run_vcpu before reaching
+        // the memory bus). So these standalone handlers are only needed for anyOS.
+        #[cfg(all(not(feature = "linux"), not(feature = "windows")))]
         {
             self.memory.add_mmio(0xFEC0_0000, 0x1000, Box::new(IoApic::new()));
             self.memory.add_mmio(0xFEE0_0000, 0x1000, Box::new(Lapic::new()));
@@ -351,7 +353,13 @@ impl Vm {
     ///
     /// Must be called AFTER `setup_standard_devices()` (which creates the
     /// SVGA device).
-    #[cfg(feature = "linux")]
+    /// Map the VGA linear framebuffer as a hypervisor memory region for fast
+    /// direct guest access. Without this, every guest write to the VGA LFB
+    /// generates an MMIO exit which is extremely slow.
+    ///
+    /// Must be called AFTER `setup_standard_devices()` (which creates the
+    /// SVGA device).
+    #[cfg(any(feature = "linux", feature = "windows"))]
     pub fn setup_vga_lfb_mapping(&mut self) -> Result<(), VmError> {
         if self.svga_ptr.is_null() {
             return Ok(());

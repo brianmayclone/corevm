@@ -695,6 +695,15 @@ impl SoftIoapic {
         core::mem::take(&mut self.pending)
     }
 
+    /// Return the raw redirection table entry for a given pin.
+    pub fn redir_entry(&self, pin: u8) -> u64 {
+        if (pin as usize) < IOAPIC_NUM_PINS {
+            self.redir[pin as usize]
+        } else {
+            0
+        }
+    }
+
     /// EOI broadcast from LAPIC — clear Remote IRR on matching entries.
     pub fn eoi_vector(&mut self, vector: u8) {
         for i in 0..IOAPIC_NUM_PINS {
@@ -713,7 +722,7 @@ pub struct WhpBackend {
     memory_slots: Vec<MemorySlot>,
     api: WhpApi,
     pub lapic: SoftLapic,
-    ioapic: SoftIoapic,
+    pub ioapic: SoftIoapic,
     /// Pending MMIO read response: (value, dest_reg).
     /// Set by the FFI handler after dispatching to the device.
     /// Applied at the top of run_vcpu before re-entering the guest.
@@ -790,8 +799,10 @@ impl WhpBackend {
                 return Err(VmError::BackendErrorCtx(hr, "WHvCreatePartition"));
             }
 
-            // Set processor count = 1
-            let count: u32 = 1;
+            // Set max processor count. WHP requires this at partition setup time,
+            // before any vCPUs are created. We set the max here; the actual number
+            // of vCPUs created later can be less than this.
+            let count: u32 = 32;
             let hr = (api.set_property)(
                 partition,
                 WHV_PROPERTY_PROCESSOR_COUNT,
@@ -1174,15 +1185,52 @@ impl WhpBackend {
 }
 
 impl WhpBackend {
-    /// Deliver pending IOAPIC interrupts via direct PendingEvent ExtInt injection.
-    /// WHvRequestInterrupt returns success but WHP's internal LAPIC never delivers,
-    /// so we bypass it entirely and inject the same way as PIC interrupts.
-    /// PendingEvent can only hold one event, so we inject the first and re-queue the rest.
+    /// Try to deliver a level-triggered IOAPIC interrupt via WHvRequestInterrupt.
+    /// WHvRequestInterrupt properly sets TMR in WHP's internal LAPIC so that APIC
+    /// EOI exits fire for level-triggered interrupts (needed to clear Remote IRR).
+    /// Returns true if WHvRequestInterrupt succeeded (interrupt queued in LAPIC).
+    fn try_request_interrupt(&mut self, intr: &IoapicInterrupt) -> bool {
+        if let Some(request_fn) = self.api.request_interrupt {
+            let ctrl = WhvInterruptControl {
+                type_and_flags: (intr.delivery as u64)
+                    | ((intr.dest_mode as u64) << 8)
+                    | ((intr.trigger as u64) << 12),
+                destination: intr.dest as u32,
+                vector: intr.vector as u32,
+            };
+            let hr = request_fn(
+                self.partition,
+                &ctrl as *const WhvInterruptControl as *const u8,
+                core::mem::size_of::<WhvInterruptControl>() as u32,
+            );
+            if hr >= 0 {
+                return true;
+            }
+            static REQ_FAIL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            let cnt = REQ_FAIL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if cnt < 20 {
+                whp_debug(format_args!("WHvRequestInterrupt failed hr={:#x} vec={} trig={}",
+                    hr, intr.vector, intr.trigger));
+            }
+        }
+        false
+    }
+
+    /// Deliver pending IOAPIC interrupts via PendingEvent ExtInt injection.
+    ///
+    /// Strategy:
+    /// - **Edge-triggered**: Always use PendingEvent ExtInt (proven to work).
+    /// - **Level-triggered**: Try WHvRequestInterrupt first (sets TMR bit in
+    ///   WHP's internal LAPIC → APIC EOI exits fire → Remote IRR gets cleared).
+    ///   Fall back to PendingEvent ExtInt + manual EOI tracking if unavailable.
+    ///
+    /// PendingEvent can only hold one event at a time, so we inject the first
+    /// and re-queue the rest for the next interrupt window.
     fn deliver_ioapic_pending(&mut self) {
         let pending = self.ioapic.take_pending();
         if pending.is_empty() { return; }
 
-        // Check RFLAGS.IF — can only inject if interrupts are enabled
+        // Check RFLAGS.IF — can only inject ExtInt if interrupts are enabled
         let mut rflags_val = [WHV_REGISTER_VALUE::default()];
         let if_set = if self.get_regs_raw(0, &[REG_RFLAGS], &mut rflags_val).is_ok() {
             (unsafe { rflags_val[0].reg64 } & 0x200) != 0
@@ -1199,29 +1247,111 @@ impl WhpBackend {
             return;
         }
 
-        // Inject the first one via PendingEvent ExtInt (same as PIC path)
-        let first = &pending[0];
-        {
-            static IOAPIC_INTR_CTR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-            let cnt = IOAPIC_INTR_CTR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            if cnt < 50 {
-                whp_debug(format_args!("IOAPIC direct inject: vec={} dest={} dm={} trig={} del={}",
-                    first.vector, first.dest, first.dest_mode, first.trigger, first.delivery));
+        // For level-triggered interrupts, try WHvRequestInterrupt first.
+        // WHvRequestInterrupt properly sets TMR in the LAPIC so EOI exits work,
+        // but it may not actually deliver in all cases (WHP quirk).
+        // For edge-triggered, always use PendingEvent ExtInt which reliably delivers.
+        let mut ext_int_injected = false;
+        let mut need_window = false;
+
+        for intr in &pending {
+            {
+                static IOAPIC_INTR_CTR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                let cnt = IOAPIC_INTR_CTR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if cnt < 50 {
+                    whp_debug(format_args!("IOAPIC deliver: vec={} dest={} dm={} trig={} del={}",
+                        intr.vector, intr.dest, intr.dest_mode, intr.trigger, intr.delivery));
+                }
+            }
+
+            if intr.trigger == 1 {
+                // Level-triggered: try WHvRequestInterrupt for proper TMR handling.
+                // If it works, WHP will generate APIC_EOI exits to clear Remote IRR.
+                // If it fails, fall back to PendingEvent ExtInt.
+                if self.try_request_interrupt(intr) {
+                    continue; // Successfully queued in LAPIC
+                }
+                // Fall through to PendingEvent ExtInt
+            }
+
+            // Edge-triggered, or level-triggered fallback: use PendingEvent ExtInt.
+            // PendingEvent can only hold one, so inject the first and re-queue rest.
+            if !ext_int_injected {
+                let _ = self.inject_interrupt(0, intr.vector);
+                ext_int_injected = true;
+            } else {
+                self.ioapic.pending.push(*intr);
+                need_window = true;
             }
         }
-        let _ = self.inject_interrupt(0, first.vector);
 
-        // Re-queue remaining interrupts
-        if pending.len() > 1 {
-            for intr in &pending[1..] {
-                self.ioapic.pending.push(intr.clone());
-            }
-            // Request interrupt window so we get called again for the rest
+        if need_window {
             let _ = self.request_interrupt_window(0, true);
         }
     }
 
-    /// Route a device IRQ through the IOAPIC and deliver via WHvRequestInterrupt.
+    /// Inject an MSI (Message Signaled Interrupt) via WHvRequestInterrupt.
+    /// Decodes the MSI address/data into vector, destination, trigger mode.
+    /// Returns Ok(()) on success, Err if WHvRequestInterrupt is unavailable.
+    pub fn signal_msi(&mut self, address: u64, data: u32) -> Result<(), VmError> {
+        let request_fn = self.api.request_interrupt.ok_or(VmError::NoHardwareSupport)?;
+
+        // MSI address format (Intel SDM Vol 3, 10.11.1):
+        //   bits 31:20 = 0xFEE (fixed prefix)
+        //   bits 19:12 = Destination ID
+        //   bit 3      = Redirection Hint (RH)
+        //   bit 2      = Destination Mode (DM): 0=Physical, 1=Logical
+        // MSI data format:
+        //   bits 7:0   = Vector
+        //   bits 10:8  = Delivery Mode (0=Fixed, 1=LowestPri)
+        //   bit 14     = Level (for level-triggered)
+        //   bit 15     = Trigger Mode (0=Edge, 1=Level)
+        let dest = ((address >> 12) & 0xFF) as u8;
+        let dest_mode = if (address & (1 << 2)) != 0 { 1u64 } else { 0u64 };
+        let vector = (data & 0xFF) as u32;
+        let delivery = ((data >> 8) & 0x7) as u64;
+        let trigger = if (data & (1 << 15)) != 0 { 1u64 } else { 0u64 };
+
+        let ctrl = WhvInterruptControl {
+            type_and_flags: delivery | (dest_mode << 8) | (trigger << 12),
+            destination: dest as u32,
+            vector,
+        };
+
+        let hr = request_fn(
+            self.partition,
+            &ctrl as *const WhvInterruptControl as *const u8,
+            core::mem::size_of::<WhvInterruptControl>() as u32,
+        );
+        if hr >= 0 {
+            Ok(())
+        } else {
+            whp_debug(format_args!("signal_msi failed hr={:#x} addr={:#x} data={:#x}", hr, address, data));
+            Err(VmError::BackendError(hr))
+        }
+    }
+
+    /// Emulate KVM's set_irq_line: route an IRQ through both PIC and IOAPIC.
+    /// On KVM, KVM_IRQ_LINE signals the in-kernel irqchip which routes to both
+    /// PIC and IOAPIC. On WHP, we must do this manually.
+    pub fn set_irq_line(&mut self, irq: u32, level: bool) -> Result<(), VmError> {
+        // Route through IOAPIC
+        if (irq as usize) < 24 {
+            // IRQ 0 is remapped to IOAPIC pin 2 in the MADT (ISA IRQ override)
+            let ioapic_pin = if irq == 0 { 2 } else { irq as u8 };
+            self.ioapic.set_irq(ioapic_pin, level);
+            self.deliver_ioapic_pending();
+        }
+        Ok(())
+    }
+
+    /// Put an AP vCPU into HLT state (wait for SIPI).
+    pub fn set_ap_halted(&mut self, id: u32) {
+        // Set InternalActivityState bit 1 (HaltSuspend) so the AP waits
+        let _ = self.set_regs_raw(id, &[REG_INTERNAL_ACTIVITY_STATE], &[WHV_REGISTER_VALUE::from_u64(2)]);
+    }
+
+    /// Route a device IRQ through the IOAPIC and deliver.
     pub fn ioapic_set_irq(&mut self, pin: u8, level: bool) {
         self.ioapic.set_irq(pin, level);
         self.deliver_ioapic_pending();
@@ -1238,7 +1368,10 @@ impl VmBackend for WhpBackend {
     }
 
     fn reset(&mut self) -> Result<(), VmError> {
-        // WHP has no direct reset; caller recreates partition
+        // Reset software-emulated LAPIC and IOAPIC state
+        self.lapic = SoftLapic::new();
+        self.ioapic = SoftIoapic::new();
+        self.pending_mmio_read = None;
         Ok(())
     }
 
