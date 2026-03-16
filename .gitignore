@@ -1,0 +1,17 @@
+# Build artifacts
+target/
+Cargo.lock
+
+# BIOS build output (binary, generated from .asm sources)
+libs/libcorevm/bios/bios
+libs/libcorevm/bios/listing.txt
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

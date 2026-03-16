@@ -1,0 +1,11 @@
+[workspace]
+members = [
+  "apps/vmctl",
+  "apps/vmmanager",
+  "tests/hosttests",
+]
+exclude = [
+  # libcorevm has its own workspace (no_std / multi-target)
+  "libs/*",
+]
+resolver = "2"

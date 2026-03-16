@@ -1,0 +1,26 @@
+[package]
+name = "libcorevm"
+version = "0.1.0"
+edition = "2021"
+description = "CoreVM — pure-software x86 virtual machine engine"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[features]
+default = ["anyos"]
+anyos = ["libheap", "libsyscall"]
+host_test = []
+linux = ["std", "libc"]
+windows = ["std"]
+std = []
+
+[dependencies]
+# anyOS-only dependencies (only needed when building for the anyOS target).
+# Default paths point to local stubs so the crate compiles standalone.
+# When used as a submodule inside anyOS, the build system invokes cargo with
+# --manifest-path pointing at this crate directly, and the anyOS CMake build
+# uses [patch] or Cargo's path override to resolve the real implementations.
+libheap = { path = "../stubs/libheap", optional = true }
+libsyscall = { path = "../stubs/libsyscall", optional = true }
+libc = { version = "0.2", optional = true }
