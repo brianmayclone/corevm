@@ -570,28 +570,41 @@ impl SettingsDialog {
                     .map(|f| f.to_string_lossy().to_string())
                     .unwrap_or_else(|| disk.clone());
 
-                let size_str = std::path::Path::new(disk)
-                    .metadata()
-                    .map(|m| format_disk_size(m.len()))
-                    .unwrap_or_else(|_| "?".into());
+                let disk_path = std::path::Path::new(disk);
+                let file_exists = disk_path.exists();
+                let size_str = if file_exists {
+                    disk_path.metadata()
+                        .map(|m| format_disk_size(m.len()))
+                        .unwrap_or_else(|_| "?".into())
+                } else {
+                    "File not found!".into()
+                };
+
+                let border_color = if file_exists { card_border } else { theme::ERROR_RED };
 
                 egui::Frame::new()
                     .fill(card_bg)
-                    .stroke(egui::Stroke::new(0.5, card_border))
+                    .stroke(egui::Stroke::new(if file_exists { 0.5 } else { 1.5 }, border_color))
                     .corner_radius(egui::CornerRadius::same(6))
                     .inner_margin(egui::Margin::symmetric(12, 8))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             // Disk icon + name
-                            ui.colored_label(theme::ACCENT_BLUE, egui::RichText::new("\u{1F4BE}").size(18.0));
+                            let icon_color = if file_exists { theme::ACCENT_BLUE } else { theme::ERROR_RED };
+                            ui.colored_label(icon_color, egui::RichText::new("\u{1F4BE}").size(18.0));
                             ui.add_space(4.0);
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new(&filename)
                                     .color(egui::Color32::from_rgb(210, 210, 215))
                                     .strong());
                                 ui.horizontal(|ui| {
+                                    let info_color = if file_exists {
+                                        egui::Color32::from_rgb(120, 120, 125)
+                                    } else {
+                                        theme::ERROR_RED
+                                    };
                                     ui.colored_label(
-                                        egui::Color32::from_rgb(120, 120, 125),
+                                        info_color,
                                         egui::RichText::new(format!("AHCI Port {} | {}", if i == 0 { 0 } else { i + 1 }, size_str)).small(),
                                     );
                                 });
@@ -599,6 +612,12 @@ impl SettingsDialog {
                                     egui::Color32::from_rgb(100, 100, 105),
                                     egui::RichText::new(disk).small(),
                                 );
+                                if !file_exists {
+                                    ui.colored_label(
+                                        theme::ERROR_RED,
+                                        egui::RichText::new("This disk image could not be found. Remove or re-create it.").small(),
+                                    );
+                                }
                             });
 
                             // Buttons (right-aligned)
@@ -606,7 +625,7 @@ impl SettingsDialog {
                                 if ui.small_button("Remove").clicked() {
                                     remove_idx = Some(i);
                                 }
-                                if ui.small_button("Reset").clicked() {
+                                if ui.add_enabled(file_exists, egui::Button::new("Reset").small()).clicked() {
                                     reset_confirm_idx = Some(i);
                                 }
                             });
@@ -754,6 +773,29 @@ impl SettingsDialog {
         });
 
         if !config.iso_image.is_empty() {
+            let iso_exists = std::path::Path::new(&config.iso_image).exists();
+            let iso_valid = iso_exists && config.iso_image.to_lowercase().ends_with(".iso");
+
+            if !iso_exists {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(LABEL_WIDTH + 8.0);
+                    ui.colored_label(
+                        theme::ERROR_RED,
+                        "ISO file not found! Eject or select a different image.",
+                    );
+                });
+            } else if !iso_valid {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(LABEL_WIDTH + 8.0);
+                    ui.colored_label(
+                        theme::WARNING_ORANGE,
+                        "File does not have a .iso extension. CD images must be .iso files.",
+                    );
+                });
+            }
+
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.add_space(LABEL_WIDTH + 8.0);

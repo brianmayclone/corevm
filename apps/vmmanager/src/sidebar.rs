@@ -196,6 +196,7 @@ fn render_vm_entry(
     vm_names: &HashMap<String, String>,
     vm_states: &HashMap<String, VmState>,
     vm_icons: &HashMap<String, &'static str>,
+    vm_errors: &HashMap<String, Vec<String>>,
     selected: &mut Option<String>,
     drag_vm: &mut Option<String>,
     actions: &mut Vec<SidebarAction>,
@@ -207,7 +208,13 @@ fn render_vm_entry(
         .map(|s| s.as_str())
         .unwrap_or("Unknown VM");
     let state = vm_states.get(uuid).copied().unwrap_or(VmState::Stopped);
-    let color = state_color(state);
+    let errors = vm_errors.get(uuid);
+    let has_errors = errors.map_or(false, |e| !e.is_empty());
+    let color = if has_errors {
+        Color32::from_rgb(255, 59, 48) // red
+    } else {
+        state_color(state)
+    };
 
     let inner_resp = ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
@@ -215,6 +222,17 @@ fn render_vm_entry(
         let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
         let center = dot_rect.center() + egui::vec2(0.0, 2.0);
         ui.painter().circle_filled(center, 4.0, color);
+
+        // Error icon with tooltip
+        if has_errors {
+            let err_resp = ui.colored_label(
+                Color32::from_rgb(255, 59, 48),
+                egui::RichText::new("\u{26A0}").size(13.0), // ⚠
+            );
+            let tooltip_text = errors.unwrap().join("\n");
+            err_resp.on_hover_text(tooltip_text);
+        }
+
         let icon = vm_icons.get(uuid).copied().unwrap_or("\u{1F5A5}");
         ui.selectable_value(selected, Some(uuid.to_string()), format!("{} {}", icon, name))
     }).inner;
@@ -286,6 +304,7 @@ pub fn render_sidebar(
     vm_names: &HashMap<String, String>,
     vm_states: &HashMap<String, VmState>,
     vm_icons: &HashMap<String, &'static str>,
+    vm_errors: &HashMap<String, Vec<String>>,
     selected: &mut Option<String>,
     sidebar_state: &mut SidebarState,
 ) -> Vec<SidebarAction> {
@@ -397,7 +416,7 @@ pub fn render_sidebar(
                         let vm_uuids: Vec<String> = layout.folders[fi].vm_uuids.clone();
                         for uuid in &vm_uuids {
                             render_vm_entry(
-                                ui, uuid, vm_names, vm_states, vm_icons, selected,
+                                ui, uuid, vm_names, vm_states, vm_icons, vm_errors, selected,
                                 &mut drag_vm, &mut actions, &folder_names, Some(fi),
                             );
                         }
@@ -452,7 +471,7 @@ pub fn render_sidebar(
                 let root_uuids = layout.root_vms.clone();
                 for uuid in &root_uuids {
                     render_vm_entry(
-                        ui, uuid, vm_names, vm_states, vm_icons, selected,
+                        ui, uuid, vm_names, vm_states, vm_icons, vm_errors, selected,
                         &mut drag_vm, &mut actions, &folder_names, None,
                     );
                 }

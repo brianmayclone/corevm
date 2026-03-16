@@ -67,6 +67,29 @@ impl VmConfig {
     pub fn primary_disk(&self) -> &str {
         self.disk_images.first().map(|s| s.as_str()).unwrap_or("")
     }
+
+    /// Validate the VM configuration. Returns a list of error messages.
+    /// An empty list means the VM is ready to start.
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        for (i, disk) in self.disk_images.iter().enumerate() {
+            if !disk.is_empty() && !Path::new(disk).exists() {
+                let filename = Path::new(disk)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| disk.clone());
+                errors.push(format!("Disk {}: \"{}\" not found", i, filename));
+            }
+        }
+        if !self.iso_image.is_empty() && !Path::new(&self.iso_image).exists() {
+            let filename = Path::new(&self.iso_image)
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_else(|| self.iso_image.clone());
+            errors.push(format!("ISO: \"{}\" not found", filename));
+        }
+        errors
+    }
 }
 
 impl Default for VmConfig {

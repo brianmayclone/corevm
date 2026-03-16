@@ -53,10 +53,13 @@ pub struct VmEntry {
     pub vm_thread: Option<JoinHandle<()>>,
     pub cpu_mode: u32,  // 0=real, 1=protected, 2=long
     pub diag_log: DiagLog,
+    /// Validation errors (missing disks, etc.). Non-empty = VM cannot start.
+    pub errors: Vec<String>,
 }
 
 impl VmEntry {
     pub fn new(config: VmConfig) -> Self {
+        let errors = config.validate();
         Self {
             config,
             state: VmState::Stopped,
@@ -66,7 +69,13 @@ impl VmEntry {
             vm_thread: None,
             cpu_mode: 0,
             diag_log: DiagLog::new(),
+            errors,
         }
+    }
+
+    /// Re-run validation (e.g. after settings change).
+    pub fn revalidate(&mut self) {
+        self.errors = self.config.validate();
     }
 }
 
@@ -160,6 +169,10 @@ impl CoreVmApp {
         self.vms.iter().map(|v| (v.config.uuid.clone(), v.state)).collect()
     }
 
+    fn vm_errors(&self) -> HashMap<String, Vec<String>> {
+        self.vms.iter().map(|v| (v.config.uuid.clone(), v.errors.clone())).collect()
+    }
+
     fn vm_icons(&self) -> HashMap<String, &'static str> {
         self.vms.iter().map(|v| {
             let icon = if v.config.guest_os.is_windows() {
@@ -189,6 +202,13 @@ impl CoreVmApp {
                     let mut usb_tablet = false;
                     let mut diag_name = String::new();
                     if let Some(entry) = self.find_vm_mut(&uuid) {
+                        // Re-validate before start
+                        entry.revalidate();
+                        if !entry.errors.is_empty() {
+                            self.error_message = Some(format!(
+                                "Cannot start VM: {}", entry.errors.join(", ")
+                            ));
+                        } else {
                         usb_tablet = entry.config.usb_tablet;
                         if let Err(e) = vm::start_vm(entry) {
                             self.error_message = Some(format!("Failed to start VM: {}", e));
@@ -197,6 +217,7 @@ impl CoreVmApp {
                             if entry.config.diagnostics {
                                 diag_name = entry.config.name.clone();
                             }
+                        }
                         }
                     }
                     if started_ok {
@@ -559,8 +580,9 @@ impl eframe::App for CoreVmApp {
         let names = self.vm_names();
         let states = self.vm_states();
         let icons = self.vm_icons();
+        let errors = self.vm_errors();
         let sidebar_actions = sidebar::render_sidebar(
-            ctx, &mut self.layout, &names, &states, &icons,
+            ctx, &mut self.layout, &names, &states, &icons, &errors,
             &mut self.selected_vm, &mut self.sidebar_state,
         );
 
@@ -731,6 +753,7 @@ impl eframe::App for CoreVmApp {
                         if let Some(entry) = self.find_vm_mut(uuid) {
                             entry.config = config.clone();
                             let _ = config.save(&platform::config_dir());
+                            entry.revalidate();
                         }
                     }
                 }
