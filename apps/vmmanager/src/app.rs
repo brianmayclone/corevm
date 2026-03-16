@@ -446,7 +446,11 @@ impl eframe::App for CoreVmApp {
                                 ui.close_menu();
                             }
                             if ui.button("Create Disk...").clicked() {
-                                self.create_disk_dialog = Some(CreateDiskDialog::new());
+                                let vm_name = self.selected_vm.as_ref()
+                                    .and_then(|uuid| self.find_vm(uuid))
+                                    .map(|v| v.config.name.clone())
+                                    .unwrap_or_default();
+                                self.create_disk_dialog = Some(CreateDiskDialog::with_vm_name(&vm_name));
                                 ui.close_menu();
                             }
                             if ui.button("Disk Pool...").clicked() {
@@ -740,8 +744,12 @@ impl eframe::App for CoreVmApp {
                     self.file_browser = Some(FileBrowserDialog::new_open("Select ISO Image", &["iso"]));
                 }
                 FilePickTarget::AddDisk => {
-                    // Open AddDiskDialog instead of file browser
-                    self.add_disk_dialog = Some(AddDiskDialog::new());
+                    // Open AddDiskDialog with VM context for auto-naming
+                    let vm_name = self.selected_vm.as_ref()
+                        .and_then(|uuid| self.find_vm(uuid))
+                        .map(|v| v.config.name.clone())
+                        .unwrap_or_default();
+                    self.add_disk_dialog = Some(AddDiskDialog::with_vm_name(&vm_name));
                     self.file_pick_target = None;
                 }
                 _ => {}

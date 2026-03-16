@@ -1,12 +1,15 @@
 use eframe::egui;
 use crate::config::VmConfig;
 use crate::dialogs::{labeled_row, button_row, FIELD_MIN_WIDTH};
+use crate::platform;
+use crate::theme;
 
 pub struct CreateVmDialog {
     name: String,
     ram_mb: u32,
     pub open: bool,
     pub created: Option<VmConfig>,
+    error: Option<String>,
 }
 
 impl CreateVmDialog {
@@ -16,6 +19,7 @@ impl CreateVmDialog {
             ram_mb: 256,
             open: true,
             created: None,
+            error: None,
         }
     }
 
@@ -48,15 +52,42 @@ impl CreateVmDialog {
                         });
                 });
 
+                // Show the directory that will be created
+                let vm_dir = platform::vm_dir(&self.name);
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("Directory:");
+                    ui.label(egui::RichText::new(vm_dir.to_string_lossy().as_ref())
+                        .monospace()
+                        .color(egui::Color32::from_rgb(130, 130, 135)));
+                });
+
+                if let Some(err) = &self.error {
+                    ui.colored_label(theme::ERROR_RED, err);
+                }
+
                 ui.separator();
 
                 let (ok, cancel) = button_row(ui, "Create");
                 if ok {
-                    let mut config = VmConfig::default();
-                    config.name = self.name.clone();
-                    config.ram_mb = self.ram_mb;
-                    self.created = Some(config);
-                    button_close = true;
+                    let name = self.name.trim().to_string();
+                    if name.is_empty() {
+                        self.error = Some("Please enter a VM name.".into());
+                    } else {
+                        // Create the VM machine directory
+                        match platform::ensure_vm_dir(&name) {
+                            Ok(_dir) => {
+                                let mut config = VmConfig::default();
+                                config.name = name;
+                                config.ram_mb = self.ram_mb;
+                                self.created = Some(config);
+                                button_close = true;
+                            }
+                            Err(e) => {
+                                self.error = Some(format!("Failed to create VM directory: {}", e));
+                            }
+                        }
+                    }
                 }
                 if cancel {
                     button_close = true;

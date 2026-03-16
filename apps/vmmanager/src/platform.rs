@@ -148,8 +148,59 @@ fn host_ram_mb() -> u64 {
     { 4096 }
 }
 
-/// Ensure the config and disk pool directories exist.
+/// Returns the base directory where per-VM machine directories are stored.
+pub fn machines_base_dir() -> PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        PathBuf::from(home).join("corevm-machines")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let home = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".into());
+        PathBuf::from(home).join("corevm-machines")
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        PathBuf::from("./corevm-machines")
+    }
+}
+
+/// Returns the directory for a specific VM (by name).
+/// E.g. `$HOME/corevm-machines/MyVM/`
+pub fn vm_dir(vm_name: &str) -> PathBuf {
+    machines_base_dir().join(vm_name)
+}
+
+/// Create the per-VM machine directory, returns its path.
+pub fn ensure_vm_dir(vm_name: &str) -> std::io::Result<PathBuf> {
+    let dir = vm_dir(vm_name);
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Generate the next available disk image name for a VM.
+/// Returns a path like `$HOME/corevm-machines/MyVM/myvm-disk-0.img`.
+/// Also ensures the VM directory exists.
+pub fn next_disk_name(vm_name: &str) -> PathBuf {
+    let dir = vm_dir(vm_name);
+    let _ = std::fs::create_dir_all(&dir);
+    let base = vm_name.to_lowercase().replace(' ', "-");
+    for i in 0u32..=20 {
+        let name = format!("{}-disk-{}.img", base, i);
+        let path = dir.join(&name);
+        if !path.exists() {
+            return path;
+        }
+    }
+    // Fallback: use a uuid-based name
+    let name = format!("{}-disk-{}.img", base, uuid::Uuid::new_v4().to_string().replace("-", ""));
+    dir.join(name)
+}
+
+/// Ensure the config, disk pool, and machines base directories exist.
 pub fn ensure_dirs() {
     let _ = std::fs::create_dir_all(config_dir());
     let _ = std::fs::create_dir_all(disk_pool_dir());
+    let _ = std::fs::create_dir_all(machines_base_dir());
 }

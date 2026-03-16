@@ -20,6 +20,7 @@ pub struct AddDiskDialog {
     pub result_path: Option<String>,
     pub error: Option<String>,
     importing: bool,
+    vm_name: String,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -27,9 +28,19 @@ enum SizeUnit { MB, GB, TB }
 
 impl AddDiskDialog {
     pub fn new() -> Self {
+        Self::with_vm_name("")
+    }
+
+    pub fn with_vm_name(vm_name: &str) -> Self {
+        let auto_path = if !vm_name.is_empty() {
+            let next = crate::platform::next_disk_name(vm_name);
+            next.to_string_lossy().to_string()
+        } else {
+            String::new()
+        };
         Self {
-            mode: AddDiskMode::LoadExisting,
-            path: String::new(),
+            mode: AddDiskMode::CreateNew,
+            path: auto_path,
             size_mb: 8192,
             custom_size: String::new(),
             custom_unit: SizeUnit::GB,
@@ -38,6 +49,7 @@ impl AddDiskDialog {
             result_path: None,
             error: None,
             importing: false,
+            vm_name: vm_name.to_string(),
         }
     }
 
@@ -214,6 +226,19 @@ impl AddDiskDialog {
                 }
             }
             AddDiskMode::CreateNew => {
+                // If only a filename (no directory), place it in the VM directory
+                let p = std::path::Path::new(&self.path);
+                if p.parent().map_or(true, |par| par.as_os_str().is_empty()) && !self.vm_name.is_empty() {
+                    let vm_dir = crate::platform::vm_dir(&self.vm_name);
+                    let _ = std::fs::create_dir_all(&vm_dir);
+                    self.path = vm_dir.join(&self.path).to_string_lossy().to_string();
+                }
+                // Ensure .img extension
+                self.path = ensure_img_extension(&self.path);
+                // Ensure parent directory exists
+                if let Some(parent) = std::path::Path::new(&self.path).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
                 let actual_mb = if self.use_custom_size {
                     match self.custom_size.trim().parse::<u64>() {
                         Ok(val) if val > 0 => match self.custom_unit {
@@ -243,6 +268,17 @@ impl AddDiskDialog {
                 }
             }
         }
+    }
+}
+
+/// Ensure a disk image path ends with `.img`.
+fn ensure_img_extension(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    match p.extension() {
+        Some(ext) if ext.eq_ignore_ascii_case("img") || ext.eq_ignore_ascii_case("raw") => {
+            path.to_string()
+        }
+        _ => format!("{}.img", path),
     }
 }
 

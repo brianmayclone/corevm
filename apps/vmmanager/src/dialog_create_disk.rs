@@ -14,12 +14,23 @@ pub struct CreateDiskDialog {
     pub open: bool,
     pub created: bool,
     pub error: Option<String>,
+    vm_name: String,
 }
 
 impl CreateDiskDialog {
     pub fn new() -> Self {
+        Self::with_vm_name("")
+    }
+
+    pub fn with_vm_name(vm_name: &str) -> Self {
+        let auto_path = if !vm_name.is_empty() {
+            let next = crate::platform::next_disk_name(vm_name);
+            next.to_string_lossy().to_string()
+        } else {
+            String::new()
+        };
         Self {
-            path: String::new(),
+            path: auto_path,
             size_mb: 1024,
             custom_size: String::new(),
             custom_unit: SizeUnit::GB,
@@ -27,6 +38,7 @@ impl CreateDiskDialog {
             open: true,
             created: false,
             error: None,
+            vm_name: vm_name.to_string(),
         }
     }
 
@@ -110,6 +122,19 @@ impl CreateDiskDialog {
                     if self.path.is_empty() {
                         self.error = Some("Please specify a file path.".into());
                     } else {
+                        // If only a filename (no directory), place it in the VM directory
+                        let p = std::path::Path::new(&self.path);
+                        if p.parent().map_or(true, |par| par.as_os_str().is_empty()) && !self.vm_name.is_empty() {
+                            let vm_dir = crate::platform::vm_dir(&self.vm_name);
+                            let _ = std::fs::create_dir_all(&vm_dir);
+                            self.path = vm_dir.join(&self.path).to_string_lossy().to_string();
+                        }
+                        // Ensure .img extension
+                        self.path = ensure_img_extension(&self.path);
+                        // Ensure parent directory exists
+                        if let Some(parent) = std::path::Path::new(&self.path).parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
                         match self.resolve_size_mb() {
                             Err(e) => { self.error = Some(e); }
                             Ok(actual_mb) => {
@@ -141,6 +166,17 @@ impl CreateDiskDialog {
             self.open = still_open;
         }
         browse
+    }
+}
+
+/// Ensure a disk image path ends with `.img`.
+fn ensure_img_extension(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    match p.extension() {
+        Some(ext) if ext.eq_ignore_ascii_case("img") || ext.eq_ignore_ascii_case("raw") => {
+            path.to_string()
+        }
+        _ => format!("{}.img", path),
     }
 }
 
