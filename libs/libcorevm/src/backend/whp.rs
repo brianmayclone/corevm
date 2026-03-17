@@ -1260,17 +1260,13 @@ impl WhpBackend {
     /// Deliver pending IOAPIC interrupts. When `force` is true, skip the
     /// RFLAGS.IF check — used from the InterruptWindow handler where WHP
     /// reports IF=0 despite the guest being interruptible (WHP quirk).
-    fn deliver_ioapic_pending_inner(&mut self, force: bool) {
+    fn deliver_ioapic_pending_inner(&mut self, _force: bool) {
         let pending = self.ioapic.take_pending();
         if pending.is_empty() { return; }
 
-        if !force {
-            if !self.exit_ctx_interrupt_ok {
-                for intr in pending { self.ioapic.pending.push(intr); }
-                let _ = self.request_interrupt_window(0, true);
-                return;
-            }
-        }
+        // WHvRequestInterrupt goes through the virtual LAPIC and handles
+        // IF checks internally, so we no longer need to gate on exit_ctx_interrupt_ok.
+        // The interrupt is buffered in the LAPIC's IRR until the guest enables IF.
 
         // For level-triggered interrupts, try WHvRequestInterrupt first.
         // WHvRequestInterrupt properly sets TMR in the LAPIC so EOI exits work,
@@ -1289,17 +1285,16 @@ impl WhpBackend {
                 }
             }
 
-            if intr.trigger == 1 {
-                // Level-triggered: try WHvRequestInterrupt for proper TMR handling.
-                // If it works, WHP will generate APIC_EOI exits to clear Remote IRR.
-                // If it fails, fall back to PendingEvent ExtInt.
-                if self.try_request_interrupt(intr) {
-                    continue; // Successfully queued in LAPIC
-                }
-                // Fall through to PendingEvent ExtInt
+            // Use WHvRequestInterrupt for ALL IOAPIC interrupts (edge and level).
+            // WHvRequestInterrupt goes through WHP's virtual LAPIC which handles
+            // IF checks internally — the interrupt is buffered in the LAPIC's IRR
+            // until the guest becomes interruptible.  This avoids the INVALID_VP_STATE
+            // crash that PendingEvent ExtInt causes when IF=0.
+            if self.try_request_interrupt(intr) {
+                continue; // Successfully queued in LAPIC
             }
 
-            // Edge-triggered, or level-triggered fallback: use PendingEvent ExtInt.
+            // Fallback: PendingEvent ExtInt (only if WHvRequestInterrupt unavailable).
             // PendingEvent can only hold one, so inject the first and re-queue rest.
             if !ext_int_injected {
                 let _ = self.inject_interrupt(0, intr.vector);
@@ -1545,16 +1540,30 @@ impl VmBackend for WhpBackend {
                 let can_inject = self.exit_ctx_interrupt_ok || self.ready_for_pic_interrupt;
 
                 if has_pending && can_inject {
-                    // Verify IF is really set via WHvGetVirtualProcessorRegisters.
-                    // The exit context IF may be stale from a previous exit.
-                    // PendingEvent ExtInt at IF=0 causes INVALID_VP_STATE.
-                    let mut rfl = [WHV_REGISTER_VALUE::default()];
-                    let real_if = if self.get_regs_raw(id, &[REG_RFLAGS], &mut rfl).is_ok() {
-                        (unsafe { rfl[0].reg64 } & 0x200) != 0
-                    } else { true };
+                    // When ready_for_pic_interrupt is set, the InterruptWindow exit
+                    // just fired — the guest IS interruptible by definition.  Do NOT
+                    // re-read RFLAGS: WHvGetVirtualProcessorRegisters returns stale
+                    // IF=0 on WHP (same quirk as the exit context), which would
+                    // cause an infinite InterruptWindow → re-request loop.
+                    // Only verify RFLAGS when relying on exit_ctx_interrupt_ok alone.
+                    let interruptible = if self.ready_for_pic_interrupt {
+                        true // InterruptWindow guarantees interruptibility
+                    } else {
+                        // exit_ctx_interrupt_ok from last exit — double-check via register read
+                        let mut rfl = [WHV_REGISTER_VALUE::default()];
+                        if self.get_regs_raw(id, &[REG_RFLAGS], &mut rfl).is_ok() {
+                            (unsafe { rfl[0].reg64 } & 0x200) != 0
+                        } else {
+                            true
+                        }
+                    };
 
-                    if real_if {
-                        // Guest is interruptible — inject now
+                    if interruptible {
+                        // Guest is interruptible — inject now.
+                        // Clear the one-shot flag BEFORE injection so it doesn't
+                        // persist across subsequent iterations where IF may be 0.
+                        self.ready_for_pic_interrupt = false;
+
                         if !self.ioapic.pending.is_empty() {
                             self.deliver_ioapic_pending_inner(true);
                         }
@@ -1573,7 +1582,6 @@ impl VmBackend for WhpBackend {
                                     }
                                 }
                                 self.pending_pic_inject = None;
-                                self.ready_for_pic_interrupt = false;
                             }
                         }
                     } else {
