@@ -362,11 +362,12 @@ fn main() {
     // HPET timer polling, and AHCI IRQ polling when guest is in HLT/idle state).
     // 10ms when HPET is enabled (Windows needs timely HPET interrupts ~64 Hz),
     // 100ms otherwise (avoids excessive VM exits for Linux guests).
-    // On WHP, need 10ms cancel interval for timely interrupt delivery
-    // (InterruptWindow exits require the vCPU to be kicked out of guest code).
+    // On WHP, need 1ms cancel interval because WHP returns unreliable
+    // RFLAGS in IO port exit contexts. Only CANCELED exits provide
+    // correct RFLAGS/ExecutionState, so we need them frequently.
     // On KVM, 100ms is sufficient since the in-kernel irqchip handles delivery.
     #[cfg(target_os = "windows")]
-    let cancel_interval_ms: u64 = 10;
+    let cancel_interval_ms: u64 = 1;
     #[cfg(not(target_os = "windows"))]
     let cancel_interval_ms: u64 = if args.enable_hpet { 10 } else { 100 };
     let cancel_handle = handle;

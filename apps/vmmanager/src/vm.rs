@@ -382,6 +382,13 @@ fn vm_run_loop(
         while !cancel_control.stop.load(Ordering::Relaxed)
             && !cancel_control.exited.load(Ordering::Relaxed)
         {
+            // WHP needs frequent cancel kicks (1ms) because IO port exits
+            // return zeroed RFLAGS in the exit context, so CANCELED exits
+            // are the primary source of correct interrupt-state information.
+            // KVM uses in-kernel irqchip, so 10ms is sufficient.
+            #[cfg(target_os = "windows")]
+            thread::sleep(Duration::from_millis(1));
+            #[cfg(not(target_os = "windows"))]
             thread::sleep(Duration::from_millis(10));
             for cpu_id in 0..cancel_num_cpus {
                 corevm_cancel_vcpu(cancel_handle, cpu_id);
