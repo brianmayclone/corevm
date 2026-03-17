@@ -801,62 +801,45 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
 
             // Software PIC injection (non-Linux only).
             // On KVM/Linux the in-kernel irqchip handles injection automatically.
-            // On WHP, skip if IOAPIC already wrote a PendingEvent — injecting a
-            // PIC vector would overwrite it with a different vector, breaking APIC
-            // mode interrupt routing (e.g. check_timer expects IOAPIC vector).
             #[cfg(not(feature = "linux"))]
             if !vm.pic_ptr.is_null() {
-                #[cfg(feature = "windows")]
-                let skip_pic = vm.backend.has_pending_event(0);
-                #[cfg(not(feature = "windows"))]
-                let skip_pic = false;
+                let pic = unsafe { &mut *vm.pic_ptr };
 
-                // On WHP, reading RFLAGS.IF at InterruptWindow exits returns 0
-                // despite the guest being interruptible (WHP quirk). Use the
-                // last_exit_interrupt_window flag to bypass the IF check in that
-                // case, so PIC interrupts get delivered during check_timer's
-                // PIC/ExtINT fallback path.
-                #[cfg(feature = "windows")]
-                let force_inject = vm.backend.last_exit_interrupt_window;
-                #[cfg(not(feature = "windows"))]
-                let force_inject = false;
-
-                let if_set = vm.get_vcpu_regs(0)
-                    .map(|r| r.rflags & 0x200 != 0)
-                    .unwrap_or(false);
-                let can_inject = !skip_pic && (force_inject || if_set);
-
-                // Debug: log PIC injection decisions (limited)
                 #[cfg(feature = "windows")]
                 {
-                    static PIC_DBG: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-                    let pic = unsafe { &*vm.pic_ptr };
-                    if pic.get_interrupt_vector().is_some() {
-                        let n = PIC_DBG.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                        if n < 100 || n % 500 == 0 {
-                            eprintln!("[pic] #{} skip={} force={} IF={} can={} pending_ev={}",
-                                n, skip_pic, force_inject, if_set, can_inject,
-                                vm.backend.has_pending_event(0));
+                    // QEMU WHPX approach: queue PIC vector for pre-run injection.
+                    // run_vcpu's inner loop injects via PendingInterruption when
+                    // the guest becomes interruptible (exit_ctx_interrupt_ok or
+                    // ready_for_pic_interrupt from InterruptWindow exit).
+                    if vm.backend.pending_pic_inject.is_none() {
+                        if let Some(vector) = pic.get_interrupt_vector() {
+                            let irq = pic.irq_for_vector(vector).unwrap_or(0);
+                            pic.lower_irq(irq);
+                            vm.backend.pending_pic_inject = Some(vector);
+                            injected += 1;
                         }
                     }
                 }
-
-                if can_inject {
-                    let pic = unsafe { &mut *vm.pic_ptr };
-                    if let Some(vector) = pic.get_interrupt_vector() {
-                        if vm.inject_interrupt(0, vector).is_ok() {
-                            let irq = pic.irq_for_vector(vector).unwrap_or(0);
-                            pic.lower_irq(irq);
-                            injected += 1;
-                            if pic.get_interrupt_vector().is_some() {
-                                let _ = vm.request_interrupt_window(0, true);
+                #[cfg(not(feature = "windows"))]
+                {
+                    let can_inject = vm.get_vcpu_regs(0)
+                        .map(|r| r.rflags & 0x200 != 0)
+                        .unwrap_or(false);
+                    if can_inject {
+                        if let Some(vector) = pic.get_interrupt_vector() {
+                            if vm.inject_interrupt(0, vector).is_ok() {
+                                let irq = pic.irq_for_vector(vector).unwrap_or(0);
+                                pic.lower_irq(irq);
+                                injected += 1;
+                                if pic.get_interrupt_vector().is_some() {
+                                    let _ = vm.request_interrupt_window(0, true);
+                                }
                             }
                         }
-                    }
-                } else if !skip_pic {
-                    let pic = unsafe { &*vm.pic_ptr };
-                    if pic.get_interrupt_vector().is_some() {
-                        let _ = vm.request_interrupt_window(0, true);
+                    } else {
+                        if pic.get_interrupt_vector().is_some() {
+                            let _ = vm.request_interrupt_window(0, true);
+                        }
                     }
                 }
             }

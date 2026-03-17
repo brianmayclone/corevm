@@ -732,11 +732,19 @@ pub struct WhpBackend {
     /// Set by the FFI handler after dispatching to the device.
     /// Applied at the top of run_vcpu before re-entering the guest.
     pending_mmio_read: Option<(u64, u8)>,
-    /// Set to true when the last vCPU exit was InterruptWindow.
-    /// Used by poll_irqs to bypass the RFLAGS.IF check for PIC injection,
-    /// because WHP reports IF=0 at InterruptWindow exits despite the guest
-    /// being interruptible (WHP quirk).
-    pub last_exit_interrupt_window: bool,
+    /// Cached interrupt state from the last vCPU exit context.
+    /// QEMU's WHPX reads these from the exit context (VpContext.ExecutionState),
+    /// NOT from WHvGetVirtualProcessorRegisters, which returns stale/wrong
+    /// RFLAGS.IF values at InterruptWindow exits (WHP quirk).
+    /// Set after every WHvRunVirtualProcessor return.
+    pub exit_ctx_interrupt_ok: bool,
+    /// Queued PIC interrupt vector for pre-run injection (QEMU approach).
+    /// Set by poll_irqs when a PIC vector is ready. Applied in run_vcpu's
+    /// inner loop before WHvRunVirtualProcessor when the guest is interruptible.
+    pub pending_pic_inject: Option<u8>,
+    /// Set when InterruptWindow exit fires — guest is ready for interrupt.
+    /// Like QEMU's `ready_for_pic_interrupt`.
+    pub ready_for_pic_interrupt: bool,
 }
 
 unsafe impl Send for WhpBackend {}
@@ -898,7 +906,9 @@ impl WhpBackend {
                 lapic: SoftLapic::new(),
                 ioapic: SoftIoapic::new(),
                 pending_mmio_read: None,
-                last_exit_interrupt_window: false,
+                exit_ctx_interrupt_ok: false,
+                pending_pic_inject: None,
+                ready_for_pic_interrupt: false,
             })
         }
     }
@@ -1249,19 +1259,13 @@ impl WhpBackend {
         if pending.is_empty() { return; }
 
         if !force {
-            // Check RFLAGS.IF — only inject if interrupts are enabled.
-            // PendingEvent ExtInt is delivered by WHP when IF=1, but setting
-            // it at the wrong time (e.g. before IDT is ready) can cause
-            // triple faults when the guest next enables interrupts.
-            let mut rflags_val = [WHV_REGISTER_VALUE::default()];
-            let if_set = if self.get_regs_raw(0, &[REG_RFLAGS], &mut rflags_val).is_ok() {
-                (unsafe { rflags_val[0].reg64 } & 0x200) != 0
-            } else {
-                false
-            };
-            if !if_set {
+            // If guest is not interruptible, re-queue for the next pre-run check.
+            // NOTE: We do NOT call request_interrupt_window because
+            // WHvRegisterDeliverabilityNotifications is not supported on this
+            // WHP version. Instead, the pre-run phase in run_vcpu polls
+            // exit_ctx_interrupt_ok on every iteration.
+            if !self.exit_ctx_interrupt_ok {
                 for intr in pending { self.ioapic.pending.push(intr); }
-                let _ = self.request_interrupt_window(0, true);
                 return;
             }
         }
@@ -1386,6 +1390,33 @@ impl WhpBackend {
             false
         }
     }
+
+    /// Inject an external interrupt via PendingInterruption (immediate delivery).
+    /// This is the QEMU approach for PIC interrupts without kernel-irqchip:
+    /// uses WHvRegisterPendingInterruption with InterruptionType=0 (External).
+    /// Caller MUST ensure exit_ctx_interrupt_ok is true (IF=1, no shadow, no pending).
+    pub fn inject_pic_interrupt(&mut self, id: u32, vector: u8) -> Result<(), VmError> {
+        // WHV_X64_PENDING_INTERRUPTION_REGISTER layout (u64):
+        //   bit 0:      InterruptionPending = 1
+        //   bits 1-3:   InterruptionType = 0 (WHvX64PendingInterrupt = external)
+        //   bit 4:      DeliverErrorCode = 0
+        //   bits 5-15:  Reserved = 0
+        //   bits 16-23: InterruptionVector
+        //   bits 24-63: Reserved = 0
+        let val: u64 = 1 | (0u64 << 1) | ((vector as u64) << 16);
+
+        // Clear HaltSuspend if the vCPU is in HLT
+        let mut activity = [WHV_REGISTER_VALUE::default()];
+        if self.get_regs_raw(id, &[REG_INTERNAL_ACTIVITY_STATE], &mut activity).is_ok() {
+            let state = unsafe { activity[0].reg64 };
+            if state & 2 != 0 {
+                let cleared = WHV_REGISTER_VALUE::from_u64(state & !2);
+                let _ = self.set_regs_raw(id, &[REG_INTERNAL_ACTIVITY_STATE], &[cleared]);
+            }
+        }
+
+        self.set_regs_raw(id, &[REG_PENDING_INTERRUPTION], &[WHV_REGISTER_VALUE::from_u64(val)])
+    }
 }
 
 impl VmBackend for WhpBackend {
@@ -1490,7 +1521,6 @@ impl VmBackend for WhpBackend {
         if FIRST.swap(false, core::sync::atomic::Ordering::Relaxed) {
             whp_debug(format_args!("run_vcpu entered for the first time"));
         }
-        self.last_exit_interrupt_window = false;
         let mut inner_loops = 0u32;
         loop {
             // Break out of inner loop periodically so the vmmanager can advance
@@ -1500,6 +1530,41 @@ impl VmBackend for WhpBackend {
             inner_loops += 1;
             if inner_loops > 64 {
                 return Ok(VmExitReason::InterruptWindow);
+            }
+
+            // === PRE-RUN: Inject pending interrupts when guest is interruptible ===
+            // WHvRegisterDeliverabilityNotifications (InterruptWindow) is NOT
+            // supported on this WHP version (returns WHV_E_UNKNOWN_REGISTER).
+            // Instead, we check exit_ctx_interrupt_ok on every pre-run iteration
+            // and inject both IOAPIC and PIC interrupts when the guest has IF=1.
+            {
+                let has_ioapic = !self.ioapic.pending.is_empty();
+                let has_pic = self.pending_pic_inject.is_some();
+                if self.exit_ctx_interrupt_ok && (has_ioapic || has_pic) {
+                    static PRE_INJ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                    let n = PRE_INJ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 30 || n % 1000 == 0 {
+                        eprintln!("[whp] PRE-RUN inject #{} ioapic={} pic={:?}", n, has_ioapic, self.pending_pic_inject);
+                    }
+                    // First: deliver any pending IOAPIC interrupts
+                    self.deliver_ioapic_pending_inner(true);
+
+                    // Then: inject queued PIC interrupt via PendingInterruption
+                    if let Some(vector) = self.pending_pic_inject {
+                        if !self.has_pending_event(id) {
+                            let val: u64 = 1 | ((vector as u64) << 16);
+                            let _ = self.set_regs_raw(id, &[REG_PENDING_INTERRUPTION],
+                                &[WHV_REGISTER_VALUE::from_u64(val)]);
+                            self.pending_pic_inject = None;
+                        }
+                    }
+                } else if (has_ioapic || has_pic) && !self.exit_ctx_interrupt_ok {
+                    static SKIP_INJ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                    let n = SKIP_INJ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 10 || n % 10000 == 0 {
+                        eprintln!("[whp] PRE-RUN skip #{} (exit_ok=false) ioapic={} pic={:?}", n, has_ioapic, self.pending_pic_inject);
+                    }
+                }
             }
 
             // Apply pending MMIO read response before re-entering the guest.
@@ -1537,6 +1602,25 @@ impl VmBackend for WhpBackend {
             let ctx = unsafe { exit_ctx.assume_init() };
             // Instruction length is lower 4 bits of vp_context[2] (upper 4 bits = Cr8)
             let instr_len = (ctx.vp_context[2] & 0x0F) as u64;
+
+            // Cache interrupt delivery state from the exit context (QEMU approach).
+            // ExecutionState is at vp_context[0..2] (u16 LE):
+            //   bit 6  = InterruptionPending
+            //   bit 12 = InterruptShadow
+            // RFLAGS is at vp_context[32..40] (u64 LE), IF = bit 9.
+            {
+                let exec_state = u16::from_le_bytes([ctx.vp_context[0], ctx.vp_context[1]]);
+                let interruption_pending = (exec_state >> 6) & 1 != 0;
+                let interrupt_shadow = (exec_state >> 12) & 1 != 0;
+                let rflags = u64::from_le_bytes([
+                    ctx.vp_context[32], ctx.vp_context[33], ctx.vp_context[34], ctx.vp_context[35],
+                    ctx.vp_context[36], ctx.vp_context[37], ctx.vp_context[38], ctx.vp_context[39],
+                ]);
+                let if_set = (rflags & 0x200) != 0;
+                // Guest can accept an external interrupt if IF=1, no interrupt
+                // shadow, and no interruption already pending.
+                self.exit_ctx_interrupt_ok = if_set && !interrupt_shadow && !interruption_pending;
+            }
 
             // Log ALL exits after IOAPIC init to trace the reboot cause
             {
@@ -2026,15 +2110,22 @@ impl VmBackend for WhpBackend {
                     continue;
                 }
                 WHV_EXIT_REASON_INTERRUPT_WINDOW => {
-                    // Guest is now interruptible (IF=1). Disable the notification
-                    // and deliver any re-queued IOAPIC interrupts before returning
-                    // to vm.rs for PIC interrupt injection.
-                    // Use force=true because WHP reports RFLAGS.IF=0 at this
-                    // exit despite the guest actually being interruptible.
+                    // Guest is now interruptible. Like QEMU's InterruptWindow handler:
+                    // set ready_for_pic_interrupt so pre-run can inject on next iteration.
+                    {
+                        static IW_CTR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                        let n = IW_CTR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 20 || n % 1000 == 0 {
+                            eprintln!("[whp] InterruptWindow #{} ioapic_pending={} pic_pending={:?} exit_ok={}",
+                                n, self.ioapic.pending.len(), self.pending_pic_inject, self.exit_ctx_interrupt_ok);
+                        }
+                    }
                     let _ = self.request_interrupt_window(id, false);
                     self.deliver_ioapic_pending_inner(true);
-                    self.last_exit_interrupt_window = true;
-                    return Ok(VmExitReason::InterruptWindow);
+                    self.ready_for_pic_interrupt = true;
+                    // Don't return — continue the inner loop so pre-run can
+                    // inject the PIC vector immediately on the next iteration.
+                    continue;
                 }
                 WHV_EXIT_REASON_UNSUPPORTED_FEATURE => {
                     let regs = self.get_vcpu_regs(id)?;
@@ -2278,7 +2369,15 @@ impl VmBackend for WhpBackend {
 
     fn request_interrupt_window(&mut self, id: u32, enable: bool) -> Result<(), VmError> {
         let val: u64 = if enable { 1 } else { 0 };
-        self.set_regs_raw(id, &[REG_DELIVERABILITY_NOTIFICATIONS], &[WHV_REGISTER_VALUE::from_u64(val)])
+        let result = self.set_regs_raw(id, &[REG_DELIVERABILITY_NOTIFICATIONS], &[WHV_REGISTER_VALUE::from_u64(val)]);
+        if enable {
+            static RIW_CTR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            let n = RIW_CTR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 10 || n % 5000 == 0 {
+                eprintln!("[whp] request_interrupt_window #{} enable={} result={:?}", n, enable, result);
+            }
+        }
+        result
     }
 
     fn set_cpuid(&mut self, _entries: &[CpuidEntry]) -> Result<(), VmError> {

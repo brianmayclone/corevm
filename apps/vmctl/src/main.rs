@@ -196,7 +196,8 @@ fn main() {
     // corevm_setup_ac97(handle);
     // eprintln!("[vmctl] AC97 audio controller enabled");
 
-    // TAP network device (optional, requires root/CAP_NET_ADMIN)
+    // TAP network device (Linux only, requires root/CAP_NET_ADMIN)
+    #[cfg(target_os = "linux")]
     let tap_device = if !args.tap_name.is_empty() {
         match libcorevm::net::tap::TapDevice::new(&args.tap_name) {
             Ok(tap) => {
@@ -221,6 +222,8 @@ fn main() {
     } else {
         None
     };
+    #[cfg(not(target_os = "linux"))]
+    let tap_device: Option<()> = None;
 
     // VGA LFB is mapped internally by setup_standard_devices via KVM slot 1.
     // Get the SVGA framebuffer pointer for reading display output.
@@ -352,6 +355,7 @@ fn main() {
     setup::setup_bda_com1(handle);
 
     // Install SIGUSR1 handler so cancel_vcpu can interrupt KVM_RUN mid-execution
+    #[cfg(target_os = "linux")]
     libcorevm::backend::kvm::install_sigusr1_handler();
 
     // Timer thread to cancel vCPU periodically (needed for CMOS/RTC advance,
@@ -579,6 +583,7 @@ fn main() {
         total_irqs += corevm_poll_irqs(handle) as u64;
 
         // Network polling: exchange packets between TAP and E1000 (~every 1ms)
+        #[cfg(target_os = "linux")]
         if tap_device.is_some() {
             let now = Instant::now();
             if now.duration_since(last_net_poll).as_micros() >= 1000 {
