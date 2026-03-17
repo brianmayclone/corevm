@@ -745,6 +745,10 @@ pub struct WhpBackend {
     /// Set when InterruptWindow exit fires — guest is ready for interrupt.
     /// Like QEMU's `ready_for_pic_interrupt`.
     pub ready_for_pic_interrupt: bool,
+    /// Set after the kernel starts (first IOAPIC MMIO access). Before this,
+    /// PendingEvent at IF=0 is unsafe (causes INVALID_VP_STATE during BIOS).
+    /// After kernel start, PendingEvent at IF=0 is safe — WHP pends it.
+    kernel_started: bool,
 }
 
 unsafe impl Send for WhpBackend {}
@@ -832,31 +836,32 @@ impl WhpBackend {
                 return Err(VmError::BackendErrorCtx(hr, "WHvSetPartitionProperty(ProcessorCount)"));
             }
 
-            // Enable extended VM exits for CPUID, MSR, and exception interception
+            // Enable extended VM exits: CPUID + MSR + exception (if supported).
             // bit 0 = X64CpuidExit, bit 1 = X64MsrExit, bit 2 = ExceptionExit
-            // Try property code 0x2 first (Windows SDK), fall back to 0x1 (older?)
-            let extended_exits: u64 = 0x7;
+            // Try all 3, fall back to CPUID+MSR only if ExceptionExit is unsupported.
+            let mut extended_exits: u64 = 0x7; // CPUID + MSR + Exception
             let hr = (api.set_property)(
                 partition,
-                0x00000002, // WHvPartitionPropertyCodeExtendedVmExits
+                WHV_PROPERTY_EXTENDED_VM_EXITS,
                 &extended_exits as *const u64 as *const u8,
                 core::mem::size_of::<u64>() as u32,
             );
             if hr < 0 {
-                whp_debug(format_args!("ExtendedVmExits(0x2) FAILED hr={:#x}, trying 0x1", hr));
+                // ExceptionExit not supported — try CPUID + MSR only
+                extended_exits = 0x3;
                 let hr2 = (api.set_property)(
                     partition,
-                    0x00000001,
+                    WHV_PROPERTY_EXTENDED_VM_EXITS,
                     &extended_exits as *const u64 as *const u8,
                     core::mem::size_of::<u64>() as u32,
                 );
                 if hr2 < 0 {
-                    whp_debug(format_args!("ExtendedVmExits(0x1) also FAILED hr={:#x}", hr2));
+                    whp_debug(format_args!("ExtendedVmExits FAILED for 0x7 and 0x3, hr={:#x}/{:#x}", hr, hr2));
                 } else {
-                    whp_debug(format_args!("ExtendedVmExits(0x1) OK: {:#x}", extended_exits));
+                    whp_debug(format_args!("ExtendedVmExits OK: {:#x} (no ExceptionExit)", extended_exits));
                 }
             } else {
-                whp_debug(format_args!("ExtendedVmExits(0x2) OK: {:#x}", extended_exits));
+                whp_debug(format_args!("ExtendedVmExits OK: {:#x}", extended_exits));
             }
 
             // Exception exit bitmap: catch #DF and #UD.
@@ -909,6 +914,7 @@ impl WhpBackend {
                 exit_ctx_interrupt_ok: false,
                 pending_pic_inject: None,
                 ready_for_pic_interrupt: false,
+                kernel_started: false,
             })
         }
     }
@@ -1259,13 +1265,9 @@ impl WhpBackend {
         if pending.is_empty() { return; }
 
         if !force {
-            // If guest is not interruptible, re-queue for the next pre-run check.
-            // NOTE: We do NOT call request_interrupt_window because
-            // WHvRegisterDeliverabilityNotifications is not supported on this
-            // WHP version. Instead, the pre-run phase in run_vcpu polls
-            // exit_ctx_interrupt_ok on every iteration.
             if !self.exit_ctx_interrupt_ok {
                 for intr in pending { self.ioapic.pending.push(intr); }
+                let _ = self.request_interrupt_window(0, true);
                 return;
             }
         }
@@ -1536,33 +1538,35 @@ impl VmBackend for WhpBackend {
             // WHvRegisterDeliverabilityNotifications (InterruptWindow) is NOT
             // supported on this WHP version (returns WHV_E_UNKNOWN_REGISTER).
             // Instead, we check exit_ctx_interrupt_ok on every pre-run iteration
-            // and inject both IOAPIC and PIC interrupts when the guest has IF=1.
+            // PRE-RUN: Inject pending interrupts when guest is interruptible
+            // (exit_ctx_interrupt_ok from exit context) OR when InterruptWindow
+            // fired (ready_for_pic_interrupt).
             {
-                let has_ioapic = !self.ioapic.pending.is_empty();
-                let has_pic = self.pending_pic_inject.is_some();
-                if self.exit_ctx_interrupt_ok && (has_ioapic || has_pic) {
-                    static PRE_INJ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-                    let n = PRE_INJ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    if n < 30 || n % 1000 == 0 {
-                        eprintln!("[whp] PRE-RUN inject #{} ioapic={} pic={:?}", n, has_ioapic, self.pending_pic_inject);
+                let can_inject = self.exit_ctx_interrupt_ok || self.ready_for_pic_interrupt;
+                if can_inject {
+                    // IOAPIC pending
+                    if !self.ioapic.pending.is_empty() {
+                        self.deliver_ioapic_pending_inner(true);
                     }
-                    // First: deliver any pending IOAPIC interrupts
-                    self.deliver_ioapic_pending_inner(true);
 
-                    // Then: inject queued PIC interrupt via PendingInterruption
+                    // PIC pending: inject via PendingEvent ExtInt
                     if let Some(vector) = self.pending_pic_inject {
                         if !self.has_pending_event(id) {
-                            let val: u64 = 1 | ((vector as u64) << 16);
-                            let _ = self.set_regs_raw(id, &[REG_PENDING_INTERRUPTION],
-                                &[WHV_REGISTER_VALUE::from_u64(val)]);
+                            let lo: u64 = 1 | (5u64 << 1) | ((vector as u64) << 8);
+                            let val = WHV_REGISTER_VALUE { reg128: [lo, 0] };
+                            let _ = self.set_regs_raw(id, &[REG_PENDING_EVENT], &[val]);
+                            // Clear HaltSuspend if vCPU is in HLT
+                            let mut activity = [WHV_REGISTER_VALUE::default()];
+                            if self.get_regs_raw(id, &[REG_INTERNAL_ACTIVITY_STATE], &mut activity).is_ok() {
+                                let state = unsafe { activity[0].reg64 };
+                                if state & 2 != 0 {
+                                    let _ = self.set_regs_raw(id, &[REG_INTERNAL_ACTIVITY_STATE],
+                                        &[WHV_REGISTER_VALUE::from_u64(state & !2)]);
+                                }
+                            }
                             self.pending_pic_inject = None;
+                            self.ready_for_pic_interrupt = false;
                         }
-                    }
-                } else if (has_ioapic || has_pic) && !self.exit_ctx_interrupt_ok {
-                    static SKIP_INJ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-                    let n = SKIP_INJ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    if n < 10 || n % 10000 == 0 {
-                        eprintln!("[whp] PRE-RUN skip #{} (exit_ok=false) ioapic={} pic={:?}", n, has_ioapic, self.pending_pic_inject);
                     }
                 }
             }
@@ -2088,15 +2092,31 @@ impl VmBackend for WhpBackend {
 
                     // Additional filtering on top of WHP defaults
                     if leaf == 1 {
+                        ecx &= !(1 << 3);  // Remove MONITOR/MWAIT (WHP doesn't virtualize it, causes NULL idle handler)
                         ecx &= !(1 << 5);  // Remove VMX
                         ecx &= !(1 << 21); // Remove x2APIC (we emulate xAPIC via MMIO only)
                         ecx &= !(1 << 24); // Remove TSC-Deadline (we don't handle MSR 0x6E0)
                         ecx &= !(1 << 31); // Remove hypervisor present (avoid PV code paths)
                     }
+                    // CPUID leaf 5: MONITOR/MWAIT parameters — return zeros
+                    // since we hide MONITOR support in leaf 1.
+                    if leaf == 5 {
+                        eax = 0; ebx = 0; ecx = 0; edx = 0;
+                    }
 
                     // Hide Hyper-V signature so Linux uses standard LAPIC timer
                     if leaf >= 0x40000000 && leaf <= 0x4000FFFF {
                         eax = 0; ebx = 0; ecx = 0; edx = 0;
+                    }
+
+                    // Override vendor string to prevent intel_idle from loading.
+                    // intel_idle uses MWAIT C-states but WHP doesn't properly
+                    // virtualize MWAIT, causing NULL idle handler crashes.
+                    // Vendor "CoreVMCoreVM" prevents Family/Model matching.
+                    if leaf == 0 {
+                        ebx = u32::from_le_bytes(*b"Core");
+                        edx = u32::from_le_bytes(*b"VMCo");
+                        ecx = u32::from_le_bytes(*b"reVM");
                     }
 
                     let mut regs = self.get_vcpu_regs(id)?;
@@ -2368,16 +2388,11 @@ impl VmBackend for WhpBackend {
     }
 
     fn request_interrupt_window(&mut self, id: u32, enable: bool) -> Result<(), VmError> {
-        let val: u64 = if enable { 1 } else { 0 };
-        let result = self.set_regs_raw(id, &[REG_DELIVERABILITY_NOTIFICATIONS], &[WHV_REGISTER_VALUE::from_u64(val)]);
-        if enable {
-            static RIW_CTR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-            let n = RIW_CTR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            if n < 10 || n % 5000 == 0 {
-                eprintln!("[whp] request_interrupt_window #{} enable={} result={:?}", n, enable, result);
-            }
-        }
-        result
+        // WHV_X64_DELIVERABILITY_NOTIFICATIONS_REGISTER:
+        //   bit 0 = NmiNotification
+        //   bit 1 = InterruptNotification  ← this is what we need
+        let val: u64 = if enable { 2 } else { 0 }; // bit 1 = InterruptNotification
+        self.set_regs_raw(id, &[REG_DELIVERABILITY_NOTIFICATIONS], &[WHV_REGISTER_VALUE::from_u64(val)])
     }
 
     fn set_cpuid(&mut self, _entries: &[CpuidEntry]) -> Result<(), VmError> {

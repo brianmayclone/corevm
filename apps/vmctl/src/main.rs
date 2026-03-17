@@ -362,7 +362,13 @@ fn main() {
     // HPET timer polling, and AHCI IRQ polling when guest is in HLT/idle state).
     // 10ms when HPET is enabled (Windows needs timely HPET interrupts ~64 Hz),
     // 100ms otherwise (avoids excessive VM exits for Linux guests).
-    let cancel_interval_ms = if args.enable_hpet { 10 } else { 100 };
+    // On WHP, need 10ms cancel interval for timely interrupt delivery
+    // (InterruptWindow exits require the vCPU to be kicked out of guest code).
+    // On KVM, 100ms is sufficient since the in-kernel irqchip handles delivery.
+    #[cfg(target_os = "windows")]
+    let cancel_interval_ms: u64 = 10;
+    #[cfg(not(target_os = "windows"))]
+    let cancel_interval_ms: u64 = if args.enable_hpet { 10 } else { 100 };
     let cancel_handle = handle;
     let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let running2 = running.clone();
