@@ -1657,6 +1657,13 @@ impl VmBackend for WhpBackend {
                 static IOAPIC_SEEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
                 static EXIT_LOG_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
+                // Log ALL exit reasons for first 20 exits
+                static ALL_EXIT_CTR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                let all_n = ALL_EXIT_CTR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if all_n < 20 || (ctx.exit_reason == 0x1000 || ctx.exit_reason == 0x1001) {
+                    whp_debug(format_args!("EXIT[{}] reason={:#x}", all_n, ctx.exit_reason));
+                }
+
                 // Detect IOAPIC MMIO (GPA 0xFEC00000..0xFEC00FFF)
                 if ctx.exit_reason == WHV_EXIT_REASON_MEMORY_ACCESS {
                     let gpa = u64::from_le_bytes([
@@ -2075,6 +2082,10 @@ impl VmBackend for WhpBackend {
                     continue;
                 }
                 WHV_EXIT_REASON_CPUID => {
+                    static CPUID_ENTRY: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                    if CPUID_ENTRY.fetch_add(1, core::sync::atomic::Ordering::Relaxed) == 0 {
+                        whp_debug(format_args!("CPUID handler entered (first time)"));
+                    }
                     // Handle CPUID internally: execute native CPUID and return results.
                     // WHV_X64_CPUID_ACCESS_CONTEXT layout:
                     // [0x00..08] Rax (=leaf): u64
@@ -2116,6 +2127,16 @@ impl VmBackend for WhpBackend {
                         data[0x3C], data[0x3D], data[0x3E], data[0x3F],
                     ]) as u32;
 
+                    // Log critical CPUID leaves for debugging
+                    if leaf <= 1 || leaf == 5 || leaf == 7 || (leaf >= 0x80000000 && leaf <= 0x80000008) || (leaf >= 0x40000000 && leaf <= 0x40000001) {
+                        static CPUID_LOG: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                        let n = CPUID_LOG.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 100 {
+                            eprintln!("[whp] CPUID leaf=0x{:08X} sub={}: eax=0x{:08X} ebx=0x{:08X} ecx=0x{:08X} edx=0x{:08X}",
+                                leaf, subleaf, eax, ebx, ecx, edx);
+                        }
+                    }
+
                     // Additional filtering on top of WHP defaults
                     if leaf == 1 {
                         ecx &= !(1 << 3);  // Remove MONITOR/MWAIT (WHP doesn't virtualize it, causes NULL idle handler)
@@ -2135,15 +2156,12 @@ impl VmBackend for WhpBackend {
                         eax = 0; ebx = 0; ecx = 0; edx = 0;
                     }
 
-                    // Override vendor string to prevent intel_idle from loading.
-                    // intel_idle uses MWAIT C-states but WHP doesn't properly
-                    // virtualize MWAIT, causing NULL idle handler crashes.
-                    // Vendor "CoreVMCoreVM" prevents Family/Model matching.
-                    if leaf == 0 {
-                        ebx = u32::from_le_bytes(*b"Core");
-                        edx = u32::from_le_bytes(*b"VMCo");
-                        ecx = u32::from_le_bytes(*b"reVM");
-                    }
+                    // Keep WHP's default vendor string (GenuineIntel / AuthenticAMD).
+                    // Windows checks the vendor for CPU-specific code paths and
+                    // crashes (BSOD) with an unrecognized vendor.
+                    // intel_idle is already blocked by clearing MWAIT in leaf 1
+                    // ECX bit 3 and zeroing leaf 5 — the vendor string is not
+                    // needed for that.
 
                     let mut regs = self.get_vcpu_regs(id)?;
                     regs.rax = eax as u64;

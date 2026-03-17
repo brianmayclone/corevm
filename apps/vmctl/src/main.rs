@@ -1045,19 +1045,146 @@ fn main() {
             sregs.ss.selector, sregs.ss.base, sregs.es.selector, sregs.fs.selector, sregs.gs.selector);
         println!("--- END REGISTERS ---");
 
-        // Dump code at RIP — translate virtual to physical
+        // Dump code at RIP — walk page tables to translate virtual to physical.
+        // Supports: no paging, 32-bit paging, 32-bit PAE, and 64-bit (4-level).
         let rip = regs.rip;
-        let phys_rip = if rip >= 0xFFFFFFFF80000000 {
-            rip - 0xFFFFFFFF80000000 // 64-bit kernel text direct mapping
-        } else if rip >= 0xC0000000 && rip < 0x100000000 {
-            rip - 0xC0000000 // 32-bit kernel PAGE_OFFSET mapping
+        let cr0 = sregs.cr0;
+        let cr3 = sregs.cr3;
+        let cr4 = sregs.cr4;
+        let efer = sregs.efer;
+        let paging = (cr0 & 0x80000000) != 0; // CR0.PG
+        let pae = (cr4 & 0x20) != 0;          // CR4.PAE
+        let lme = (efer & 0x100) != 0;        // EFER.LME (long mode)
+
+        let phys_rip = if !paging {
+            rip // no paging — RIP is physical
+        } else if pae && lme {
+            // 64-bit 4-level paging: PML4 -> PDPT -> PD -> PT
+            let pml4_idx = ((rip >> 39) & 0x1FF) as usize;
+            let pdpt_idx = ((rip >> 30) & 0x1FF) as usize;
+            let pd_idx   = ((rip >> 21) & 0x1FF) as usize;
+            let pt_idx   = ((rip >> 12) & 0x1FF) as usize;
+            let offset   = rip & 0xFFF;
+            let mut entry = 0u64;
+            // PML4
+            corevm_read_phys(handle, (cr3 & !0xFFF) + (pml4_idx as u64) * 8, &mut entry as *mut u64 as *mut u8, 8);
+            if entry & 1 == 0 { rip } else {
+                // PDPT
+                corevm_read_phys(handle, (entry & 0x000FFFFF_FFFFF000) + (pdpt_idx as u64) * 8, &mut entry as *mut u64 as *mut u8, 8);
+                if entry & 1 == 0 { rip } else if entry & 0x80 != 0 {
+                    (entry & 0x000FFFFF_C0000000) | (rip & 0x3FFFFFFF) // 1GB page
+                } else {
+                    // PD
+                    corevm_read_phys(handle, (entry & 0x000FFFFF_FFFFF000) + (pd_idx as u64) * 8, &mut entry as *mut u64 as *mut u8, 8);
+                    if entry & 1 == 0 { rip } else if entry & 0x80 != 0 {
+                        (entry & 0x000FFFFF_FFE00000) | (rip & 0x1FFFFF) // 2MB page
+                    } else {
+                        // PT
+                        corevm_read_phys(handle, (entry & 0x000FFFFF_FFFFF000) + (pt_idx as u64) * 8, &mut entry as *mut u64 as *mut u8, 8);
+                        if entry & 1 == 0 { rip } else {
+                            (entry & 0x000FFFFF_FFFFF000) | offset
+                        }
+                    }
+                }
+            }
+        } else if pae {
+            // 32-bit PAE: PDPT (4 entries) -> PD -> PT
+            let pdpt_idx = ((rip >> 30) & 0x3) as usize;
+            let pd_idx   = ((rip >> 21) & 0x1FF) as usize;
+            let pt_idx   = ((rip >> 12) & 0x1FF) as usize;
+            let offset   = rip & 0xFFF;
+            let mut entry = 0u64;
+            // PDPT (4 * 8 bytes at CR3)
+            corevm_read_phys(handle, (cr3 & !0x1F) + (pdpt_idx as u64) * 8, &mut entry as *mut u64 as *mut u8, 8);
+            if entry & 1 == 0 { rip } else {
+                // PD
+                corevm_read_phys(handle, (entry & 0x000FFFFF_FFFFF000) + (pd_idx as u64) * 8, &mut entry as *mut u64 as *mut u8, 8);
+                if entry & 1 == 0 { rip } else if entry & 0x80 != 0 {
+                    (entry & 0x000FFFFF_FFE00000) | (rip & 0x1FFFFF) // 2MB page
+                } else {
+                    // PT
+                    corevm_read_phys(handle, (entry & 0x000FFFFF_FFFFF000) + (pt_idx as u64) * 8, &mut entry as *mut u64 as *mut u8, 8);
+                    if entry & 1 == 0 { rip } else {
+                        (entry & 0x000FFFFF_FFFFF000) | offset
+                    }
+                }
+            }
         } else {
-            rip
+            // 32-bit non-PAE: PD -> PT (4KB entries)
+            let pd_idx = ((rip >> 22) & 0x3FF) as usize;
+            let pt_idx = ((rip >> 12) & 0x3FF) as usize;
+            let offset = rip & 0xFFF;
+            let mut entry = 0u32;
+            corevm_read_phys(handle, (cr3 & !0xFFF) + (pd_idx as u64) * 4, &mut entry as *mut u32 as *mut u8, 4);
+            if entry & 1 == 0 { rip } else if entry & 0x80 != 0 {
+                ((entry & 0xFFC00000) as u64) | (rip & 0x3FFFFF) // 4MB page
+            } else {
+                let pd_phys = (entry & 0xFFFFF000) as u64;
+                corevm_read_phys(handle, pd_phys + (pt_idx as u64) * 4, &mut entry as *mut u32 as *mut u8, 4);
+                if entry & 1 == 0 { rip } else {
+                    ((entry & 0xFFFFF000) as u64) | offset
+                }
+            }
         };
         let mut code = [0u8; 32];
         corevm_read_phys(handle, phys_rip, code.as_mut_ptr(), 32);
         print!("Code at RIP={:016X} (phys={:08X}): ", rip, phys_rip);
         for b in &code { print!("{:02X} ", b); }
+        println!();
+
+        // Also dump 64 bytes BEFORE RIP to see call context
+        if phys_rip >= 64 {
+            let mut pre_code = [0u8; 64];
+            corevm_read_phys(handle, phys_rip - 64, pre_code.as_mut_ptr(), 64);
+            print!("Code before RIP (phys={:08X}): ", phys_rip - 64);
+            for b in &pre_code { print!("{:02X} ", b); }
+            println!();
+        }
+
+        // Dump stack (RSP) — 64 bytes
+        let rsp = regs.rsp;
+        // Translate RSP virtual to physical using same page walk logic
+        let phys_rsp = if !paging { rsp }
+        else if pae && lme {
+            let mut e = 0u64;
+            corevm_read_phys(handle, (cr3 & !0xFFF) + (((rsp >> 39) & 0x1FF) * 8), &mut e as *mut u64 as *mut u8, 8);
+            if e & 1 == 0 { rsp } else {
+                let t = e; corevm_read_phys(handle, (t & 0x000FFFFF_FFFFF000) + (((rsp >> 30) & 0x1FF) * 8), &mut e as *mut u64 as *mut u8, 8);
+                if e & 1 == 0 { rsp } else if e & 0x80 != 0 { (e & 0x000FFFFF_C0000000) | (rsp & 0x3FFFFFFF) } else {
+                    let t = e; corevm_read_phys(handle, (t & 0x000FFFFF_FFFFF000) + (((rsp >> 21) & 0x1FF) * 8), &mut e as *mut u64 as *mut u8, 8);
+                    if e & 1 == 0 { rsp } else if e & 0x80 != 0 { (e & 0x000FFFFF_FFE00000) | (rsp & 0x1FFFFF) } else {
+                        let t = e; corevm_read_phys(handle, (t & 0x000FFFFF_FFFFF000) + (((rsp >> 12) & 0x1FF) * 8), &mut e as *mut u64 as *mut u8, 8);
+                        if e & 1 == 0 { rsp } else { (e & 0x000FFFFF_FFFFF000) | (rsp & 0xFFF) }
+                    }
+                }
+            }
+        } else if pae {
+            let mut e = 0u64;
+            corevm_read_phys(handle, (cr3 & !0x1F) + (((rsp >> 30) & 0x3) * 8), &mut e as *mut u64 as *mut u8, 8);
+            if e & 1 == 0 { rsp } else {
+                let t = e; corevm_read_phys(handle, (t & 0x000FFFFF_FFFFF000) + (((rsp >> 21) & 0x1FF) * 8), &mut e as *mut u64 as *mut u8, 8);
+                if e & 1 == 0 { rsp } else if e & 0x80 != 0 { (e & 0x000FFFFF_FFE00000) | (rsp & 0x1FFFFF) } else {
+                    let t = e; corevm_read_phys(handle, (t & 0x000FFFFF_FFFFF000) + (((rsp >> 12) & 0x1FF) * 8), &mut e as *mut u64 as *mut u8, 8);
+                    if e & 1 == 0 { rsp } else { (e & 0x000FFFFF_FFFFF000) | (rsp & 0xFFF) }
+                }
+            }
+        } else {
+            let mut e = 0u32;
+            corevm_read_phys(handle, (cr3 & !0xFFF) + (((rsp >> 22) & 0x3FF) * 4), &mut e as *mut u32 as *mut u8, 4);
+            if e & 1 == 0 { rsp } else if e & 0x80 != 0 { ((e & 0xFFC00000) as u64) | (rsp & 0x3FFFFF) } else {
+                let pd_p = (e & 0xFFFFF000) as u64;
+                corevm_read_phys(handle, pd_p + (((rsp >> 12) & 0x3FF) * 4), &mut e as *mut u32 as *mut u8, 4);
+                if e & 1 == 0 { rsp } else { ((e & 0xFFFFF000) as u64) | (rsp & 0xFFF) }
+            }
+        };
+        let mut stack = [0u8; 64];
+        corevm_read_phys(handle, phys_rsp, stack.as_mut_ptr(), 64);
+        print!("Stack at RSP={:016X} (phys={:08X}): ", rsp, phys_rsp);
+        for (i, chunk) in stack.chunks(4).enumerate() {
+            if i > 0 && i % 8 == 0 { print!("\n                                              "); }
+            let val = u32::from_le_bytes([chunk[0], chunk[1], chunk.get(2).copied().unwrap_or(0), chunk.get(3).copied().unwrap_or(0)]);
+            print!("{:08X} ", val);
+        }
         println!();
     }
 
