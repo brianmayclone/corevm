@@ -217,6 +217,7 @@ const KVM_GET_SREGS: u64 = 0x8138_AE83;
 const KVM_SET_SREGS: u64 = 0x4138_AE84;
 const KVM_INTERRUPT: u64 = 0x4004_AE86;
 const KVM_SET_CPUID2: u64 = 0x4008_AE90;
+const KVM_GET_CPUID2: u64 = 0xC008_AE91;
 const KVM_GET_VCPU_EVENTS: u64 = 0x8040_AE9F;
 const KVM_SET_VCPU_EVENTS: u64 = 0x4040_AEA0;
 const KVM_CREATE_IRQCHIP: u64 = 0xAE60;
@@ -225,6 +226,7 @@ const KVM_ENABLE_CAP: u64 = 0x4068_AEA3;
 const KVM_SIGNAL_MSI: u64 = 0x4020_AEA5;
 const KVM_CREATE_PIT2: u64 = 0x4040_AE77;
 const KVM_GET_LAPIC: u64 = 0x8400_AE8E;
+const KVM_SET_LAPIC: u64 = 0x4400_AE8F;
 const KVM_GET_IRQCHIP: u64 = 0xC208_AE62;
 const KVM_GET_SUPPORTED_CPUID: u64 = 0xC008_AE05;
 const KVM_SET_MP_STATE: u64 = 0x4004_AE99;
@@ -834,6 +836,17 @@ impl KvmBackend {
             let nent = *nent_ptr as usize;
             let entries_ptr = buf.as_ptr().add(8) as *const KvmCpuidEntry2;
 
+            // Detect AMD vs Intel from CPUID leaf 0 vendor string.
+            // AMD: "AuthenticAMD" (EBX=0x68747541), Intel: "GenuineIntel"
+            let mut is_amd = false;
+            for i in 0..nent {
+                let e = &*entries_ptr.add(i);
+                if e.function == 0 {
+                    is_amd = e.ebx == 0x6874_7541; // "Auth" in EBX
+                    break;
+                }
+            }
+
             let mut cpuid_entries = Vec::new();
             for i in 0..nent {
                 let e = &*entries_ptr.add(i);
@@ -851,8 +864,17 @@ impl KvmBackend {
                     ebx &= 0x0000_FFFF;
                 }
 
-                // Fix x2APIC topology (leaf 0xB): EDX = x2APIC ID = 0
+                // Leaf 0xB (Extended Topology Enumeration) is Intel-specific.
+                // On AMD, KVM_GET_SUPPORTED_CPUID returns it but with incorrect
+                // data. Linux validates APIC IDs from leaf 0xB against the real
+                // LAPIC ID and reports "Firmware Bug: APIC id mismatch" on AMD.
+                // Fix: on AMD, drop leaf 0xB entirely so Linux falls back to
+                // leaf 1 EBX[31:24] for APIC ID detection.
+                // On Intel, fix EDX = x2APIC ID (set per-vCPU in create_vcpu).
                 if e.function == 0xB {
+                    if is_amd {
+                        continue; // skip leaf 0xB on AMD
+                    }
                     edx = 0;
                 }
 
@@ -1262,7 +1284,6 @@ impl VmBackend for KvmBackend {
         unsafe {
             let vcpu_fd = sys_ioctl(self.vm_fd, KVM_CREATE_VCPU, id as u64) as i32;
             if vcpu_fd < 0 {
-                eprintln!("[kvm] KVM_CREATE_VCPU failed: fd={}", vcpu_fd);
                 return Err(VmError::BackendError(vcpu_fd));
             }
 
@@ -1311,6 +1332,20 @@ impl VmBackend for KvmBackend {
                     eprintln!("[kvm] KVM_SET_CPUID2 failed: ret={}", ret);
                     sys_close(vcpu_fd);
                     return Err(VmError::BackendError(ret as i32));
+                }
+            }
+
+            // Explicitly set LAPIC ID for this vCPU.
+            // KVM initializes the LAPIC ID from the vcpu_id passed to
+            // KVM_CREATE_VCPU, but we read-modify-write it here to ensure
+            // correctness (matching what QEMU does).
+            {
+                let mut lapic_regs = [0u8; 1024];
+                let lr = sys_ioctl(vcpu_fd, KVM_GET_LAPIC, lapic_regs.as_mut_ptr() as u64);
+                if lr >= 0 {
+                    // LAPIC ID register is at offset 0x20, bits 31:24 = APIC ID
+                    lapic_regs[0x23] = id as u8; // byte 3 of u32 at 0x20 = bits 31:24
+                    sys_ioctl(vcpu_fd, KVM_SET_LAPIC, lapic_regs.as_ptr() as u64);
                 }
             }
 

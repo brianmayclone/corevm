@@ -861,7 +861,7 @@ impl Vm {
                 0x1AF4, // VirtIO vendor
                 0x1050, // VirtIO GPU (non-transitional)
                 0x03,   // Display controller
-                0x80,   // Other (not VGA) — keeps StdVga as primary VGA adapter
+                0x00,   // VGA compatible controller
                 0x00,   // prog-if
             );
             pci_dev.device = 7;

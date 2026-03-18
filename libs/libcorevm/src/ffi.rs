@@ -3105,9 +3105,42 @@ pub extern "C" fn corevm_virtio_kbd_ps2(handle: u64, scancode: u8) -> i32 {
     let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
     let kbd = match vm.virtio_kbd() { Some(k) => k, None => return -1 };
     let pressed = scancode & 0x80 == 0;
-    if let Some(key) = crate::devices::virtio_input::ps2_to_linux_key(scancode & 0x7F) {
-        kbd.inject_key(key, pressed);
-        kbd.process_eventq();
+    let raw_sc = scancode & 0x7F;
+    match crate::devices::virtio_input::ps2_to_linux_key(raw_sc) {
+        Some(key) => {
+            #[cfg(feature = "std")]
+            {
+                static mut PS2_LOG: u32 = 0;
+                unsafe { PS2_LOG += 1; if PS2_LOG <= 20 {
+                    eprintln!("[virtio-kbd-ps2] sc=0x{:02X} → key={} pressed={}", scancode, key, pressed);
+                }}
+            }
+            kbd.inject_key(key, pressed);
+            kbd.process_eventq();
+            // Immediately pulse IRQ and kick the vCPU out of KVM_RUN so the
+            // guest sees the interrupt. Without the kick, the vCPU may be in
+            // HLT (idle) and never wake up to process the event.
+            if kbd.irq_pending {
+                kbd.irq_pending = false;
+                #[cfg(feature = "linux")]
+                {
+                    let _ = vm.backend.set_irq_line(10, true);
+                    let _ = vm.backend.set_irq_line(10, false);
+                    // Kick vCPU 0 out of KVM_RUN via signal.
+                    let vm_slot = vm.backend.vm_slot;
+                    crate::backend::kvm::cancel_vcpu_kvm(vm_slot, 0);
+                }
+            }
+        }
+        None => {
+            #[cfg(feature = "std")]
+            {
+                static mut PS2_MISS: u32 = 0;
+                unsafe { PS2_MISS += 1; if PS2_MISS <= 10 {
+                    eprintln!("[virtio-kbd-ps2] sc=0x{:02X} → NO MAPPING (raw=0x{:02X})", scancode, raw_sc);
+                }}
+            }
+        }
     }
     0
 }
@@ -3120,6 +3153,16 @@ pub extern "C" fn corevm_virtio_tablet_move(handle: u64, x: u32, y: u32, buttons
     let tablet = match vm.virtio_tablet() { Some(t) => t, None => return -1 };
     tablet.inject_abs_tablet(x, y, buttons);
     tablet.process_eventq();
+    if tablet.irq_pending {
+        tablet.irq_pending = false;
+        #[cfg(feature = "linux")]
+        {
+            let _ = vm.backend.set_irq_line(10, true);
+            let _ = vm.backend.set_irq_line(10, false);
+            let vm_slot = vm.backend.vm_slot;
+            crate::backend::kvm::cancel_vcpu_kvm(vm_slot, 0);
+        }
+    }
     0
 }
 

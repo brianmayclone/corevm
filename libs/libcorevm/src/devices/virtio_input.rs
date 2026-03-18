@@ -177,9 +177,44 @@ impl VirtioInput {
         }
     }
 
+    /// Drop events if the queue is backing up (driver not consuming fast enough).
+    fn trim_queue(&mut self) {
+        const MAX_PENDING: usize = 256;
+        if self.event_queue.len() > MAX_PENDING {
+            // Drop oldest events, keep the newest ones.
+            let drop_count = self.event_queue.len() - MAX_PENDING;
+            self.event_queue.drain(..drop_count);
+        }
+    }
+
+    /// Don't queue events if driver hasn't loaded yet.
+    fn driver_ready(&self) -> bool {
+        self.status & VIRTIO_STATUS_DRIVER_OK != 0
+    }
+
     /// Inject a keyboard scancode. `pressed`: true=make, false=break.
     /// `key`: Linux KEY_* code (not PS/2 scancode!).
     pub fn inject_key(&mut self, key: u16, pressed: bool) {
+        if !self.driver_ready() {
+            #[cfg(feature = "std")]
+            {
+                static mut KBD_NOT_RDY: u32 = 0;
+                unsafe { KBD_NOT_RDY += 1; if KBD_NOT_RDY <= 5 {
+                    eprintln!("[virtio-input:kbd] inject_key(key={}, pressed={}) but driver not ready (status=0x{:02X})",
+                        key, pressed, self.status);
+                }}
+            }
+            return;
+        }
+        #[cfg(feature = "std")]
+        {
+            static mut KBD_INJ: u32 = 0;
+            unsafe { KBD_INJ += 1; if KBD_INJ <= 20 {
+                eprintln!("[virtio-input:kbd] inject_key(key={}, pressed={}) queue_len={}",
+                    key, pressed, self.event_queue.len());
+            }}
+        }
+        self.trim_queue();
         self.event_queue.push_back(InputEvent {
             ev_type: EV_KEY,
             code: key,
@@ -195,6 +230,8 @@ impl VirtioInput {
 
     /// Inject relative mouse movement.
     pub fn inject_rel_mouse(&mut self, dx: i32, dy: i32, buttons: u8) {
+        if !self.driver_ready() { return; }
+        self.trim_queue();
         if dx != 0 {
             self.event_queue.push_back(InputEvent {
                 ev_type: EV_REL, code: REL_X, value: dx as u32,
@@ -223,6 +260,8 @@ impl VirtioInput {
 
     /// Inject absolute tablet position (0..32767 for x and y).
     pub fn inject_abs_tablet(&mut self, x: u32, y: u32, buttons: u8) {
+        if !self.driver_ready() { return; }
+        self.trim_queue();
         self.event_queue.push_back(InputEvent {
             ev_type: EV_ABS, code: ABS_X, value: x,
         });
@@ -245,11 +284,29 @@ impl VirtioInput {
 
     /// Deliver pending events to the guest via eventq (queue 0).
     pub fn process_eventq(&mut self) {
-        if self.status & VIRTIO_STATUS_DRIVER_OK == 0 { return; }
+        if self.status & VIRTIO_STATUS_DRIVER_OK == 0 {
+            #[cfg(feature = "std")]
+            if !self.event_queue.is_empty() {
+                static mut NOT_READY_LOG: u32 = 0;
+                unsafe { NOT_READY_LOG += 1; if NOT_READY_LOG <= 5 {
+                    let name = match self.device_type { InputDeviceType::Keyboard => "kbd", InputDeviceType::Tablet => "tablet" };
+                    eprintln!("[virtio-input:{}] driver not ready (status=0x{:02X}), {} events pending", name, self.status, self.event_queue.len());
+                }}
+            }
+            return;
+        }
         if self.event_queue.is_empty() { return; }
 
         let q = &self.queues[0];
         if q.ready == 0 || q.size == 0 || q.desc_addr == 0 || q.avail_addr == 0 {
+            #[cfg(feature = "std")]
+            {
+                static mut Q_NOT_READY_LOG: u32 = 0;
+                unsafe { Q_NOT_READY_LOG += 1; if Q_NOT_READY_LOG <= 5 {
+                    let name = match self.device_type { InputDeviceType::Keyboard => "kbd", InputDeviceType::Tablet => "tablet" };
+                    eprintln!("[virtio-input:{}] eventq not ready (ready={} size={} desc=0x{:X} avail=0x{:X})", name, q.ready, q.size, q.desc_addr, q.avail_addr);
+                }}
+            }
             return;
         }
 
@@ -262,6 +319,20 @@ impl VirtioInput {
         let mut avail_idx_buf = [0u8; 2];
         if !self.dma_read(avail_addr + 2, &mut avail_idx_buf) { return; }
         let avail_idx = u16::from_le_bytes(avail_idx_buf);
+
+        #[cfg(feature = "std")]
+        {
+            // Use device_type to disambiguate log counters between kbd and tablet
+            let is_kbd = self.device_type == InputDeviceType::Keyboard;
+            static mut DELIVER_LOG_KBD: u32 = 0;
+            static mut DELIVER_LOG_TAB: u32 = 0;
+            let log_count = unsafe { if is_kbd { DELIVER_LOG_KBD += 1; DELIVER_LOG_KBD } else { DELIVER_LOG_TAB += 1; DELIVER_LOG_TAB } };
+            if log_count <= 30 || log_count % 500 == 0 {
+                let name = if is_kbd { "kbd" } else { "tablet" };
+                eprintln!("[virtio-input:{}] delivering: pending={} last_avail={} avail_idx={} qsize={}",
+                    name, self.event_queue.len(), last_avail, avail_idx, qsize);
+            }
+        }
 
         let mut delivered = 0u32;
 
@@ -318,6 +389,14 @@ impl VirtioInput {
         }
 
         self.queues[0].last_avail_idx = last_avail;
+
+        #[cfg(feature = "std")]
+        if self.device_type == InputDeviceType::Keyboard {
+            static mut KBD_RESULT_LOG: u32 = 0;
+            unsafe { KBD_RESULT_LOG += 1; if KBD_RESULT_LOG <= 30 {
+                eprintln!("[virtio-input:kbd] delivered={} remaining={}", delivered, self.event_queue.len());
+            }}
+        }
 
         if delivered > 0 {
             self.isr_status |= 1;
@@ -396,10 +475,27 @@ impl VirtioInput {
                     return;
                 }
                 self.status = val as u8;
+                #[cfg(feature = "std")]
+                {
+                    let name = match self.device_type { InputDeviceType::Keyboard => "kbd", InputDeviceType::Tablet => "tablet" };
+                    eprintln!("[virtio-input:{}] status = 0x{:02X}{}", name, self.status,
+                        if self.status & VIRTIO_STATUS_DRIVER_OK != 0 { " (DRIVER_OK)" } else { "" });
+                }
             }
             0x16 => self.queue_select = val as u16,
             0x18 => { let qi = self.queue_select as usize; if qi < NUM_QUEUES { self.queues[qi].size = (val as u16).min(VIRTQUEUE_MAX_SIZE); } }
-            0x1C => { let qi = self.queue_select as usize; if qi < NUM_QUEUES { self.queues[qi].ready = val as u16; } }
+            0x1C => {
+                let qi = self.queue_select as usize;
+                if qi < NUM_QUEUES {
+                    self.queues[qi].ready = val as u16;
+                    #[cfg(feature = "std")]
+                    if val as u16 != 0 {
+                        let name = match self.device_type { InputDeviceType::Keyboard => "kbd", InputDeviceType::Tablet => "tablet" };
+                        eprintln!("[virtio-input:{}] queue {} enabled (desc=0x{:X} avail=0x{:X} used=0x{:X} size={})",
+                            name, qi, self.queues[qi].desc_addr, self.queues[qi].avail_addr, self.queues[qi].used_addr, self.queues[qi].size);
+                    }
+                }
+            }
             0x20 => { let qi = self.queue_select as usize; if qi < NUM_QUEUES { self.queues[qi].desc_addr = (self.queues[qi].desc_addr & !0xFFFF_FFFF) | (val & 0xFFFF_FFFF); } }
             0x24 => { let qi = self.queue_select as usize; if qi < NUM_QUEUES { self.queues[qi].desc_addr = (self.queues[qi].desc_addr & 0xFFFF_FFFF) | ((val & 0xFFFF_FFFF) << 32); } }
             0x28 => { let qi = self.queue_select as usize; if qi < NUM_QUEUES { self.queues[qi].avail_addr = (self.queues[qi].avail_addr & !0xFFFF_FFFF) | (val & 0xFFFF_FFFF); } }
@@ -434,7 +530,19 @@ impl VirtioInput {
     /// Write device-specific config (select + subsel).
     fn write_device_cfg(&mut self, offset: u64, _size: u8, val: u64) {
         match offset {
-            0 => self.cfg_select = val as u8,
+            0 => {
+                self.cfg_select = val as u8;
+                #[cfg(feature = "std")]
+                {
+                    static mut CFG_LOG: u32 = 0;
+                    unsafe { CFG_LOG += 1; if CFG_LOG <= 30 {
+                        let name = match self.device_type { InputDeviceType::Keyboard => "kbd", InputDeviceType::Tablet => "tablet" };
+                        let data = self.config_data();
+                        eprintln!("[virtio-input:{}] cfg_select=0x{:02X} subsel=0x{:02X} → size={} data={:?}",
+                            name, self.cfg_select, self.cfg_subsel, data.len(), &data[..data.len().min(16)]);
+                    }}
+                }
+            }
             1 => self.cfg_subsel = val as u8,
             _ => {}
         }
@@ -474,48 +582,70 @@ impl VirtioInput {
                 data
             }
             VIRTIO_INPUT_CFG_EV_BITS => {
-                match self.device_type {
-                    InputDeviceType::Keyboard => {
-                        match self.cfg_subsel as u16 {
-                            EV_KEY => {
-                                // Bitmap of supported KEY_* codes (up to KEY_MAX=0x2FF).
-                                // We support keys 0..255 (standard keyboard).
-                                let mut bitmap = vec![0u8; 32]; // 256 bits = 32 bytes
-                                // Set bits for all standard keys (1-127 covers most scancodes).
-                                for i in 1u16..128 {
-                                    bitmap[(i / 8) as usize] |= 1 << (i % 8);
-                                }
-                                bitmap
-                            }
-                            EV_REP => vec![1], // Supports repeat
-                            EV_LED => {
-                                let mut bitmap = vec![0u8; 2];
-                                bitmap[0] = 0x07; // NUM_LOCK, CAPS_LOCK, SCROLL_LOCK
-                                bitmap
-                            }
-                            _ => Vec::new(),
+                // subsel=0 (EV_SYN) → bitmap of supported event types.
+                // subsel=N (N>0) → bitmap of supported codes for event type N.
+                if self.cfg_subsel == 0 {
+                    // Return bitmap of supported EV_* types.
+                    // Bit N = device supports event type N.
+                    let mut bitmap = vec![0u8; 4]; // up to 32 event types
+                    match self.device_type {
+                        InputDeviceType::Keyboard => {
+                            // EV_SYN(0), EV_KEY(1), EV_LED(0x11), EV_REP(0x14)
+                            bitmap[(EV_SYN / 8) as usize] |= 1 << (EV_SYN % 8);
+                            bitmap[(EV_KEY / 8) as usize] |= 1 << (EV_KEY % 8);
+                            bitmap[(EV_REP / 8) as usize] |= 1 << (EV_REP % 8);
+                            bitmap[(EV_LED / 8) as usize] |= 1 << (EV_LED % 8);
+                        }
+                        InputDeviceType::Tablet => {
+                            // EV_SYN(0), EV_KEY(1), EV_ABS(3)
+                            bitmap[(EV_SYN / 8) as usize] |= 1 << (EV_SYN % 8);
+                            bitmap[(EV_KEY / 8) as usize] |= 1 << (EV_KEY % 8);
+                            bitmap[(EV_ABS / 8) as usize] |= 1 << (EV_ABS % 8);
                         }
                     }
-                    InputDeviceType::Tablet => {
-                        match self.cfg_subsel as u16 {
-                            EV_KEY => {
-                                // Support BTN_LEFT (0x110), BTN_RIGHT (0x111), BTN_MIDDLE (0x112),
-                                // BTN_TOUCH (0x14A), BTN_TOOL_FINGER (0x145)
-                                let max_btn = 0x150u16;
-                                let bytes = ((max_btn + 7) / 8) as usize;
-                                let mut bitmap = vec![0u8; bytes];
-                                for btn in [BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_TOUCH, BTN_TOOL_FINGER] {
-                                    bitmap[(btn / 8) as usize] |= 1 << (btn % 8);
+                    bitmap
+                } else {
+                    match self.device_type {
+                        InputDeviceType::Keyboard => {
+                            match self.cfg_subsel as u16 {
+                                EV_KEY => {
+                                    // Bitmap of supported KEY_* codes.
+                                    // Need at least 96 bytes to cover KEY_* up to 0x2FF.
+                                    let mut bitmap = vec![0u8; 96]; // 768 bits
+                                    // Standard keyboard keys (1-127 = main keyboard area).
+                                    for i in 1u16..128 {
+                                        bitmap[(i / 8) as usize] |= 1 << (i % 8);
+                                    }
+                                    bitmap
                                 }
-                                bitmap
+                                EV_REP => vec![1],
+                                EV_LED => {
+                                    let mut bitmap = vec![0u8; 2];
+                                    bitmap[0] = 0x07; // NUM_LOCK(0), CAPS_LOCK(1), SCROLL_LOCK(2)
+                                    bitmap
+                                }
+                                _ => Vec::new(),
                             }
-                            EV_ABS => {
-                                // Support ABS_X (0) and ABS_Y (1)
-                                let mut bitmap = vec![0u8; 1];
-                                bitmap[0] = 0x03; // bits 0 and 1
-                                bitmap
+                        }
+                        InputDeviceType::Tablet => {
+                            match self.cfg_subsel as u16 {
+                                EV_KEY => {
+                                    // Support BTN_LEFT (0x110), BTN_RIGHT (0x111), BTN_MIDDLE (0x112),
+                                    // BTN_TOUCH (0x14A), BTN_TOOL_FINGER (0x145)
+                                    let max_btn = 0x150u16;
+                                    let bytes = ((max_btn as usize) + 7) / 8;
+                                    let mut bitmap = vec![0u8; bytes];
+                                    for btn in [BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_TOUCH, BTN_TOOL_FINGER] {
+                                        bitmap[(btn / 8) as usize] |= 1 << (btn % 8);
+                                    }
+                                    bitmap
+                                }
+                                EV_ABS => {
+                                    // Support ABS_X (0) and ABS_Y (1)
+                                    vec![0x03] // bits 0 and 1
+                                }
+                                _ => Vec::new(),
                             }
-                            _ => Vec::new(),
                         }
                     }
                 }

@@ -757,12 +757,26 @@ impl VirtioGpu {
         let total_backing_size: u64 = resource.backing.iter().map(|(_, len)| *len as u64).sum();
         let mut backing_buf = vec![0u8; total_backing_size as usize];
         let mut buf_offset = 0usize;
+        let mut dma_fail_count = 0u32;
+        let mut dma_ok_count = 0u32;
         for (addr, len) in &resource.backing {
             let chunk_len = *len as usize;
             if buf_offset + chunk_len <= backing_buf.len() {
-                dma_read_raw(mem_ptr, mem_len, *addr, &mut backing_buf[buf_offset..buf_offset + chunk_len]);
+                let ok = dma_read_raw(mem_ptr, mem_len, *addr, &mut backing_buf[buf_offset..buf_offset + chunk_len]);
+                if ok { dma_ok_count += 1; } else { dma_fail_count += 1; }
             }
             buf_offset += chunk_len;
+        }
+
+        #[cfg(feature = "std")]
+        {
+            static mut BACKING_LOG: u32 = 0;
+            unsafe { BACKING_LOG += 1; if BACKING_LOG <= 5 {
+                let first_addr = resource.backing.first().map(|(a,_)| *a).unwrap_or(0);
+                let backing_nonzero = backing_buf.iter().filter(|&&b| b != 0).count();
+                eprintln!("[virtio-gpu] TRANSFER backing: {} entries, first_gpa=0x{:X} total={} dma_ok={} dma_fail={} backing_nonzero={}/{}",
+                    resource.backing.len(), first_addr, total_backing_size, dma_ok_count, dma_fail_count, backing_nonzero, backing_buf.len());
+            }}
         }
 
         // Now copy the requested rectangle from the backing buffer into the resource pixels.

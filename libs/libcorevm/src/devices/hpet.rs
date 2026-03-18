@@ -166,11 +166,15 @@ impl Hpet {
     pub fn timer0_irq(&self) -> u32 {
         if self.config & 2 != 0 {
             // Legacy replacement mode: Timer 0 → IRQ 2 (PIT legacy routing via IOAPIC)
-            2
-        } else {
-            // Normal routing from config bits [13:9]
-            ((self.timer0_config >> 9) & 0x1F) as u32
+            return 2;
         }
+        let route = ((self.timer0_config >> 9) & 0x1F) as u32;
+        // On KVM, IOAPIC pin 0 is owned by the in-kernel PIT. If the guest
+        // requests IRQ 0 for the HPET, remap to IRQ 2 (the standard HPET
+        // interrupt line on IOAPIC). Without this, the HPET interrupt is
+        // never delivered because guests typically mask pin 0 (PIT) when
+        // using HPET, causing a boot hang (especially Windows with SMP).
+        if route == 0 { 2 } else { route }
     }
 
     /// Build the General Capabilities & ID register value.
