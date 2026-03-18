@@ -919,39 +919,57 @@ impl VirtioGpu {
     }
 
     /// Blit a resource's pixel data into the scanout framebuffer.
+    /// Blit resource pixels into the scanout framebuffer.
+    /// Output format is RGBA32 (ready for egui display — no conversion needed on host).
     fn blit_resource_to_framebuffer(&mut self, resource: &Resource2D, scanout_idx: usize) {
         if scanout_idx >= MAX_SCANOUTS {
             return;
         }
-        let scanout = &self.scanouts[scanout_idx];
         let src_bpp = format_bpp(resource.format) as u32;
-        let src_stride = resource.width * src_bpp;
-        let dst_stride = self.fb_width * 4; // Framebuffer is always BGRA32
+        let src_stride = (resource.width * src_bpp) as usize;
+        let dst_stride = (self.fb_width * 4) as usize;
 
-        let copy_w = resource.width.min(self.fb_width);
-        let copy_h = resource.height.min(self.fb_height);
+        let copy_w = resource.width.min(self.fb_width) as usize;
+        let copy_h = resource.height.min(self.fb_height) as usize;
+        let bpp = src_bpp as usize;
+        let fmt = resource.format;
+        let src_pixels = &resource.pixels;
+        let dst_pixels = &mut self.framebuffer;
+
+        // Fast path: B8G8R8X8/B8G8R8A8 (format 1 or 2) — just swap R↔B per row.
+        let is_bgrx = fmt == VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM || fmt == VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM;
 
         for y in 0..copy_h {
-            for x in 0..copy_w {
-                let src_off = (y * src_stride + x * src_bpp) as usize;
-                let dst_off = (y * dst_stride + x * 4) as usize;
+            let src_row = y * src_stride;
+            let dst_row = y * dst_stride;
 
-                if src_off + src_bpp as usize > resource.pixels.len() {
-                    continue;
+            if is_bgrx && bpp == 4 {
+                // Fast bulk swap: BGRA → RGBA per 4-byte pixel
+                let row_end = src_row + copy_w * 4;
+                if row_end <= src_pixels.len() && dst_row + copy_w * 4 <= dst_pixels.len() {
+                    let src = &src_pixels[src_row..row_end];
+                    let dst = &mut dst_pixels[dst_row..dst_row + copy_w * 4];
+                    for i in (0..copy_w * 4).step_by(4) {
+                        dst[i]     = src[i + 2]; // R
+                        dst[i + 1] = src[i + 1]; // G
+                        dst[i + 2] = src[i];     // B
+                        dst[i + 3] = 255;        // A
+                    }
                 }
-                if dst_off + 4 > self.framebuffer.len() {
-                    continue;
+            } else {
+                // Generic path: per-pixel format conversion
+                for x in 0..copy_w {
+                    let src_off = src_row + x * bpp;
+                    let dst_off = dst_row + x * 4;
+                    if src_off + bpp <= src_pixels.len() && dst_off + 4 <= dst_pixels.len() {
+                        let (b, g, r, a) = pixel_to_bgra(fmt, &src_pixels[src_off..src_off + bpp]);
+                        // Write as RGBA (not BGRA) — ready for direct host display.
+                        dst_pixels[dst_off]     = r;
+                        dst_pixels[dst_off + 1] = g;
+                        dst_pixels[dst_off + 2] = b;
+                        dst_pixels[dst_off + 3] = a;
+                    }
                 }
-
-                // Convert from source format to BGRA32.
-                let (b, g, r, a) = pixel_to_bgra(
-                    resource.format,
-                    &resource.pixels[src_off..src_off + src_bpp as usize],
-                );
-                self.framebuffer[dst_off] = b;
-                self.framebuffer[dst_off + 1] = g;
-                self.framebuffer[dst_off + 2] = r;
-                self.framebuffer[dst_off + 3] = a;
             }
         }
     }

@@ -356,10 +356,14 @@ fn vm_run_loop(
     for cpu_id in 1..num_cpus {
         let ap_control = control.clone();
         let ap_handle = handle;
+        let ap_diag = diag.clone();
         ap_threads.push(thread::spawn(move || {
             #[cfg(target_os = "linux")]
             libcorevm::backend::kvm::install_sigusr1_handler();
 
+            let mut ap_total = 0u64;
+            let mut ap_exits = [0u64; 16];
+            let ap_start = Instant::now();
             loop {
                 if ap_control.stop.load(Ordering::Relaxed)
                     || ap_control.exited.load(Ordering::Relaxed) {
@@ -373,12 +377,26 @@ fn vm_run_loop(
                 let mut exit = CExitReason::default();
                 let rc = corevm_run_vcpu(ap_handle, cpu_id, &mut exit);
                 if rc != 0 {
+                    if ap_total <= 10 || ap_total % 1000 == 0 {
+                        ap_diag.log(DiagCategory::Error, format!(
+                            "[vcpu-{}] run_vcpu FAILED rc={} (exit #{})", cpu_id, rc, ap_total));
+                    }
+                    ap_total += 1;
                     thread::sleep(Duration::from_millis(1));
                     continue;
                 }
 
+                // Debug: log every non-Cancel exit to trace SIPI/INIT handling
+                if exit.reason != 13 || ap_total <= 50 {
+                    let mut ap_regs = VcpuRegs::default();
+                    corevm_get_vcpu_regs(ap_handle, cpu_id, &mut ap_regs);
+                    ap_diag.log(DiagCategory::Info, format!(
+                        "[vcpu-{}] exit #{}: reason={} RIP={:#x} RFLAGS={:#x} port={:#x} addr={:#x}",
+                        cpu_id, ap_total, exit.reason, ap_regs.rip, ap_regs.rflags, exit.port, exit.addr));
+                }
+
                 match exit.reason {
-                    0 => {
+                    0 => { // IoIn
                         if exit.io_count > 1 {
                             corevm_complete_string_io(ap_handle, cpu_id, exit.port, 0, exit.size, exit.io_count);
                         } else {
@@ -386,7 +404,7 @@ fn vm_run_loop(
                             corevm_handle_io_exit(ap_handle, cpu_id, exit.port, 0, exit.size, data.as_mut_ptr());
                         }
                     }
-                    1 => {
+                    1 => { // IoOut
                         if exit.io_count > 1 {
                             corevm_complete_string_io(ap_handle, cpu_id, exit.port, 1, exit.size, exit.io_count);
                         } else {
@@ -394,20 +412,24 @@ fn vm_run_loop(
                             corevm_handle_io_exit(ap_handle, cpu_id, exit.port, 1, exit.size, data.as_mut_ptr());
                         }
                     }
-                    2 => {
+                    2 => { // MmioRead
                         let mut data = [0u8; 8];
                         corevm_handle_mmio_exit(ap_handle, cpu_id, exit.addr, 0, exit.size, data.as_mut_ptr(), exit.mmio_dest_reg, exit.mmio_instr_len);
-                        // Note: do NOT call corevm_ahci_poll_irq from AP threads.
-                        // The BSP's poll_irqs handles AHCI IRQ delivery. Calling it
-                        // from both BSP and AP causes races on ahci_irq_asserted
-                        // that can lose interrupts and hang the guest.
                     }
-                    3 => {
+                    3 => { // MmioWrite
                         let mut data = exit.data_u64.to_le_bytes();
                         corevm_handle_mmio_exit(ap_handle, cpu_id, exit.addr, 1, exit.size, data.as_mut_ptr(), 0, 0);
                     }
-                    7 | 13 => { /* HLT/Cancel — re-enter immediately */ }
-                    12 => {
+                    7 => { // Halted — re-enter KVM_RUN immediately.
+                        // KVM handles HLT internally: KVM_RUN blocks until
+                        // an interrupt arrives (IPI, timer, etc.). Do NOT sleep
+                        // here — sleeping delays IPI delivery by up to 1ms,
+                        // which can cause Windows SMP init timeouts.
+                    }
+                    9 | 11 => { // Shutdown / Error
+                        break;
+                    }
+                    12 => { // StringIo
                         corevm_handle_string_io_exit(
                             ap_handle, cpu_id, exit.port, exit.string_io_is_write,
                             exit.string_io_count, exit.string_io_gpa,
@@ -415,7 +437,22 @@ fn vm_run_loop(
                             exit.string_io_addr_size, exit.size,
                         );
                     }
+                    13 => { } // Cancelled — re-enter immediately
                     _ => {}
+                }
+
+                ap_total += 1;
+                if (exit.reason as usize) < ap_exits.len() {
+                    ap_exits[exit.reason as usize] += 1;
+                }
+                if ap_start.elapsed().as_secs() % 5 == 0 && ap_total % 200 == 1 {
+                    ap_diag.log(DiagCategory::Info, format!(
+                        "[vcpu-{}] exits={} IO={}/{} MMIO={}/{} Hlt={} Cancel={} Err={}",
+                        cpu_id, ap_total,
+                        ap_exits[0], ap_exits[1],
+                        ap_exits[2], ap_exits[3],
+                        ap_exits[7], ap_exits[13], ap_exits[11]
+                    ));
                 }
             }
         }));
@@ -856,26 +893,11 @@ fn update_framebuffer(handle: u64, fb: &Arc<Mutex<FrameBufferData>>, diag: &Diag
                         fb_data.text_mode = false;
                         fb_data.width = gpu_w;
                         fb_data.height = gpu_h;
-                        // VirtIO GPU framebuffer is BGRA32 — convert to RGBA32.
-                        // Use fast bulk copy instead of per-pixel loop.
-                        let npixels = (gpu_w as usize) * (gpu_h as usize);
-                        fb_data.pixels.resize(npixels * 4, 255);
-                        // BGRA → RGBA: swap bytes 0↔2 for each pixel
-                        let dst = &mut fb_data.pixels;
-                        for i in 0..npixels {
-                            let s = i * 4;
-                            dst[s]     = raw[s + 2]; // R
-                            dst[s + 1] = raw[s + 1]; // G
-                            dst[s + 2] = raw[s];     // B
-                            dst[s + 3] = 255;        // A
-                        }
+                        // VirtIO GPU framebuffer is already RGBA32 (blit converts).
+                        // Just memcpy — no per-pixel conversion needed.
+                        fb_data.pixels.resize(fb_size, 0);
+                        fb_data.pixels.copy_from_slice(raw);
                         fb_data.dirty = true;
-
-                        static mut GPU_FB_LOG: u32 = 0;
-                        unsafe { GPU_FB_LOG += 1; if GPU_FB_LOG <= 10 || GPU_FB_LOG % 300 == 0 {
-                            let nz = raw.iter().take(1000).filter(|&&b| b != 0).count();
-                            eprintln!("[vmmanager] virtio-gpu fb update: {}x{} dirty=true sample_nz={}/1000", gpu_w, gpu_h, nz);
-                        }}
                     }
                     return;
                 }

@@ -243,10 +243,19 @@ impl Uhci {
             let maxlen_field = ((token >> 21) & 0x7FF) as u16;
             let xfer_len = if maxlen_field == 0x7FF { 0u16 } else { maxlen_field + 1 };
 
-            // Only handle our device (address 0 during enum, or assigned address)
+            // Only handle our device (address 0 during enum, or assigned address).
+            // For other addresses: complete the TD with a STALL error so the
+            // guest driver knows no device exists there. Leaving the TD active
+            // causes the guest to wait until timeout (-ETIMEDOUT / error -90).
             if dev != 0 && dev != self.device_address {
-                // Not our device — NAK (leave active, guest will retry)
-                return td_addr | 0x00000000;
+                let new_ctrl = (ctrl & !(TD_ACTIVE | 0x7FF))
+                    | (1 << 22)   // Stalled
+                    | 0x7FF;      // actual_length = null (no data)
+                self.write32(td_addr as u64 + 4, new_ctrl);
+                if link & 1 != 0 { return 0x00000001; }
+                td_addr = link & 0xFFFFFFF0;
+                count += 1;
+                continue;
             }
 
             let (completed, actual_bytes) = match pid {
