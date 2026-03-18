@@ -1216,14 +1216,12 @@ impl E1000 {
             if delivered_count >= MAX_RX_PER_POLL { break; }
 
             if head == tail {
-                #[cfg(feature = "std")]
-                if !self.rx_buffer.is_empty() {
-                    static mut STALL_COUNT: u32 = 0;
-                    unsafe { STALL_COUNT += 1; }
-                    if unsafe { STALL_COUNT } % 1000 == 1 {
-                        eprintln!("[e1000] RX STALL: head={} tail={} pending={} stalls={}",
-                            head, tail, self.rx_buffer.len(), unsafe { STALL_COUNT });
-                    }
+                // No available descriptors — drop excess packets to prevent
+                // unbounded memory growth.  Keep at most 64 packets queued
+                // so the guest can recover when it replenishes descriptors.
+                while self.rx_buffer.len() > 64 {
+                    self.rx_buffer.pop_front();
+                    self.stat_inc(STAT_MPC); // Missed Packet Count
                 }
                 self.regs[REG_ICR / 4] |= ICR_RXO;
                 break;
@@ -1480,10 +1478,13 @@ impl MmioHandler for E1000 {
             }
 
             REG_ICR => {
+                // Reading ICR clears all cause bits.
+                // De-assertion is handled by poll_irqs which tracks
+                // e1000_irq_asserted — we must NOT call fire_irq_callback
+                // here because it would de-assert the line without updating
+                // that flag, causing poll_irqs to never re-assert.
                 let icr = self.regs[dword_offset];
                 self.regs[dword_offset] = 0;
-                // De-assert interrupt line after clearing ICR.
-                self.fire_irq_callback();
                 icr
             }
 
@@ -1605,8 +1606,7 @@ impl MmioHandler for E1000 {
 
             REG_IMC => {
                 self.regs[REG_IMS / 4] &= !new_val;
-                // De-assert if no more pending masked interrupts.
-                self.fire_irq_callback();
+                // De-assertion handled by poll_irqs (same reason as ICR read).
             }
 
             // RX ring
