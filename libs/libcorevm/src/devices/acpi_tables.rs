@@ -408,6 +408,15 @@ fn build_dsdt_with_cpus(num_cpus: u32, devices: &AcpiDeviceConfig) -> Vec<u8> {
         num_prt_entries += 1;
     }
 
+    // Dev 9 (VirtIO Keyboard): INTA → GSI 10
+    // Dev 10 (VirtIO Tablet): INTB → GSI 10
+    if devices.has_virtio_input {
+        prt_entry(&mut prt, 9, 0, 10);
+        num_prt_entries += 1;
+        prt_entry(&mut prt, 10, 1, 10);
+        num_prt_entries += 1;
+    }
+
     // Wrap in Package: PackageOp PkgLength NumElements entries...
     let mut prt_pkg = Vec::new();
     prt_pkg.push(0x12); // PackageOp
@@ -723,6 +732,7 @@ pub struct AcpiDeviceConfig {
     pub has_uhci: bool,
     pub has_virtio_gpu: bool,
     pub has_virtio_net: bool,
+    pub has_virtio_input: bool,
 }
 
 /// Generate ACPI 2.0 tables for SeaBIOS fw_cfg.

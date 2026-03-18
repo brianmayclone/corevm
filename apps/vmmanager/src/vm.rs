@@ -16,6 +16,7 @@ use libcorevm::ffi::{
     corevm_setup_standard_devices, corevm_setup_acpi_tables, corevm_setup_acpi_tables_with_hpet, corevm_setup_ahci, corevm_setup_e1000, corevm_setup_hpet, corevm_setup_ac97, corevm_ac97_process,
     corevm_setup_uhci, corevm_uhci_process,
     corevm_setup_virtio_gpu, corevm_virtio_gpu_process, corevm_virtio_gpu_get_framebuffer, corevm_virtio_gpu_get_mode, corevm_has_virtio_gpu, corevm_virtio_gpu_scanout_active,
+    corevm_setup_virtio_input, corevm_has_virtio_input, corevm_virtio_kbd_ps2, corevm_virtio_tablet_move, corevm_virtio_input_process,
     corevm_complete_string_io,
     corevm_get_vcpu_regs,
     corevm_get_vcpu_sregs,
@@ -165,6 +166,11 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
         let gpu_vram = config.vram_mb.max(64); // VirtIO GPU needs at least 64MB VRAM
         corevm_setup_virtio_gpu(handle, gpu_vram);
         entry.diag_log.log(DiagCategory::Info, format!("VirtIO GPU enabled (VRAM={}MB)", gpu_vram));
+
+        // VirtIO Input devices — always enabled alongside VirtIO GPU.
+        // The guest expects virtio-input when using virtio-gpu for input routing.
+        corevm_setup_virtio_input(handle);
+        entry.diag_log.log(DiagCategory::Info, "VirtIO Input (keyboard + tablet) enabled".into());
     }
 
     // ACPI tables — MUST be generated AFTER all PCI devices are set up,
@@ -373,12 +379,20 @@ fn vm_run_loop(
 
                 match exit.reason {
                     0 => {
-                        let mut data = [0u8; 4];
-                        corevm_handle_io_exit(ap_handle, cpu_id, exit.port, 0, exit.size, data.as_mut_ptr());
+                        if exit.io_count > 1 {
+                            corevm_complete_string_io(ap_handle, cpu_id, exit.port, 0, exit.size, exit.io_count);
+                        } else {
+                            let mut data = [0u8; 4];
+                            corevm_handle_io_exit(ap_handle, cpu_id, exit.port, 0, exit.size, data.as_mut_ptr());
+                        }
                     }
                     1 => {
-                        let mut data = exit.data_u32.to_le_bytes();
-                        corevm_handle_io_exit(ap_handle, cpu_id, exit.port, 1, exit.size, data.as_mut_ptr());
+                        if exit.io_count > 1 {
+                            corevm_complete_string_io(ap_handle, cpu_id, exit.port, 1, exit.size, exit.io_count);
+                        } else {
+                            let mut data = exit.data_u32.to_le_bytes();
+                            corevm_handle_io_exit(ap_handle, cpu_id, exit.port, 1, exit.size, data.as_mut_ptr());
+                        }
                     }
                     2 => {
                         let mut data = [0u8; 8];
@@ -391,6 +405,14 @@ fn vm_run_loop(
                         corevm_ahci_poll_irq(ap_handle);
                     }
                     7 | 13 => { /* HLT/Cancel — re-enter immediately */ }
+                    12 => {
+                        corevm_handle_string_io_exit(
+                            ap_handle, cpu_id, exit.port, exit.string_io_is_write,
+                            exit.string_io_count, exit.string_io_gpa,
+                            exit.string_io_step, exit.string_io_instr_len,
+                            exit.string_io_addr_size, exit.size,
+                        );
+                    }
                     _ => {}
                 }
             }
@@ -764,13 +786,15 @@ fn vm_run_loop(
             corevm_uhci_process(handle);
         }
 
-        // Process VirtIO GPU virtqueue commands
+        // Process VirtIO GPU virtqueue commands.
+        // IRQs are delivered by the regular corevm_poll_irqs call above.
         if corevm_has_virtio_gpu(handle) != 0 {
-            let gpu_irq = corevm_virtio_gpu_process(handle);
-            if gpu_irq != 0 {
-                // VirtIO GPU has pending interrupts — poll_irqs will deliver them.
-                corevm_poll_irqs(handle);
-            }
+            corevm_virtio_gpu_process(handle);
+        }
+
+        // Process VirtIO Input event delivery (keyboard + tablet).
+        if corevm_has_virtio_input(handle) != 0 {
+            corevm_virtio_input_process(handle);
         }
 
         // Poll network backend: TX from E1000 → backend, RX from backend → E1000

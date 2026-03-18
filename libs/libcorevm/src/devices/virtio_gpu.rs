@@ -472,6 +472,9 @@ impl VirtioGpu {
 
         let cmd_type = u32::from_le_bytes([cmd_data[0], cmd_data[1], cmd_data[2], cmd_data[3]]);
 
+        #[cfg(feature = "std")]
+        eprintln!("[virtio-gpu] cmd=0x{:04X} len={}", cmd_type, cmd_data.len());
+
         match cmd_type {
             VIRTIO_GPU_CMD_GET_DISPLAY_INFO => {
                 self.cmd_get_display_info(&write_bufs)
@@ -629,12 +632,13 @@ impl VirtioGpu {
             return self.write_response(write_bufs, VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER, &[]);
         }
 
-        let scanout_id = u32::from_le_bytes([cmd[24], cmd[25], cmd[26], cmd[27]]);
-        let resource_id = u32::from_le_bytes([cmd[28], cmd[29], cmd[30], cmd[31]]);
-        let r_x = u32::from_le_bytes([cmd[32], cmd[33], cmd[34], cmd[35]]);
-        let r_y = u32::from_le_bytes([cmd[36], cmd[37], cmd[38], cmd[39]]);
-        let r_w = u32::from_le_bytes([cmd[40], cmd[41], cmd[42], cmd[43]]);
-        let r_h = u32::from_le_bytes([cmd[44], cmd[45], cmd[46], cmd[47]]);
+        // struct virtio_gpu_set_scanout: hdr(24) + rect(x,y,w,h @ 24,28,32,36) + scanout_id(40) + resource_id(44)
+        let r_x = u32::from_le_bytes([cmd[24], cmd[25], cmd[26], cmd[27]]);
+        let r_y = u32::from_le_bytes([cmd[28], cmd[29], cmd[30], cmd[31]]);
+        let r_w = u32::from_le_bytes([cmd[32], cmd[33], cmd[34], cmd[35]]);
+        let r_h = u32::from_le_bytes([cmd[36], cmd[37], cmd[38], cmd[39]]);
+        let scanout_id = u32::from_le_bytes([cmd[40], cmd[41], cmd[42], cmd[43]]);
+        let resource_id = u32::from_le_bytes([cmd[44], cmd[45], cmd[46], cmd[47]]);
 
         if scanout_id as usize >= MAX_SCANOUTS {
             return self.write_response(write_bufs, VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER, &[]);
@@ -663,6 +667,9 @@ impl VirtioGpu {
         // Mark scanout as active — the guest driver has configured display output.
         if scanout_id == 0 { self.scanout_active = true; }
 
+        #[cfg(feature = "std")]
+        eprintln!("[virtio-gpu] SET_SCANOUT scanout={} res={} rect={}x{}+{}+{}", scanout_id, resource_id, r_w, r_h, r_x, r_y);
+
         // Update framebuffer dimensions if scanout size changed.
         if scanout_id == 0 && r_w > 0 && r_h > 0 {
             self.fb_width = r_w;
@@ -681,11 +688,15 @@ impl VirtioGpu {
             return self.write_response(write_bufs, VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER, &[]);
         }
 
-        let resource_id = u32::from_le_bytes([cmd[28], cmd[29], cmd[30], cmd[31]]);
-        let _r_x = u32::from_le_bytes([cmd[32], cmd[33], cmd[34], cmd[35]]);
-        let _r_y = u32::from_le_bytes([cmd[36], cmd[37], cmd[38], cmd[39]]);
-        let _r_w = u32::from_le_bytes([cmd[40], cmd[41], cmd[42], cmd[43]]);
-        let _r_h = u32::from_le_bytes([cmd[44], cmd[45], cmd[46], cmd[47]]);
+        // struct virtio_gpu_resource_flush: hdr(24) + rect(x,y,w,h @ 24,28,32,36) + resource_id(40)
+        let _r_x = u32::from_le_bytes([cmd[24], cmd[25], cmd[26], cmd[27]]);
+        let _r_y = u32::from_le_bytes([cmd[28], cmd[29], cmd[30], cmd[31]]);
+        let _r_w = u32::from_le_bytes([cmd[32], cmd[33], cmd[34], cmd[35]]);
+        let _r_h = u32::from_le_bytes([cmd[36], cmd[37], cmd[38], cmd[39]]);
+        let resource_id = u32::from_le_bytes([cmd[40], cmd[41], cmd[42], cmd[43]]);
+
+        #[cfg(feature = "std")]
+        eprintln!("[virtio-gpu] FLUSH res={} rect={}x{}+{}+{}", resource_id, _r_w, _r_h, _r_x, _r_y);
 
         // Find scanout(s) displaying this resource and copy to framebuffer.
         // We need to temporarily remove the resource to avoid borrow conflicts
@@ -693,6 +704,13 @@ impl VirtioGpu {
         for i in 0..MAX_SCANOUTS {
             if self.scanouts[i].resource_id == resource_id {
                 if let Some(resource) = self.resources.remove(&resource_id) {
+                    #[cfg(feature = "std")]
+                    {
+                        let nonzero = resource.pixels.iter().filter(|&&b| b != 0).count();
+                        eprintln!("[virtio-gpu] BLIT res={} {}x{} fmt={} pixels_nonzero={}/{}",
+                            resource_id, resource.width, resource.height, resource.format,
+                            nonzero, resource.pixels.len());
+                    }
                     self.blit_resource_to_framebuffer(&resource, i);
                     self.resources.insert(resource_id, resource);
                 }
@@ -733,24 +751,49 @@ impl VirtioGpu {
         let bpp = format_bpp(resource.format) as u32;
         let src_stride = resource.width * bpp;
 
-        // Read pixel data from guest backing pages into the resource.
-        let mut guest_offset = offset;
+        // First, read all backing pages into a contiguous host buffer.
+        // This is much faster than pixel-by-pixel DMA reads and avoids
+        // offset calculation bugs with scatter-gather backing.
+        let total_backing_size: u64 = resource.backing.iter().map(|(_, len)| *len as u64).sum();
+        let mut backing_buf = vec![0u8; total_backing_size as usize];
+        let mut buf_offset = 0usize;
+        for (addr, len) in &resource.backing {
+            let chunk_len = *len as usize;
+            if buf_offset + chunk_len <= backing_buf.len() {
+                dma_read_raw(mem_ptr, mem_len, *addr, &mut backing_buf[buf_offset..buf_offset + chunk_len]);
+            }
+            buf_offset += chunk_len;
+        }
+
+        // Now copy the requested rectangle from the backing buffer into the resource pixels.
+        // The backing buffer layout matches the resource layout (stride = width * bpp).
+        let offset = offset as usize;
         for y in r_y..(r_y + r_h).min(resource.height) {
-            for x in r_x..(r_x + r_w).min(resource.width) {
-                let dst_offset = (y * src_stride + x * bpp) as usize;
-                let src_gpa = Self::backing_gpa_at(&resource.backing, guest_offset);
-                if let Some(gpa) = src_gpa {
-                    let mut pixel = [0u8; 4];
-                    let pixel_bytes = bpp as usize;
-                    // DMA read using extracted pointers to avoid borrow conflict.
-                    if dma_read_raw(mem_ptr, mem_len, gpa, &mut pixel[..pixel_bytes]) {
-                        if dst_offset + pixel_bytes <= resource.pixels.len() {
-                            resource.pixels[dst_offset..dst_offset + pixel_bytes]
-                                .copy_from_slice(&pixel[..pixel_bytes]);
-                        }
-                    }
+            let dst_row_start = (y * src_stride + r_x * bpp) as usize;
+            // Source offset: the `offset` parameter is the starting byte offset
+            // within the backing, then we advance by row stride.
+            let src_row_start = offset + ((y - r_y) as usize) * (r_w * bpp) as usize;
+            let row_bytes = ((r_w.min(resource.width - r_x)) * bpp) as usize;
+
+            if src_row_start + row_bytes <= backing_buf.len()
+                && dst_row_start + row_bytes <= resource.pixels.len()
+            {
+                resource.pixels[dst_row_start..dst_row_start + row_bytes]
+                    .copy_from_slice(&backing_buf[src_row_start..src_row_start + row_bytes]);
+            }
+        }
+
+        #[cfg(feature = "std")]
+        {
+            let nonzero = resource.pixels.iter().filter(|&&b| b != 0).count();
+            static mut XFER_LOG_COUNT: u32 = 0;
+            unsafe {
+                XFER_LOG_COUNT += 1;
+                if XFER_LOG_COUNT <= 10 || XFER_LOG_COUNT % 100 == 0 {
+                    eprintln!("[virtio-gpu] TRANSFER_2D res={} rect={}x{}+{}+{} off={} backing={} nonzero={}/{}",
+                        resource_id, r_w, r_h, r_x, r_y, offset,
+                        total_backing_size, nonzero, resource.pixels.len());
                 }
-                guest_offset += bpp as u64;
             }
         }
 

@@ -915,6 +915,50 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                 }
             }
 
+            // VirtIO Input (Keyboard + Tablet) → IRQ 10 (edge-triggered)
+            if !vm.virtio_kbd_ptr.is_null() {
+                let kbd = unsafe { &mut *vm.virtio_kbd_ptr };
+                if kbd.isr_status != 0 {
+                    #[cfg(feature = "linux")]
+                    {
+                        let _ = vm.backend.set_irq_line(10, true);
+                        let _ = vm.backend.set_irq_line(10, false);
+                        injected += 1;
+                    }
+                    #[cfg(feature = "windows")]
+                    {
+                        if !vm.pic_ptr.is_null() {
+                            let pic = unsafe { &mut *vm.pic_ptr };
+                            pic.raise_irq(10);
+                        }
+                        vm.backend.ioapic_set_irq(10, true);
+                        vm.backend.ioapic_set_irq(10, false);
+                        injected += 1;
+                    }
+                }
+            }
+            if !vm.virtio_tablet_ptr.is_null() {
+                let tablet = unsafe { &mut *vm.virtio_tablet_ptr };
+                if tablet.isr_status != 0 {
+                    #[cfg(feature = "linux")]
+                    {
+                        let _ = vm.backend.set_irq_line(10, true);
+                        let _ = vm.backend.set_irq_line(10, false);
+                        injected += 1;
+                    }
+                    #[cfg(feature = "windows")]
+                    {
+                        if !vm.pic_ptr.is_null() {
+                            let pic = unsafe { &mut *vm.pic_ptr };
+                            pic.raise_irq(10);
+                        }
+                        vm.backend.ioapic_set_irq(10, true);
+                        vm.backend.ioapic_set_irq(10, false);
+                        injected += 1;
+                    }
+                }
+            }
+
             // Software PIC injection (non-Linux only).
             // On KVM/Linux the in-kernel irqchip handles injection automatically.
             #[cfg(not(feature = "linux"))]
@@ -977,8 +1021,9 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
 /// enabled MSI via the PCI capability registers.
 #[no_mangle]
 pub extern "C" fn corevm_ahci_poll_irq(handle: u64) {
-    let vm = match get_vm(handle) { Some(v) => v, None => return };
-    if vm.ahci_ptr.is_null() { return; }
+    io_lock();
+    let vm = match get_vm(handle) { Some(v) => v, None => { io_unlock(); return } };
+    if vm.ahci_ptr.is_null() { io_unlock(); return; }
 
     // Sync MSI state from PCI config space into AHCI struct.
     // AHCI is PCI device 00:03.0, MSI cap at offset 0x80.
@@ -1075,6 +1120,7 @@ pub extern "C" fn corevm_ahci_poll_irq(handle: u64) {
             }
         }
     }
+    io_unlock();
 }
 
 /// Check if the guest has requested a system reset (e.g. PS/2 0xFE, port 0xCF9).
@@ -1630,6 +1676,7 @@ pub extern "C" fn corevm_setup_acpi_tables(handle: u64) -> i32 {
         has_uhci: !vm.uhci_ptr.is_null(),
         has_virtio_gpu: !vm.virtio_gpu_ptr.is_null(),
         has_virtio_net: !vm.virtio_net_ptr.is_null(),
+        has_virtio_input: !vm.virtio_kbd_ptr.is_null(),
     };
     let (rsdp, tables, loader) = crate::devices::acpi_tables::generate_acpi_tables_configured(false, num_cpus, &devices);
     dbg(&alloc::format!("Generated ACPI: {} CPUs, e1000={} ac97={} uhci={} virtio_gpu={}", num_cpus, devices.has_e1000, devices.has_ac97, devices.has_uhci, devices.has_virtio_gpu));
@@ -1670,6 +1717,7 @@ pub extern "C" fn corevm_setup_acpi_tables_with_hpet(handle: u64) -> i32 {
         has_uhci: !vm.uhci_ptr.is_null(),
         has_virtio_gpu: !vm.virtio_gpu_ptr.is_null(),
         has_virtio_net: !vm.virtio_net_ptr.is_null(),
+        has_virtio_input: !vm.virtio_kbd_ptr.is_null(),
     };
     let (rsdp, tables, loader) = crate::devices::acpi_tables::generate_acpi_tables_configured(true, num_cpus, &devices);
     fw_cfg.add_file("etc/acpi/rsdp", rsdp);
@@ -1799,6 +1847,8 @@ pub struct PciMmioRouter {
     pub svga: *mut crate::devices::svga::Svga,
     pub virtio_gpu: *mut crate::devices::virtio_gpu::VirtioGpu,
     pub virtio_net: *mut crate::devices::virtio_net::VirtioNet,
+    pub virtio_kbd: *mut crate::devices::virtio_input::VirtioInput,
+    pub virtio_tablet: *mut crate::devices::virtio_input::VirtioInput,
     pci_bus: *mut crate::devices::bus::PciBus,
 }
 
@@ -1844,7 +1894,21 @@ impl PciMmioRouter {
         if self.pci_bus.is_null() || self.virtio_net.is_null() { return 0; }
         let bus = unsafe { &mut *self.pci_bus };
         let val = bus.mmcfg_read(0, 8, 0, 0x10, 4);
-        val & 0xFFFFC000 // 16KB aligned
+        val & 0xFFFFC000
+    }
+
+    fn virtio_kbd_bar0(&self) -> u64 {
+        if self.pci_bus.is_null() || self.virtio_kbd.is_null() { return 0; }
+        let bus = unsafe { &mut *self.pci_bus };
+        let val = bus.mmcfg_read(0, 9, 0, 0x10, 4);
+        val & 0xFFFFC000
+    }
+
+    fn virtio_tablet_bar0(&self) -> u64 {
+        if self.pci_bus.is_null() || self.virtio_tablet.is_null() { return 0; }
+        let bus = unsafe { &mut *self.pci_bus };
+        let val = bus.mmcfg_read(0, 10, 0, 0x10, 4);
+        val & 0xFFFFC000
     }
 }
 
@@ -1897,6 +1961,24 @@ impl crate::memory::mmio::MmioHandler for PciMmioRouter {
             }
         }
 
+        // Check VirtIO Input Keyboard BAR0 (16KB region)
+        if !self.virtio_kbd.is_null() {
+            let kbd_base = self.virtio_kbd_bar0();
+            if kbd_base != 0 && abs_addr >= kbd_base && abs_addr < kbd_base + 0x4000 {
+                let kbd = unsafe { &mut *self.virtio_kbd };
+                return kbd.read(abs_addr - kbd_base, size);
+            }
+        }
+
+        // Check VirtIO Input Tablet BAR0 (16KB region)
+        if !self.virtio_tablet.is_null() {
+            let tab_base = self.virtio_tablet_bar0();
+            if tab_base != 0 && abs_addr >= tab_base && abs_addr < tab_base + 0x4000 {
+                let tab = unsafe { &mut *self.virtio_tablet };
+                return tab.read(abs_addr - tab_base, size);
+            }
+        }
+
         Ok(0xFFFFFFFF)
     }
 
@@ -1942,6 +2024,24 @@ impl crate::memory::mmio::MmioHandler for PciMmioRouter {
             if net_base != 0 && abs_addr >= net_base && abs_addr < net_base + 0x4000 {
                 let net = unsafe { &mut *self.virtio_net };
                 return net.write(abs_addr - net_base, size, val);
+            }
+        }
+
+        // Check VirtIO Input Keyboard BAR0 (16KB region)
+        if !self.virtio_kbd.is_null() {
+            let kbd_base = self.virtio_kbd_bar0();
+            if kbd_base != 0 && abs_addr >= kbd_base && abs_addr < kbd_base + 0x4000 {
+                let kbd = unsafe { &mut *self.virtio_kbd };
+                return kbd.write(abs_addr - kbd_base, size, val);
+            }
+        }
+
+        // Check VirtIO Input Tablet BAR0 (16KB region)
+        if !self.virtio_tablet.is_null() {
+            let tab_base = self.virtio_tablet_bar0();
+            if tab_base != 0 && abs_addr >= tab_base && abs_addr < tab_base + 0x4000 {
+                let tab = unsafe { &mut *self.virtio_tablet };
+                return tab.write(abs_addr - tab_base, size, val);
             }
         }
 
@@ -2016,6 +2116,8 @@ pub extern "C" fn corevm_setup_ahci(handle: u64, num_ports: u8) -> i32 {
         svga: vm.svga_ptr,
         virtio_gpu: vm.virtio_gpu_ptr, // may be null if not set up yet
         virtio_net: vm.virtio_net_ptr, // may be null if not set up yet
+        virtio_kbd: vm.virtio_kbd_ptr,
+        virtio_tablet: vm.virtio_tablet_ptr,
         pci_bus: vm.pci_bus_ptr,
     });
     let router_ptr = &*router as *const PciMmioRouter as *mut PciMmioRouter;
@@ -2964,6 +3066,85 @@ pub extern "C" fn corevm_virtio_net_process_rx(handle: u64) -> i32 {
 pub extern "C" fn corevm_has_virtio_net(handle: u64) -> i32 {
     let vm = match get_vm(handle) { Some(v) => v, None => return 0 };
     if vm.virtio_net_ptr.is_null() { 0 } else { 1 }
+}
+
+// ── VirtIO Input FFI ──
+
+/// Set up VirtIO Input devices (keyboard + tablet).
+/// Creates two PCI devices at slots 00:09.0 and 00:0A.0.
+#[no_mangle]
+pub extern "C" fn corevm_setup_virtio_input(handle: u64) -> i32 {
+    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
+    vm.setup_virtio_input();
+
+    // Update PCI MMIO router with both input devices.
+    if !vm.pci_mmio_router_ptr.is_null() {
+        let router = unsafe { &mut *vm.pci_mmio_router_ptr };
+        router.virtio_kbd = vm.virtio_kbd_ptr;
+        router.virtio_tablet = vm.virtio_tablet_ptr;
+    }
+
+    0
+}
+
+/// Inject a key event into the VirtIO keyboard.
+/// `key`: Linux KEY_* code. `pressed`: 1=press, 0=release.
+#[no_mangle]
+pub extern "C" fn corevm_virtio_kbd_key(handle: u64, key: u16, pressed: i32) -> i32 {
+    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
+    let kbd = match vm.virtio_kbd() { Some(k) => k, None => return -1 };
+    kbd.inject_key(key, pressed != 0);
+    kbd.process_eventq();
+    0
+}
+
+/// Inject a PS/2 scancode into the VirtIO keyboard (auto-converts to Linux KEY_*).
+/// `scancode`: PS/2 Set 1 scancode (bit 7 = break).
+#[no_mangle]
+pub extern "C" fn corevm_virtio_kbd_ps2(handle: u64, scancode: u8) -> i32 {
+    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
+    let kbd = match vm.virtio_kbd() { Some(k) => k, None => return -1 };
+    let pressed = scancode & 0x80 == 0;
+    if let Some(key) = crate::devices::virtio_input::ps2_to_linux_key(scancode & 0x7F) {
+        kbd.inject_key(key, pressed);
+        kbd.process_eventq();
+    }
+    0
+}
+
+/// Inject an absolute tablet position into the VirtIO tablet.
+/// `x`, `y`: position in range 0..32767. `buttons`: bitmask (bit0=left, bit1=right, bit2=middle).
+#[no_mangle]
+pub extern "C" fn corevm_virtio_tablet_move(handle: u64, x: u32, y: u32, buttons: u8) -> i32 {
+    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
+    let tablet = match vm.virtio_tablet() { Some(t) => t, None => return -1 };
+    tablet.inject_abs_tablet(x, y, buttons);
+    tablet.process_eventq();
+    0
+}
+
+/// Process VirtIO Input event delivery for both keyboard and tablet.
+/// Call periodically from the VM loop. Returns 1 if any IRQ pending.
+#[no_mangle]
+pub extern "C" fn corevm_virtio_input_process(handle: u64) -> i32 {
+    let vm = match get_vm(handle) { Some(v) => v, None => return 0 };
+    let mut irq = false;
+    if let Some(kbd) = vm.virtio_kbd() {
+        kbd.process_eventq();
+        if kbd.irq_pending { kbd.irq_pending = false; irq = true; }
+    }
+    if let Some(tablet) = vm.virtio_tablet() {
+        tablet.process_eventq();
+        if tablet.irq_pending { tablet.irq_pending = false; irq = true; }
+    }
+    if irq { 1 } else { 0 }
+}
+
+/// Check if VirtIO Input devices are set up.
+#[no_mangle]
+pub extern "C" fn corevm_has_virtio_input(handle: u64) -> i32 {
+    let vm = match get_vm(handle) { Some(v) => v, None => return 0 };
+    if vm.virtio_kbd_ptr.is_null() { 0 } else { 1 }
 }
 
 // Re-export WHP debug callback setter for use by vmmanager.

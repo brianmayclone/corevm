@@ -43,6 +43,7 @@ pub mod gpu;
 pub mod nic;
 pub mod virtio_gpu;
 pub mod virtio_net;
+pub mod virtio_input;
 pub mod disk_cache;
 pub mod net;
 #[cfg(feature = "linux")]

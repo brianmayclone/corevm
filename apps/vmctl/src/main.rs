@@ -382,7 +382,7 @@ fn main() {
     #[cfg(target_os = "windows")]
     let cancel_interval_ms: u64 = 1;
     #[cfg(not(target_os = "windows"))]
-    let cancel_interval_ms: u64 = if args.enable_hpet { 10 } else { 100 };
+    let cancel_interval_ms: u64 = if args.hpet { 10 } else { 100 };
     let cancel_handle = handle;
     let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let running2 = running.clone();
@@ -510,6 +510,9 @@ fn main() {
         let t = thread::Builder::new()
             .name(format!("vcpu-{}", cpu_id))
             .spawn(move || {
+                let mut ap_exits = [0u64; 16];
+                let mut ap_total = 0u64;
+                let ap_t0 = std::time::Instant::now();
                 loop {
                     if !ap_running.load(std::sync::atomic::Ordering::Relaxed) { break; }
                     if args.timeout > 0 && ap_start.elapsed() >= ap_timeout { break; }
@@ -519,6 +522,16 @@ fn main() {
                     if rc != 0 {
                         thread::sleep(Duration::from_millis(1));
                         continue;
+                    }
+                    ap_total += 1;
+                    if (exit.reason as usize) < ap_exits.len() {
+                        ap_exits[exit.reason as usize] += 1;
+                    }
+                    // Log every 5s
+                    if ap_t0.elapsed().as_secs() % 5 == 0 && ap_total % 100 == 1 {
+                        eprintln!("[vcpu-{}] exits={} IO={}/{} MMIO={}/{} Hlt={} Cancel={}",
+                            cpu_id, ap_total, ap_exits[0], ap_exits[1],
+                            ap_exits[2], ap_exits[3], ap_exits[7], ap_exits[13]);
                     }
 
                     match exit.reason {

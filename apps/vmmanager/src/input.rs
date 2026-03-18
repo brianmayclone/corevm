@@ -103,28 +103,40 @@ pub fn handle_keyboard_events(ctx: &egui::Context, vm_handle: u64, display_focus
         return None;
     }
 
+    let has_virtio_input = libcorevm::ffi::corevm_has_virtio_input(vm_handle) != 0;
+
+    // Helper: send a PS/2 scancode to both PS/2 and VirtIO (if available).
+    let send_key_press = |scancode: u8| {
+        libcorevm::ffi::corevm_ps2_key_press(vm_handle, scancode);
+        if has_virtio_input { libcorevm::ffi::corevm_virtio_kbd_ps2(vm_handle, scancode); }
+    };
+    let send_key_release = |scancode: u8| {
+        libcorevm::ffi::corevm_ps2_key_release(vm_handle, scancode);
+        if has_virtio_input { libcorevm::ffi::corevm_virtio_kbd_ps2(vm_handle, scancode | 0x80); }
+    };
+
     // Track modifier state from egui and send press/release scancodes
     let modifiers = ctx.input(|i| i.modifiers);
     unsafe {
         if modifiers.shift && !PREV_SHIFT {
-            libcorevm::ffi::corevm_ps2_key_press(vm_handle, 0x2A); // Left Shift
+            send_key_press(0x2A); // Left Shift
             PREV_SHIFT = true;
         } else if !modifiers.shift && PREV_SHIFT {
-            libcorevm::ffi::corevm_ps2_key_release(vm_handle, 0x2A);
+            send_key_release(0x2A);
             PREV_SHIFT = false;
         }
         if modifiers.ctrl && !PREV_CTRL {
-            libcorevm::ffi::corevm_ps2_key_press(vm_handle, 0x1D); // Left Ctrl
+            send_key_press(0x1D); // Left Ctrl
             PREV_CTRL = true;
         } else if !modifiers.ctrl && PREV_CTRL {
-            libcorevm::ffi::corevm_ps2_key_release(vm_handle, 0x1D);
+            send_key_release(0x1D);
             PREV_CTRL = false;
         }
         if modifiers.alt && !PREV_ALT {
-            libcorevm::ffi::corevm_ps2_key_press(vm_handle, 0x38); // Left Alt
+            send_key_press(0x38); // Left Alt
             PREV_ALT = true;
         } else if !modifiers.alt && PREV_ALT {
-            libcorevm::ffi::corevm_ps2_key_release(vm_handle, 0x38);
+            send_key_release(0x38);
             PREV_ALT = false;
         }
     }
@@ -143,10 +155,10 @@ pub fn handle_keyboard_events(ctx: &egui::Context, vm_handle: u64, display_focus
                     }
                     if let Some((scancode, _extended)) = scancode_for_key(*key) {
                         if *pressed {
-                            libcorevm::ffi::corevm_ps2_key_press(vm_handle, scancode);
+                            send_key_press(scancode);
                             last_key = Some(format!("{:?} (0x{:02X})", key, scancode));
                         } else {
-                            libcorevm::ffi::corevm_ps2_key_release(vm_handle, scancode);
+                            send_key_release(scancode);
                         }
                     }
                 }

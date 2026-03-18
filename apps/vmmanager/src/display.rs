@@ -654,9 +654,11 @@ impl DisplayWidget {
 
         self.mouse_debug_counter += 1;
 
+        let has_virtio_input = libcorevm::ffi::corevm_has_virtio_input(vm_handle) != 0;
+
         // USB Tablet mode: send absolute coordinates AND PS/2 relative as fallback.
         // The guest will use whichever driver it has loaded (UHCI tablet or PS/2).
-        if self.usb_tablet_mode {
+        if self.usb_tablet_mode || has_virtio_input {
             let hover_pos = response.hover_pos();
 
             if let Some(pos) = hover_pos {
@@ -665,11 +667,17 @@ impl DisplayWidget {
                 let abs_x = (rel_x.clamp(0.0, 1.0) * 32767.0) as u16;
                 let abs_y = (rel_y.clamp(0.0, 1.0) * 32767.0) as u16;
 
+                // Send to VirtIO tablet if available
+                if has_virtio_input {
+                    libcorevm::ffi::corevm_virtio_tablet_move(vm_handle, abs_x as u32, abs_y as u32, buttons);
+                }
+
                 // Send absolute coords to USB tablet
-                libcorevm::ffi::corevm_usb_tablet_move(vm_handle, abs_x, abs_y, buttons);
+                if self.usb_tablet_mode {
+                    libcorevm::ffi::corevm_usb_tablet_move(vm_handle, abs_x, abs_y, buttons);
+                }
 
                 // Also send relative PS/2 mouse events as fallback
-                // (works if guest uses PS/2 driver instead of USB)
                 if let Some(last_pos) = self.last_mouse_pos {
                     let dx = (pos.x - last_pos.x) as i16;
                     let dy = -(pos.y - last_pos.y) as i16; // PS/2: Y inverted

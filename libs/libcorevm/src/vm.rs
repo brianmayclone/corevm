@@ -15,6 +15,7 @@ use crate::devices::ac97::Ac97;
 use crate::devices::hpet::Hpet;
 use crate::devices::virtio_gpu::VirtioGpu;
 use crate::devices::virtio_net::VirtioNet;
+use crate::devices::virtio_input::VirtioInput;
 
 /// The virtual machine instance.
 ///
@@ -54,6 +55,8 @@ pub struct Vm {
     pub uhci_ptr: *mut crate::devices::uhci::Uhci,
     pub virtio_gpu_ptr: *mut VirtioGpu,
     pub virtio_net_ptr: *mut VirtioNet,
+    pub virtio_kbd_ptr: *mut VirtioInput,
+    pub virtio_tablet_ptr: *mut VirtioInput,
 
     /// Pointer to the PCI MMIO router (lives inside the MMIO dispatch regions).
     /// Used by `corevm_setup_e1000()` to add E1000 to the router after AHCI setup.
@@ -154,6 +157,8 @@ impl Vm {
             uhci_ptr: core::ptr::null_mut(),
             virtio_gpu_ptr: core::ptr::null_mut(),
             virtio_net_ptr: core::ptr::null_mut(),
+            virtio_kbd_ptr: core::ptr::null_mut(),
+            virtio_tablet_ptr: core::ptr::null_mut(),
             pci_mmio_router_ptr: core::ptr::null_mut(),
             pci_io_router_ptr: core::ptr::null_mut(),
             ahci_irq_asserted: false,
@@ -856,7 +861,7 @@ impl Vm {
                 0x1AF4, // VirtIO vendor
                 0x1050, // VirtIO GPU (non-transitional)
                 0x03,   // Display controller
-                0x00,   // VGA compatible
+                0x80,   // Other (not VGA) — keeps StdVga as primary VGA adapter
                 0x00,   // prog-if
             );
             pci_dev.device = 7;
@@ -1108,6 +1113,102 @@ impl Vm {
             pci_bus.add_device(pci_dev);
         }
     }
+
+    /// Get a mutable reference to the VirtIO keyboard, if set up.
+    pub fn virtio_kbd(&mut self) -> Option<&mut VirtioInput> {
+        if self.virtio_kbd_ptr.is_null() { None }
+        else { Some(unsafe { &mut *self.virtio_kbd_ptr }) }
+    }
+
+    /// Get a mutable reference to the VirtIO tablet, if set up.
+    pub fn virtio_tablet(&mut self) -> Option<&mut VirtioInput> {
+        if self.virtio_tablet_ptr.is_null() { None }
+        else { Some(unsafe { &mut *self.virtio_tablet_ptr }) }
+    }
+
+    /// Set up VirtIO Input devices (keyboard at 00:09.0, tablet at 00:0A.0).
+    /// Call after `setup_standard_devices()`.
+    pub fn setup_virtio_input(&mut self) {
+        use crate::devices::virtio_input::{VIRTIO_INPUT_BAR0_SIZE, InputDeviceType};
+        use crate::devices::bus::PciDevice;
+
+        if !self.virtio_kbd_ptr.is_null() { return; } // already set up
+
+        let (ram_ptr, ram_len) = self.memory.ram_mut_ptr();
+
+        // ── Keyboard at PCI 00:09.0, BAR0 at 0xFE90_0000 ──
+        let kbd = Box::new(VirtioInput::new(InputDeviceType::Keyboard));
+        let kbd_ptr = &*kbd as *const VirtioInput as *mut VirtioInput;
+        self.virtio_kbd_ptr = kbd_ptr;
+        unsafe { (*kbd_ptr).guest_mem_ptr = ram_ptr; (*kbd_ptr).guest_mem_len = ram_len; }
+        let kbd_bar0: u64 = 0xFE90_0000;
+        self.memory.add_mmio(kbd_bar0, VIRTIO_INPUT_BAR0_SIZE as u64, kbd);
+
+        if !self.pci_bus_ptr.is_null() {
+            let pci_bus = unsafe { &mut *self.pci_bus_ptr };
+            let mut pci_dev = PciDevice::new(0x1AF4, 0x1052, 0x09, 0x00, 0x00);
+            pci_dev.device = 9;
+            pci_dev.config_space[0x2C] = 0xF4; pci_dev.config_space[0x2D] = 0x1A;
+            pci_dev.config_space[0x2E] = 0x01; pci_dev.config_space[0x2F] = 0x00;
+            pci_dev.set_bar(0, kbd_bar0 as u32, VIRTIO_INPUT_BAR0_SIZE, true);
+            pci_dev.set_interrupt(10, 1); // IRQ 10 (PIRQ = (9+0)%4=1 → PIRQB → IRQ 10)
+            pci_dev.config_space[0x08] = 0x01; // revision
+            setup_virtio_pci_caps(&mut pci_dev);
+            pci_bus.add_device(pci_dev);
+        }
+
+        // ── Tablet at PCI 00:0A.0, BAR0 at 0xFE80_0000 ──
+        let tablet = Box::new(VirtioInput::new(InputDeviceType::Tablet));
+        let tablet_ptr = &*tablet as *const VirtioInput as *mut VirtioInput;
+        self.virtio_tablet_ptr = tablet_ptr;
+        unsafe { (*tablet_ptr).guest_mem_ptr = ram_ptr; (*tablet_ptr).guest_mem_len = ram_len; }
+        let tablet_bar0: u64 = 0xFE80_0000;
+        self.memory.add_mmio(tablet_bar0, VIRTIO_INPUT_BAR0_SIZE as u64, tablet);
+
+        if !self.pci_bus_ptr.is_null() {
+            let pci_bus = unsafe { &mut *self.pci_bus_ptr };
+            let mut pci_dev = PciDevice::new(0x1AF4, 0x1052, 0x09, 0x00, 0x00);
+            pci_dev.device = 10;
+            pci_dev.config_space[0x2C] = 0xF4; pci_dev.config_space[0x2D] = 0x1A;
+            pci_dev.config_space[0x2E] = 0x02; pci_dev.config_space[0x2F] = 0x00;
+            pci_dev.set_bar(0, tablet_bar0 as u32, VIRTIO_INPUT_BAR0_SIZE, true);
+            pci_dev.set_interrupt(10, 2); // IRQ 10, INTB (PIRQ = (10+1)%4=3 → PIRQD)
+            pci_dev.config_space[0x08] = 0x01;
+            setup_virtio_pci_caps(&mut pci_dev);
+            pci_bus.add_device(pci_dev);
+        }
+    }
+}
+
+/// Set up standard VirtIO PCI capability structures in config space.
+/// Shared helper for VirtIO GPU, Net, and Input devices.
+fn setup_virtio_pci_caps(pci_dev: &mut crate::devices::bus::PciDevice) {
+    pci_dev.config_space[0x34] = 0x40;
+    pci_dev.config_space[0x06] |= 0x10;
+
+    // Cap 1: Common Config (type 1)
+    let c1 = 0x40usize;
+    pci_dev.config_space[c1] = 0x09; pci_dev.config_space[c1+1] = 0x54; pci_dev.config_space[c1+3] = 1; pci_dev.config_space[c1+4] = 0;
+    pci_dev.config_space[c1+8] = 0x00; pci_dev.config_space[c1+9] = 0x00; // offset 0x0000
+    pci_dev.config_space[c1+12] = 0x40; // length 64
+
+    // Cap 2: Notifications (type 2)
+    let c2 = 0x54usize;
+    pci_dev.config_space[c2] = 0x09; pci_dev.config_space[c2+1] = 0x6C; pci_dev.config_space[c2+3] = 2; pci_dev.config_space[c2+4] = 0;
+    pci_dev.config_space[c2+8] = 0x00; pci_dev.config_space[c2+9] = 0x10; // offset 0x1000
+    pci_dev.config_space[c2+12] = 0x04; // length 4
+
+    // Cap 3: ISR (type 3)
+    let c3 = 0x6Cusize;
+    pci_dev.config_space[c3] = 0x09; pci_dev.config_space[c3+1] = 0x80; pci_dev.config_space[c3+3] = 3; pci_dev.config_space[c3+4] = 0;
+    pci_dev.config_space[c3+8] = 0x00; pci_dev.config_space[c3+9] = 0x20; // offset 0x2000
+    pci_dev.config_space[c3+12] = 0x04;
+
+    // Cap 4: Device Config (type 4)
+    let c4 = 0x80usize;
+    pci_dev.config_space[c4] = 0x09; pci_dev.config_space[c4+1] = 0x00; pci_dev.config_space[c4+3] = 4; pci_dev.config_space[c4+4] = 0;
+    pci_dev.config_space[c4+8] = 0x00; pci_dev.config_space[c4+9] = 0x30; // offset 0x3000
+    pci_dev.config_space[c4+12] = 0x00; pci_dev.config_space[c4+13] = 0x01; // length 256
 }
 
 // ── Proxy wrappers for VGA device ──
