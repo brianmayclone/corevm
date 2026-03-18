@@ -254,8 +254,14 @@ impl SlirpNet {
         if op != 1 { return; } // only handle ARP Request
 
         let target_ip = &arp[24..28];
-        // Reply for any IP in our subnet (gateway, DNS)
+        // Reply for any IP in our subnet (gateway, DNS) but NOT the guest's own IP.
+        // The guest performs Duplicate Address Detection (DAD) by ARP-probing its
+        // assigned IP. If we reply, the guest thinks the address is already taken
+        // and rejects the DHCP lease.
         if target_ip[0] != NET_PREFIX[0] || target_ip[1] != NET_PREFIX[1] || target_ip[2] != NET_PREFIX[2] {
+            return;
+        }
+        if target_ip == &GUEST_IP {
             return;
         }
 
@@ -523,12 +529,18 @@ impl SlirpNet {
         reply[off] = 28; reply[off+1] = 4; reply[off+2..off+6].copy_from_slice(&BROADCAST); off += 6;
         // 255: End
         reply[off] = 255;
+        off += 1;
 
-        eprintln!("[slirp] DHCP reply: op={} xid={:02X}{:02X}{:02X}{:02X} yiaddr={}.{}.{}.{} chaddr={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} type={}",
+        // Truncate reply to actual size (options end here, rest is unused padding).
+        // DHCP minimum is 300 bytes (RFC 2131), pad to that if shorter.
+        let actual_len = off.max(300);
+        reply.truncate(actual_len);
+
+        eprintln!("[slirp] DHCP reply: op={} xid={:02X}{:02X}{:02X}{:02X} yiaddr={}.{}.{}.{} chaddr={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} type={} len={}",
             reply[0], reply[4], reply[5], reply[6], reply[7],
             reply[16], reply[17], reply[18], reply[19],
             reply[28], reply[29], reply[30], reply[31], reply[32], reply[33],
-            msg_type);
+            msg_type, reply.len());
 
         // Build UDP with checksum
         let src_ip = GATEWAY_IP;
