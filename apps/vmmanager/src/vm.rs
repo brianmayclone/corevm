@@ -15,6 +15,7 @@ use libcorevm::ffi::{
     corevm_run_vcpu, corevm_handle_io_exit, corevm_handle_mmio_exit, corevm_handle_string_io_exit,
     corevm_setup_standard_devices, corevm_setup_acpi_tables, corevm_setup_acpi_tables_with_hpet, corevm_setup_ahci, corevm_setup_e1000, corevm_setup_hpet, corevm_setup_ac97, corevm_ac97_process,
     corevm_setup_uhci, corevm_uhci_process,
+    corevm_setup_virtio_gpu, corevm_virtio_gpu_process, corevm_virtio_gpu_get_framebuffer, corevm_virtio_gpu_get_mode, corevm_has_virtio_gpu,
     corevm_complete_string_io,
     corevm_get_vcpu_regs,
     corevm_get_vcpu_sregs,
@@ -141,6 +142,13 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
     if config.audio_enabled {
         corevm_setup_ac97(handle);
         entry.diag_log.log(DiagCategory::Info, "AC97 audio controller enabled".to_string());
+    }
+
+    // VirtIO GPU — if selected in config
+    if config.gpu_model == crate::config::GpuModel::VirtioGpu {
+        let gpu_vram = config.vram_mb.max(64); // VirtIO GPU needs at least 64MB VRAM
+        corevm_setup_virtio_gpu(handle, gpu_vram);
+        entry.diag_log.log(DiagCategory::Info, format!("VirtIO GPU enabled (VRAM={}MB)", gpu_vram));
     }
 
     // ACPI tables — MUST be generated AFTER all PCI devices are set up,
@@ -350,20 +358,20 @@ fn vm_run_loop(
                 match exit.reason {
                     0 => {
                         let mut data = [0u8; 4];
-                        corevm_handle_io_exit(ap_handle, exit.port, 0, exit.size, data.as_mut_ptr());
+                        corevm_handle_io_exit(ap_handle, cpu_id, exit.port, 0, exit.size, data.as_mut_ptr());
                     }
                     1 => {
                         let mut data = exit.data_u32.to_le_bytes();
-                        corevm_handle_io_exit(ap_handle, exit.port, 1, exit.size, data.as_mut_ptr());
+                        corevm_handle_io_exit(ap_handle, cpu_id, exit.port, 1, exit.size, data.as_mut_ptr());
                     }
                     2 => {
                         let mut data = [0u8; 8];
-                        corevm_handle_mmio_exit(ap_handle, exit.addr, 0, exit.size, data.as_mut_ptr(), exit.mmio_dest_reg, exit.mmio_instr_len);
+                        corevm_handle_mmio_exit(ap_handle, cpu_id, exit.addr, 0, exit.size, data.as_mut_ptr(), exit.mmio_dest_reg, exit.mmio_instr_len);
                         corevm_ahci_poll_irq(ap_handle);
                     }
                     3 => {
                         let mut data = exit.data_u64.to_le_bytes();
-                        corevm_handle_mmio_exit(ap_handle, exit.addr, 1, exit.size, data.as_mut_ptr(), 0, 0);
+                        corevm_handle_mmio_exit(ap_handle, cpu_id, exit.addr, 1, exit.size, data.as_mut_ptr(), 0, 0);
                         corevm_ahci_poll_irq(ap_handle);
                     }
                     7 | 13 => { /* HLT/Cancel — re-enter immediately */ }
@@ -441,7 +449,7 @@ fn vm_run_loop(
                     corevm_complete_string_io(handle, 0, exit.port, 0, exit.size, exit.io_count);
                 } else {
                     let mut data = [0u8; 4];
-                    corevm_handle_io_exit(handle, exit.port, 0, exit.size, data.as_mut_ptr());
+                    corevm_handle_io_exit(handle, 0, exit.port, 0, exit.size, data.as_mut_ptr());
                     if diag_enabled {
                         let val = match exit.size { 1 => data[0] as u32, 2 => u16::from_le_bytes([data[0], data[1]]) as u32, _ => u32::from_le_bytes(data) };
                         diag.log(DiagCategory::IoPort, format!("IN  port=0x{:04X} size={} -> 0x{:X}", exit.port, exit.size, val));
@@ -484,7 +492,7 @@ fn vm_run_loop(
                         diag.log(DiagCategory::IoPort, format!("OUT port=0x{:04X} size={} data=0x{:X}", exit.port, exit.size, exit.data_u32));
                     }
                     let mut data = exit.data_u32.to_le_bytes();
-                    corevm_handle_io_exit(handle, exit.port, 1, exit.size, data.as_mut_ptr());
+                    corevm_handle_io_exit(handle, 0, exit.port, 1, exit.size, data.as_mut_ptr());
                     // Process UHCI frames on every UHCI I/O write (SeaBIOS configures UHCI)
                     if usb_tablet {
                         corevm_uhci_process(handle);
@@ -494,7 +502,7 @@ fn vm_run_loop(
             2 => {
                 // MmioRead — dispatch to device
                 let mut data = [0u8; 8];
-                corevm_handle_mmio_exit(handle, exit.addr, 0, exit.size, data.as_mut_ptr(), exit.mmio_dest_reg, exit.mmio_instr_len);
+                corevm_handle_mmio_exit(handle, 0, exit.addr, 0, exit.size, data.as_mut_ptr(), exit.mmio_dest_reg, exit.mmio_instr_len);
                 if diag_enabled {
                     diag.log(DiagCategory::Mmio, format!("MMIO RD addr=0x{:08X} size={}", exit.addr, exit.size));
                 }
@@ -507,7 +515,7 @@ fn vm_run_loop(
                     diag.log(DiagCategory::Mmio, format!("MMIO WR addr=0x{:08X} size={} data=0x{:X}", exit.addr, exit.size, exit.data_u64));
                 }
                 let mut data = exit.data_u64.to_le_bytes();
-                corevm_handle_mmio_exit(handle, exit.addr, 1, exit.size, data.as_mut_ptr(), 0, 0);
+                corevm_handle_mmio_exit(handle, 0, exit.addr, 1, exit.size, data.as_mut_ptr(), 0, 0);
                 // Immediately update AHCI IRQ after MMIO write (command completion)
                 corevm_ahci_poll_irq(handle);
             }
@@ -547,7 +555,7 @@ fn vm_run_loop(
             12 => {
                 // StringIo — bulk REP INSB/OUTSB
                 corevm_handle_string_io_exit(
-                    handle, exit.port, exit.string_io_is_write,
+                    handle, 0, exit.port, exit.string_io_is_write,
                     exit.string_io_count, exit.string_io_gpa,
                     exit.string_io_step, exit.string_io_instr_len,
                     exit.string_io_addr_size, exit.size,
@@ -740,6 +748,15 @@ fn vm_run_loop(
             corevm_uhci_process(handle);
         }
 
+        // Process VirtIO GPU virtqueue commands
+        if corevm_has_virtio_gpu(handle) != 0 {
+            let gpu_irq = corevm_virtio_gpu_process(handle);
+            if gpu_irq != 0 {
+                // VirtIO GPU has pending interrupts — poll_irqs will deliver them.
+                corevm_poll_irqs(handle);
+            }
+        }
+
         // Poll network backend: TX from E1000 → backend, RX from backend → E1000
         if net_enabled {
             corevm_net_poll(handle);
@@ -775,6 +792,53 @@ fn vm_run_loop(
 
 /// Read VGA state and update the shared framebuffer
 fn update_framebuffer(handle: u64, fb: &Arc<Mutex<FrameBufferData>>, diag: &DiagLog, fb_debug_count: &mut u32) {
+    // If VirtIO GPU is active, read its scanout framebuffer instead of VGA.
+    if corevm_has_virtio_gpu(handle) != 0 {
+        let mut gpu_w: u32 = 0;
+        let mut gpu_h: u32 = 0;
+        let mut gpu_bpp: u8 = 0;
+        if corevm_virtio_gpu_get_mode(handle, &mut gpu_w, &mut gpu_h, &mut gpu_bpp) == 0
+            && gpu_w > 0 && gpu_h > 0
+        {
+            let mut fb_ptr: *const u8 = std::ptr::null();
+            let mut fb_len: u32 = 0;
+            if corevm_virtio_gpu_get_framebuffer(handle, &mut fb_ptr, &mut fb_len) == 0
+                && !fb_ptr.is_null() && fb_len > 0
+            {
+                let fb_size = (gpu_w as usize) * (gpu_h as usize) * 4; // BGRA32
+                if (fb_len as usize) >= fb_size {
+                    let raw = unsafe { std::slice::from_raw_parts(fb_ptr, fb_size) };
+                    // Check if framebuffer has data (not all zero).
+                    let has_data = raw.chunks(raw.len() / 4).any(|chunk| {
+                        chunk.iter().take(64.min(chunk.len())).any(|&b| b != 0)
+                    });
+                    if has_data {
+                        if let Ok(mut fb_data) = fb.lock() {
+                            fb_data.text_mode = false;
+                            fb_data.width = gpu_w;
+                            fb_data.height = gpu_h;
+                            // VirtIO GPU framebuffer is BGRA32 — convert to RGBA32.
+                            let npixels = (gpu_w as usize) * (gpu_h as usize);
+                            fb_data.pixels.resize(npixels * 4, 255);
+                            for i in 0..npixels {
+                                let src = i * 4;
+                                let dst = i * 4;
+                                fb_data.pixels[dst] = raw[src + 2];     // R
+                                fb_data.pixels[dst + 1] = raw[src + 1]; // G
+                                fb_data.pixels[dst + 2] = raw[src];     // B
+                                fb_data.pixels[dst + 3] = 255;          // A
+                            }
+                            fb_data.dirty = true;
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+        // Fall through to VGA path if VirtIO GPU has no data yet
+        // (e.g., during BIOS boot before driver loads).
+    }
+
     // Query VGA mode to get exact dimensions
     let mut vga_w: u32 = 0;
     let mut vga_h: u32 = 0;

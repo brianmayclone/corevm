@@ -40,6 +40,7 @@ pub mod hpet;
 pub mod ac97;
 pub mod uhci;
 pub mod gpu;
+pub mod virtio_gpu;
 pub mod disk_cache;
 pub mod net;
 #[cfg(feature = "linux")]

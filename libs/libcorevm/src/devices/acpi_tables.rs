@@ -396,6 +396,12 @@ fn build_dsdt_with_cpus(num_cpus: u32, devices: &AcpiDeviceConfig) -> Vec<u8> {
         num_prt_entries += 1;
     }
 
+    // Dev 7 (VirtIO GPU): INTA → PIRQ = (7+0)%4=3 → PIRQD → GSI 11
+    if devices.has_virtio_gpu {
+        prt_entry(&mut prt, 7, 0, 11);
+        num_prt_entries += 1;
+    }
+
     // Wrap in Package: PackageOp PkgLength NumElements entries...
     let mut prt_pkg = Vec::new();
     prt_pkg.push(0x12); // PackageOp
@@ -709,6 +715,7 @@ pub struct AcpiDeviceConfig {
     pub has_e1000: bool,
     pub has_ac97: bool,
     pub has_uhci: bool,
+    pub has_virtio_gpu: bool,
 }
 
 /// Generate ACPI 2.0 tables for SeaBIOS fw_cfg.

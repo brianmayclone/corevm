@@ -172,7 +172,7 @@ impl VmConfig {
             self.ram_mb, self.cpu_cores, disk_lines, self.iso_image,
             boot, bios,
             alloc,
-            match self.gpu_model { GpuModel::StdVga => "stdvga" },
+            match self.gpu_model { GpuModel::StdVga => "stdvga", GpuModel::VirtioGpu => "virtiogpu" },
             self.vram_mb,
             if self.net_enabled { "1" } else { "0" },
             net_mode, self.net_host_nic, mac_mode, self.mac_address,
@@ -246,7 +246,8 @@ impl VmConfig {
                     _ => RamAlloc::OnDemand,
                 },
                 "gpu" => cfg.gpu_model = match val {
-                    _ => GpuModel::StdVga, // currently only one model
+                    "virtiogpu" | "virtio-gpu" | "virtio_gpu" => GpuModel::VirtioGpu,
+                    _ => GpuModel::StdVga,
                 },
                 "vram_mb" => cfg.vram_mb = val.parse().unwrap_or(16),
                 "net_enabled" => cfg.net_enabled = val == "1",

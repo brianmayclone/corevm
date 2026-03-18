@@ -799,6 +799,51 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                 }
             }
 
+            // VirtIO GPU → IRQ 11 (level-triggered, shares with AHCI/E1000)
+            if !vm.virtio_gpu_ptr.is_null() {
+                let gpu = unsafe { &mut *vm.virtio_gpu_ptr };
+                let want_asserted = gpu.isr_status != 0;
+                #[cfg(feature = "linux")]
+                {
+                    if want_asserted && !vm.virtio_gpu_irq_asserted {
+                        vm.virtio_gpu_irq_asserted = true;
+                        let _ = vm.backend.set_irq_line(11, true);
+                        injected += 1;
+                    } else if !want_asserted && vm.virtio_gpu_irq_asserted {
+                        vm.virtio_gpu_irq_asserted = false;
+                        if !vm.ahci_irq_asserted && !vm.e1000_irq_asserted {
+                            let _ = vm.backend.set_irq_line(11, false);
+                        }
+                    }
+                }
+                #[cfg(feature = "windows")]
+                {
+                    if want_asserted && !vm.virtio_gpu_irq_asserted {
+                        vm.virtio_gpu_irq_asserted = true;
+                        if !vm.pic_ptr.is_null() {
+                            let pic = unsafe { &mut *vm.pic_ptr };
+                            pic.raise_irq(11);
+                        }
+                        vm.backend.ioapic_set_irq(11, true);
+                        injected += 1;
+                    } else if !want_asserted && vm.virtio_gpu_irq_asserted {
+                        vm.virtio_gpu_irq_asserted = false;
+                        if !vm.ahci_irq_asserted && !vm.e1000_irq_asserted {
+                            vm.backend.ioapic_set_irq(11, false);
+                        }
+                    }
+                }
+                #[cfg(not(any(feature = "linux", feature = "windows")))]
+                {
+                    if want_asserted {
+                        if !vm.pic_ptr.is_null() {
+                            let pic = unsafe { &mut *vm.pic_ptr };
+                            pic.raise_irq(11);
+                        }
+                    }
+                }
+            }
+
             // Software PIC injection (non-Linux only).
             // On KVM/Linux the in-kernel irqchip handles injection automatically.
             #[cfg(not(feature = "linux"))]
@@ -1163,11 +1208,11 @@ pub extern "C" fn corevm_has_hw_support() -> i32 {
 /// invokes the I/O handler for each byte. Updates guest registers afterward.
 #[no_mangle]
 pub extern "C" fn corevm_handle_string_io_exit(
-    handle: u64, port: u16, is_write: u8, count: u64, gpa: u64,
+    handle: u64, vcpu_id: u32, port: u16, is_write: u8, count: u64, gpa: u64,
     step: i64, instr_len: u64, addr_size: u8, access_size: u8,
 ) -> i32 {
     let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
-    vm.handle_string_io(port, is_write != 0, count, gpa, step, instr_len, addr_size, access_size);
+    vm.handle_string_io(vcpu_id, port, is_write != 0, count, gpa, step, instr_len, addr_size, access_size);
     0
 }
 
@@ -1175,7 +1220,7 @@ pub extern "C" fn corevm_handle_string_io_exit(
 /// For writes (`is_write`=1), `data` contains the guest-written value.
 #[no_mangle]
 pub extern "C" fn corevm_handle_io_exit(
-    handle: u64, port: u16, is_write: u8, size: u8, data: *mut u8,
+    handle: u64, vcpu_id: u32, port: u16, is_write: u8, size: u8, data: *mut u8,
 ) -> i32 {
     let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
     if data.is_null() { return -1; }
@@ -1188,12 +1233,12 @@ pub extern "C" fn corevm_handle_io_exit(
     if is_write == 0 {
         #[cfg(feature = "linux")]
         {
-            vm.set_io_response(0, buf);
+            vm.set_io_response(vcpu_id, buf);
         }
         #[cfg(not(feature = "linux"))]
         {
             // Write result into guest RAX
-            if let Ok(mut regs) = vm.get_vcpu_regs(0) {
+            if let Ok(mut regs) = vm.get_vcpu_regs(vcpu_id) {
                 let val = match size {
                     1 => buf[0] as u64,
                     2 => u16::from_le_bytes([buf[0], buf[1]]) as u64,
@@ -1201,7 +1246,7 @@ pub extern "C" fn corevm_handle_io_exit(
                     _ => 0,
                 };
                 regs.rax = (regs.rax & !((1u64 << (size as u64 * 8)) - 1)) | val;
-                let _ = vm.set_vcpu_regs(0, &regs);
+                let _ = vm.set_vcpu_regs(vcpu_id, &regs);
             }
         }
     }
@@ -1239,7 +1284,7 @@ pub extern "C" fn corevm_complete_string_io(
 /// `instr_len` is the instruction length for RIP advancement (WHP reads only).
 #[no_mangle]
 pub extern "C" fn corevm_handle_mmio_exit(
-    handle: u64, addr: u64, is_write: u8, size: u8, data: *mut u8,
+    handle: u64, vcpu_id: u32, addr: u64, is_write: u8, size: u8, data: *mut u8,
     dest_reg: u8, instr_len: u8,
 ) -> i32 {
     let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
@@ -1259,7 +1304,7 @@ pub extern "C" fn corevm_handle_mmio_exit(
         #[cfg(feature = "linux")]
         {
             let _ = val; // used by other paths
-            vm.set_mmio_response(0, buf);
+            vm.set_mmio_response(vcpu_id, buf);
         }
         #[cfg(feature = "windows")]
         {
@@ -1269,7 +1314,7 @@ pub extern "C" fn corevm_handle_mmio_exit(
         #[cfg(not(any(feature = "linux", feature = "windows")))]
         {
             // anyOS or other: set register directly
-            if let Ok(mut regs) = vm.get_vcpu_regs(0) {
+            if let Ok(mut regs) = vm.get_vcpu_regs(vcpu_id) {
                 if instr_len > 0 {
                     regs.rip += instr_len as u64;
                 }
@@ -1284,7 +1329,7 @@ pub extern "C" fn corevm_handle_mmio_exit(
                     7 => regs.rdi = val,
                     _ => regs.rax = val,
                 }
-                let _ = vm.set_vcpu_regs(0, &regs);
+                let _ = vm.set_vcpu_regs(vcpu_id, &regs);
             }
         }
     }
@@ -1502,9 +1547,10 @@ pub extern "C" fn corevm_setup_acpi_tables(handle: u64) -> i32 {
         has_e1000: !vm.e1000_ptr.is_null(),
         has_ac97: !vm.ac97_ptr.is_null(),
         has_uhci: !vm.uhci_ptr.is_null(),
+        has_virtio_gpu: !vm.virtio_gpu_ptr.is_null(),
     };
     let (rsdp, tables, loader) = crate::devices::acpi_tables::generate_acpi_tables_configured(false, num_cpus, &devices);
-    dbg(&alloc::format!("Generated ACPI: {} CPUs, e1000={} ac97={} uhci={}", num_cpus, devices.has_e1000, devices.has_ac97, devices.has_uhci));
+    dbg(&alloc::format!("Generated ACPI: {} CPUs, e1000={} ac97={} uhci={} virtio_gpu={}", num_cpus, devices.has_e1000, devices.has_ac97, devices.has_uhci, devices.has_virtio_gpu));
 
     fw_cfg.add_file("etc/acpi/rsdp", rsdp);
     fw_cfg.add_file("etc/acpi/tables", tables);
@@ -1540,6 +1586,7 @@ pub extern "C" fn corevm_setup_acpi_tables_with_hpet(handle: u64) -> i32 {
         has_e1000: !vm.e1000_ptr.is_null(),
         has_ac97: !vm.ac97_ptr.is_null(),
         has_uhci: !vm.uhci_ptr.is_null(),
+        has_virtio_gpu: !vm.virtio_gpu_ptr.is_null(),
     };
     let (rsdp, tables, loader) = crate::devices::acpi_tables::generate_acpi_tables_configured(true, num_cpus, &devices);
     fw_cfg.add_file("etc/acpi/rsdp", rsdp);
@@ -1667,6 +1714,7 @@ pub struct PciMmioRouter {
     pub ahci: *mut crate::devices::ahci::Ahci,
     pub e1000: *mut crate::devices::e1000::E1000,
     pub svga: *mut crate::devices::svga::Svga,
+    pub virtio_gpu: *mut crate::devices::virtio_gpu::VirtioGpu,
     pci_bus: *mut crate::devices::bus::PciBus,
 }
 
@@ -1696,6 +1744,15 @@ impl PciMmioRouter {
         let bus = unsafe { &mut *self.pci_bus };
         let val = bus.mmcfg_read(0, 2, 0, 0x18, 4);
         val & 0xFFFFF000
+    }
+
+    /// Read VirtIO GPU BAR0 (device 00:07.0, offset 0x10) from PCI config space.
+    /// BAR0 holds the VirtIO MMIO config space (16KB).
+    fn virtio_gpu_bar0(&self) -> u64 {
+        if self.pci_bus.is_null() || self.virtio_gpu.is_null() { return 0; }
+        let bus = unsafe { &mut *self.pci_bus };
+        let val = bus.mmcfg_read(0, 7, 0, 0x10, 4);
+        val & 0xFFFFC000 // 16KB aligned
     }
 }
 
@@ -1730,6 +1787,15 @@ impl crate::memory::mmio::MmioHandler for PciMmioRouter {
             return svga_dispi_mmio_read(svga, bar2_off, size);
         }
 
+        // Check VirtIO GPU BAR0 (16KB region)
+        if !self.virtio_gpu.is_null() {
+            let gpu_base = self.virtio_gpu_bar0();
+            if gpu_base != 0 && abs_addr >= gpu_base && abs_addr < gpu_base + 0x4000 {
+                let gpu = unsafe { &mut *self.virtio_gpu };
+                return gpu.read(abs_addr - gpu_base, size);
+            }
+        }
+
         Ok(0xFFFFFFFF)
     }
 
@@ -1758,6 +1824,15 @@ impl crate::memory::mmio::MmioHandler for PciMmioRouter {
             let svga = unsafe { &mut *self.svga };
             let bar2_off = abs_addr - vga_bar2;
             return svga_dispi_mmio_write(svga, bar2_off, size, val);
+        }
+
+        // Check VirtIO GPU BAR0 (16KB region)
+        if !self.virtio_gpu.is_null() {
+            let gpu_base = self.virtio_gpu_bar0();
+            if gpu_base != 0 && abs_addr >= gpu_base && abs_addr < gpu_base + 0x4000 {
+                let gpu = unsafe { &mut *self.virtio_gpu };
+                return gpu.write(abs_addr - gpu_base, size, val);
+            }
         }
 
         Ok(())
@@ -1829,6 +1904,7 @@ pub extern "C" fn corevm_setup_ahci(handle: u64, num_ports: u8) -> i32 {
         ahci: vm.ahci_ptr,
         e1000: core::ptr::null_mut(), // added later by corevm_setup_e1000()
         svga: vm.svga_ptr,
+        virtio_gpu: vm.virtio_gpu_ptr, // may be null if not set up yet
         pci_bus: vm.pci_bus_ptr,
     });
     let router_ptr = &*router as *const PciMmioRouter as *mut PciMmioRouter;
@@ -2630,6 +2706,90 @@ pub extern "C" fn corevm_uhci_process(handle: u64) -> i32 {
     let vm = match get_vm(handle) { Some(v) => v, None => return 0 };
     let uhci = match vm.uhci() { Some(u) => u, None => return 0 };
     if uhci.process_frame() { 1 } else { 0 }
+}
+
+// ── VirtIO GPU FFI ──
+
+/// Set up the VirtIO GPU device at PCI slot 00:07.0.
+/// Must be called AFTER corevm_setup_standard_devices() and
+/// AFTER corevm_setup_ahci() (which creates the PCI MMIO router).
+/// `vram_mb`: VRAM size in MiB (0 = default 256).
+/// Returns 0 on success, -1 on error.
+#[no_mangle]
+pub extern "C" fn corevm_setup_virtio_gpu(handle: u64, vram_mb: u32) -> i32 {
+    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
+    vm.setup_virtio_gpu(vram_mb);
+
+    // Update the PCI MMIO router if it exists.
+    if !vm.pci_mmio_router_ptr.is_null() && !vm.virtio_gpu_ptr.is_null() {
+        let router = unsafe { &mut *vm.pci_mmio_router_ptr };
+        router.virtio_gpu = vm.virtio_gpu_ptr;
+    }
+
+    0
+}
+
+/// Process pending VirtIO GPU virtqueue commands.
+/// Call periodically from the VM run loop (e.g., every vCPU exit or ~60Hz).
+/// Returns 1 if IRQ pending (needs delivery), 0 otherwise.
+#[no_mangle]
+pub extern "C" fn corevm_virtio_gpu_process(handle: u64) -> i32 {
+    let vm = match get_vm(handle) { Some(v) => v, None => return 0 };
+    let gpu = match vm.virtio_gpu() { Some(g) => g, None => return 0 };
+    gpu.process();
+    if gpu.irq_pending {
+        gpu.irq_pending = false;
+        1
+    } else {
+        0
+    }
+}
+
+/// Get VirtIO GPU scanout framebuffer pointer and size.
+/// Sets *out_ptr and *out_len. Returns 0 on success, -1 on error.
+#[no_mangle]
+pub extern "C" fn corevm_virtio_gpu_get_framebuffer(
+    handle: u64,
+    out_ptr: *mut *const u8,
+    out_len: *mut u32,
+) -> i32 {
+    if out_ptr.is_null() || out_len.is_null() { return -1; }
+    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
+    let gpu = match vm.virtio_gpu() { Some(g) => g, None => return -1 };
+    unsafe {
+        *out_ptr = gpu.framebuffer.as_ptr();
+        *out_len = gpu.framebuffer.len() as u32;
+    }
+    0
+}
+
+/// Get VirtIO GPU current scanout dimensions.
+/// Returns 0 if GPU mode is active, -1 on error.
+/// Sets width, height, bpp (always 32 for VirtIO GPU BGRA32 framebuffer).
+#[no_mangle]
+pub extern "C" fn corevm_virtio_gpu_get_mode(
+    handle: u64,
+    out_width: *mut u32,
+    out_height: *mut u32,
+    out_bpp: *mut u8,
+) -> i32 {
+    if out_width.is_null() || out_height.is_null() || out_bpp.is_null() { return -1; }
+    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
+    let gpu = match vm.virtio_gpu_ref() { Some(g) => g, None => return -1 };
+    unsafe {
+        *out_width = gpu.fb_width;
+        *out_height = gpu.fb_height;
+        *out_bpp = 32;
+    }
+    0
+}
+
+/// Check if the VirtIO GPU device is set up and active.
+/// Returns 1 if active, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn corevm_has_virtio_gpu(handle: u64) -> i32 {
+    let vm = match get_vm(handle) { Some(v) => v, None => return 0 };
+    if vm.virtio_gpu_ptr.is_null() { 0 } else { 1 }
 }
 
 // Re-export WHP debug callback setter for use by vmmanager.

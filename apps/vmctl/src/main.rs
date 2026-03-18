@@ -34,6 +34,7 @@ struct Args {
     disk_cache_mode: String,
     tap_name: String, // TAP device name (empty = no networking)
     bridge: String,   // Bridge name to attach TAP to (optional)
+    cpus: u32,        // Number of vCPUs (1-32, default 1)
 }
 
 fn parse_args() -> Args {
@@ -59,6 +60,7 @@ fn parse_args() -> Args {
         disk_cache_mode: String::from("writeback"),
         tap_name: String::new(),
         bridge: String::new(),
+        cpus: 1,
     };
 
     let mut i = 1;
@@ -142,6 +144,7 @@ fn parse_args() -> Args {
                 }
             }
             "--hpet" => { args.enable_hpet = true; }
+            "--cpus" | "-c" => { i += 1; if i < argv.len() { args.cpus = argv[i].parse().unwrap_or(1).max(1).min(32); } }
             "--tap" => { i += 1; if i < argv.len() { args.tap_name = argv[i].clone(); } }
             "--bridge" => { i += 1; if i < argv.len() { args.bridge = argv[i].clone(); } }
             _ => {}
@@ -161,7 +164,8 @@ fn main() {
         std::process::exit(1);
     }
 
-    eprintln!("[vmctl] Creating VM (RAM={}MB, bios={})...", args.ram_mb, args.bios);
+    let num_cpus = args.cpus;
+    eprintln!("[vmctl] Creating VM (RAM={}MB, bios={}, cpus={})...", args.ram_mb, args.bios, num_cpus);
 
     let handle = corevm_create(args.ram_mb);
     if handle == 0 {
@@ -169,10 +173,19 @@ fn main() {
         std::process::exit(1);
     }
 
-    let rc = corevm_create_vcpu(handle, 0);
-    if rc != 0 {
-        eprintln!("[vmctl] ERROR: Failed to create vCPU (rc={})", rc);
-        std::process::exit(1);
+    // Set CPU count before ACPI table generation
+    corevm_set_cpu_count(handle, num_cpus);
+
+    // Create all vCPUs (BSP = 0, APs = 1..N-1)
+    for cpu_id in 0..num_cpus {
+        let rc = corevm_create_vcpu(handle, cpu_id);
+        if rc != 0 {
+            eprintln!("[vmctl] ERROR: Failed to create vCPU {} (rc={})", cpu_id, rc);
+            std::process::exit(1);
+        }
+    }
+    if num_cpus > 1 {
+        eprintln!("[vmctl] Created {} vCPUs (BSP=0, APs=1..{})", num_cpus, num_cpus - 1);
     }
 
     if args.vram_mb > 0 {
@@ -373,10 +386,13 @@ fn main() {
     let cancel_handle = handle;
     let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let running2 = running.clone();
+    let cancel_num_cpus = num_cpus;
     thread::spawn(move || {
         while running2.load(std::sync::atomic::Ordering::Relaxed) {
             thread::sleep(Duration::from_millis(cancel_interval_ms));
-            corevm_cancel_vcpu(cancel_handle, 0);
+            for cpu_id in 0..cancel_num_cpus {
+                corevm_cancel_vcpu(cancel_handle, cpu_id);
+            }
         }
     });
 
@@ -480,6 +496,111 @@ fn main() {
 
     let start = Instant::now();
     let timeout = Duration::from_secs(args.timeout as u64);
+
+    // Spawn AP threads (vCPU 1..N-1) — each runs its own exit-handling loop.
+    // APs start in INIT state and wait for SIPI from the BSP. Once the guest
+    // OS sends SIPI, KVM automatically wakes the AP and it begins executing.
+    let ap_running = running.clone();
+    let mut ap_threads = Vec::new();
+    for cpu_id in 1..num_cpus {
+        let ap_handle = handle;
+        let ap_running = ap_running.clone();
+        let ap_timeout = timeout;
+        let ap_start = start;
+        let t = thread::Builder::new()
+            .name(format!("vcpu-{}", cpu_id))
+            .spawn(move || {
+                let mut ap_exit_count = 0u64;
+                let mut ap_error_count = 0u64;
+                let mut ap_exit_types = [0u64; 16];
+                loop {
+                    if !ap_running.load(std::sync::atomic::Ordering::Relaxed) { break; }
+                    if args.timeout > 0 && ap_start.elapsed() >= ap_timeout { break; }
+
+                    let mut exit = CExitReason::default();
+                    let rc = corevm_run_vcpu(ap_handle, cpu_id, &mut exit);
+                    if rc != 0 {
+                        ap_error_count += 1;
+                        if ap_error_count <= 3 {
+                            eprintln!("[vcpu-{}] run_vcpu error #{}", cpu_id, ap_error_count);
+                        }
+                        thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    ap_exit_count += 1;
+                    if (exit.reason as usize) < ap_exit_types.len() {
+                        ap_exit_types[exit.reason as usize] += 1;
+                    }
+                    if ap_exit_count <= 30 || (ap_exit_count % 10000 == 0) {
+                        // Get AP register state for debug
+                        let mut ap_regs = libcorevm::backend::VcpuRegs::default();
+                        let mut ap_sregs = libcorevm::backend::VcpuSregs::default();
+                        corevm_get_vcpu_regs(ap_handle, cpu_id, &mut ap_regs);
+                        corevm_get_vcpu_sregs(ap_handle, cpu_id, &mut ap_sregs);
+                        let detail = match exit.reason {
+                            0 => format!("IoIn port={:#x} size={}", exit.port, exit.size),
+                            1 => format!("IoOut port={:#x} size={} data={:#x}", exit.port, exit.size, exit.data_u32),
+                            7 => "Halted".into(),
+                            9 => "Shutdown".into(),
+                            13 => format!("Cancelled RIP={:#x} CS={:#x} CR0={:#x} IF={}", ap_regs.rip, ap_sregs.cs.selector, ap_sregs.cr0, if ap_regs.rflags & 0x200 != 0 { 1 } else { 0 }),
+                            _ => format!("reason={}", exit.reason),
+                        };
+                        eprintln!("[vcpu-{}] exit #{}: {}", cpu_id, ap_exit_count, detail);
+                    }
+
+                    match exit.reason {
+                        0 => { // IoIn
+                            if exit.io_count > 1 {
+                                corevm_complete_string_io(ap_handle, cpu_id, exit.port, 0, exit.size, exit.io_count);
+                            } else {
+                                let mut data = [0u8; 4];
+                                corevm_handle_io_exit(ap_handle, cpu_id, exit.port, 0, exit.size, data.as_mut_ptr());
+                            }
+                        }
+                        1 => { // IoOut
+                            if exit.io_count > 1 {
+                                corevm_complete_string_io(ap_handle, cpu_id, exit.port, 1, exit.size, exit.io_count);
+                            } else {
+                                let mut data = exit.data_u32.to_le_bytes();
+                                corevm_handle_io_exit(ap_handle, cpu_id, exit.port, 1, exit.size, data.as_mut_ptr());
+                            }
+                        }
+                        2 => { // MmioRead
+                            let mut data = [0u8; 8];
+                            corevm_handle_mmio_exit(ap_handle, cpu_id, exit.addr, 0, exit.size, data.as_mut_ptr(), exit.mmio_dest_reg, exit.mmio_instr_len);
+                        }
+                        3 => { // MmioWrite
+                            let mut data = exit.data_u64.to_le_bytes();
+                            corevm_handle_mmio_exit(ap_handle, cpu_id, exit.addr, 1, exit.size, data.as_mut_ptr(), 0, 0);
+                        }
+                        7 => { // Halted
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                        9 | 11 => { // Shutdown / Error
+                            break;
+                        }
+                        12 => { // StringIo
+                            corevm_handle_string_io_exit(
+                                ap_handle, cpu_id, exit.port, exit.string_io_is_write,
+                                exit.string_io_count, exit.string_io_gpa,
+                                exit.string_io_step, exit.string_io_instr_len,
+                                exit.string_io_addr_size, exit.size,
+                            );
+                        }
+                        13 => { } // Cancelled
+                        _ => {}
+                    }
+                }
+                eprintln!("[vcpu-{}] thread exit: exits={} errors={} IO={}/{} MMIO={}/{} Hlt={} Cancel={}",
+                    cpu_id, ap_exit_count, ap_error_count,
+                    ap_exit_types[0], ap_exit_types[1],
+                    ap_exit_types[2], ap_exit_types[3],
+                    ap_exit_types[7], ap_exit_types[13]);
+            })
+            .expect("failed to spawn AP thread");
+        ap_threads.push(t);
+    }
+
     let mut exit_count: u64 = 0;
     let mut serial_bytes: u64 = 0;
     let mut exit_reason = "timeout";
@@ -511,7 +632,7 @@ fn main() {
                     corevm_complete_string_io(handle, 0, exit.port, 0, exit.size, exit.io_count);
                 } else {
                     let mut data = [0u8; 4];
-                    corevm_handle_io_exit(handle, exit.port, 0, exit.size, data.as_mut_ptr());
+                    corevm_handle_io_exit(handle, 0, exit.port, 0, exit.size, data.as_mut_ptr());
                 }
             }
             1 => { // IoOut
@@ -521,18 +642,18 @@ fn main() {
                     corevm_complete_string_io(handle, 0, exit.port, 1, exit.size, exit.io_count);
                 } else {
                     let mut data = exit.data_u32.to_le_bytes();
-                    corevm_handle_io_exit(handle, exit.port, 1, exit.size, data.as_mut_ptr());
+                    corevm_handle_io_exit(handle, 0, exit.port, 1, exit.size, data.as_mut_ptr());
                 }
             }
             2 => { // MmioRead
                 *mmio_addrs.entry(exit.addr & !0xFFF).or_insert(0) += 1;
                 let mut data = [0u8; 8];
-                corevm_handle_mmio_exit(handle, exit.addr, 0, exit.size, data.as_mut_ptr(), exit.mmio_dest_reg, exit.mmio_instr_len);
+                corevm_handle_mmio_exit(handle, 0, exit.addr, 0, exit.size, data.as_mut_ptr(), exit.mmio_dest_reg, exit.mmio_instr_len);
             }
             3 => { // MmioWrite
                 *mmio_addrs.entry(exit.addr & !0xFFF).or_insert(0) += 1;
                 let mut data = exit.data_u64.to_le_bytes();
-                corevm_handle_mmio_exit(handle, exit.addr, 1, exit.size, data.as_mut_ptr(), 0, 0);
+                corevm_handle_mmio_exit(handle, 0, exit.addr, 1, exit.size, data.as_mut_ptr(), 0, 0);
             }
             7 => { // Halted
                 thread::sleep(Duration::from_millis(1));
@@ -549,7 +670,7 @@ fn main() {
             }
             12 => { // StringIo
                 corevm_handle_string_io_exit(
-                    handle, exit.port, exit.string_io_is_write,
+                    handle, 0, exit.port, exit.string_io_is_write,
                     exit.string_io_count, exit.string_io_gpa,
                     exit.string_io_step, exit.string_io_instr_len,
                     exit.string_io_addr_size, exit.size,
@@ -742,6 +863,20 @@ fn main() {
             }
         }
 
+        // Dump SeaBIOS SMP variables (every 2s with vm-state)
+        if exit.reason == 13 && last_state.elapsed() >= Duration::from_secs(1) && num_cpus > 1 {
+            let mut buf4 = [0u8; 4];
+            corevm_read_phys(handle, 0x0F4B60, buf4.as_mut_ptr(), 4);
+            let count_cpus = u32::from_le_bytes(buf4);
+            corevm_read_phys(handle, 0x0F4B28, buf4.as_mut_ptr(), 4);
+            let spinlock = u32::from_le_bytes(buf4);
+            // Read BSP RBX (MaxCountCPUs) from register state
+            let mut regs = VcpuRegs::default();
+            corevm_get_vcpu_regs(handle, 0, &mut regs);
+            eprintln!("[smp-debug] CountCPUs@0F4B60={} spinlock={} RBX(MaxCount)={} RAX={}",
+                count_cpus, spinlock, regs.rbx, regs.rax);
+        }
+
         // Check timeout
         if args.timeout > 0 && start.elapsed() >= timeout {
             break;
@@ -749,6 +884,14 @@ fn main() {
     }
 
     running.store(false, std::sync::atomic::Ordering::Relaxed);
+    // Cancel all AP vCPUs so their threads can observe the running=false flag
+    for cpu_id in 1..num_cpus {
+        corevm_cancel_vcpu(handle, cpu_id);
+    }
+    // Wait for AP threads to finish
+    for t in ap_threads {
+        let _ = t.join();
+    }
     let runtime = start.elapsed();
 
     // MMIO address distribution

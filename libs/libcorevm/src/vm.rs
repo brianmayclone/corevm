@@ -13,6 +13,7 @@ use crate::devices::ahci::Ahci;
 use crate::devices::e1000::E1000;
 use crate::devices::ac97::Ac97;
 use crate::devices::hpet::Hpet;
+use crate::devices::virtio_gpu::VirtioGpu;
 
 /// The virtual machine instance.
 ///
@@ -50,6 +51,7 @@ pub struct Vm {
     pub e1000_ptr: *mut E1000,
     pub ac97_ptr: *mut Ac97,
     pub uhci_ptr: *mut crate::devices::uhci::Uhci,
+    pub virtio_gpu_ptr: *mut VirtioGpu,
 
     /// Pointer to the PCI MMIO router (lives inside the MMIO dispatch regions).
     /// Used by `corevm_setup_e1000()` to add E1000 to the router after AHCI setup.
@@ -63,6 +65,9 @@ pub struct Vm {
 
     /// Tracks whether E1000 IRQ 11 is currently asserted (level-triggered).
     pub e1000_irq_asserted: bool,
+
+    /// Tracks whether VirtIO GPU IRQ is currently asserted (level-triggered).
+    pub virtio_gpu_irq_asserted: bool,
 
     /// Set when the guest writes to port 0xCF9 requesting a system reset.
     pub cf9_reset_pending: bool,
@@ -142,10 +147,12 @@ impl Vm {
             e1000_ptr: core::ptr::null_mut(),
             ac97_ptr: core::ptr::null_mut(),
             uhci_ptr: core::ptr::null_mut(),
+            virtio_gpu_ptr: core::ptr::null_mut(),
             pci_mmio_router_ptr: core::ptr::null_mut(),
             pci_io_router_ptr: core::ptr::null_mut(),
             ahci_irq_asserted: false,
             e1000_irq_asserted: false,
+            virtio_gpu_irq_asserted: false,
             cf9_reset_pending: false,
             vram_mb: 0,
             cpu_count: 1,
@@ -482,7 +489,7 @@ impl Vm {
     /// advancing by `step` (±access_size) each time.
     /// Updates guest registers (RCX, RDI/RSI, RIP) after completion.
     pub fn handle_string_io(
-        &mut self, port: u16, is_write: bool, count: u64, gpa: u64,
+        &mut self, vcpu_id: u32, port: u16, is_write: bool, count: u64, gpa: u64,
         step: i64, instr_len: u64, addr_size: u8, access_size: u8,
     ) {
         let mut current_gpa = gpa;
@@ -510,7 +517,7 @@ impl Vm {
         }
 
         // Update guest registers
-        if let Ok(mut regs) = self.get_vcpu_regs(0) {
+        if let Ok(mut regs) = self.get_vcpu_regs(vcpu_id) {
             // Update pointer register
             let total_delta = step * count as i64;
             if is_write {
@@ -534,7 +541,7 @@ impl Vm {
             };
             // Advance RIP
             regs.rip += instr_len;
-            let _ = self.set_vcpu_regs(0, &regs);
+            let _ = self.set_vcpu_regs(vcpu_id, &regs);
         }
     }
 
@@ -789,6 +796,175 @@ impl Vm {
         } else {
             Some(unsafe { &mut *self.ac97_ptr })
         }
+    }
+
+    /// Get a mutable reference to the VirtIO GPU device, if set up.
+    pub fn virtio_gpu(&mut self) -> Option<&mut VirtioGpu> {
+        if self.virtio_gpu_ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { &mut *self.virtio_gpu_ptr })
+        }
+    }
+
+    /// Get an immutable reference to the VirtIO GPU device, if set up.
+    pub fn virtio_gpu_ref(&self) -> Option<&VirtioGpu> {
+        if self.virtio_gpu_ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { &*self.virtio_gpu_ptr })
+        }
+    }
+
+    /// Set up the VirtIO GPU device at PCI slot 00:07.0.
+    /// Call after `setup_standard_devices()`.
+    pub fn setup_virtio_gpu(&mut self, vram_mb: u32) {
+        if !self.virtio_gpu_ptr.is_null() {
+            return; // already set up
+        }
+
+        use crate::devices::virtio_gpu::VIRTIO_GPU_BAR0_SIZE;
+        use crate::devices::bus::PciDevice;
+
+        let gpu = Box::new(VirtioGpu::new(vram_mb));
+        let gpu_ptr = &*gpu as *const VirtioGpu as *mut VirtioGpu;
+        self.virtio_gpu_ptr = gpu_ptr;
+
+        // Give VirtIO GPU access to guest RAM for DMA.
+        let (ram_ptr, ram_len) = self.memory.ram_mut_ptr();
+        unsafe {
+            (*gpu_ptr).guest_mem_ptr = ram_ptr;
+            (*gpu_ptr).guest_mem_len = ram_len;
+        }
+
+        // Register BAR0 MMIO (VirtIO config space) at a default address.
+        // SeaBIOS may remap this — the PCI MMIO router handles dynamic routing.
+        let bar0_addr: u64 = 0xFEB0_0000;
+        self.memory.add_mmio(bar0_addr, VIRTIO_GPU_BAR0_SIZE as u64, gpu);
+
+        // Register PCI device at slot 7 (00:07.0).
+        if !self.pci_bus_ptr.is_null() {
+            let pci_bus = unsafe { &mut *self.pci_bus_ptr };
+            let mut pci_dev = PciDevice::new(
+                0x1AF4, // VirtIO vendor
+                0x1050, // VirtIO GPU (non-transitional)
+                0x03,   // Display controller
+                0x00,   // VGA compatible
+                0x00,   // prog-if
+            );
+            pci_dev.device = 7;
+
+            // Subsystem IDs.
+            pci_dev.config_space[0x2C] = 0xF4; // Subsystem vendor ID low (0x1AF4)
+            pci_dev.config_space[0x2D] = 0x1A;
+            pci_dev.config_space[0x2E] = 0x00; // Subsystem device ID low (0x1100)
+            pci_dev.config_space[0x2F] = 0x11;
+
+            // BAR0: MMIO config space (16 KB).
+            pci_dev.set_bar(0, bar0_addr as u32, VIRTIO_GPU_BAR0_SIZE, true);
+
+            // Interrupt: INTA → PIRQ routing.
+            // Device 7, INTA: PIRQ = (7+0)%4 = 3 → PIRQD → IRQ 11.
+            pci_dev.set_interrupt(11, 1);
+
+            // VirtIO PCI capability list pointer.
+            // Set capabilities pointer (offset 0x34) and status bit.
+            pci_dev.config_space[0x34] = 0x40; // Cap list starts at 0x40
+            pci_dev.config_space[0x06] |= 0x10; // Status: capabilities list bit
+
+            // VirtIO PCI capabilities at 0x40+.
+            // Cap 1: Common configuration (type 1).
+            let cap_base = 0x40usize;
+            pci_dev.config_space[cap_base] = 0x09;     // VirtIO cap ID
+            pci_dev.config_space[cap_base + 1] = 0x54;  // Next cap pointer
+            pci_dev.config_space[cap_base + 2] = 0; // Cap length
+            pci_dev.config_space[cap_base + 3] = 1;     // cfg_type = COMMON_CFG
+            pci_dev.config_space[cap_base + 4] = 0;     // BAR 0
+            // Offset within BAR (little-endian u32 at +8).
+            pci_dev.config_space[cap_base + 8] = 0x00;  // offset = 0x0000
+            pci_dev.config_space[cap_base + 9] = 0x00;
+            pci_dev.config_space[cap_base + 10] = 0x00;
+            pci_dev.config_space[cap_base + 11] = 0x00;
+            // Length (u32 at +12).
+            pci_dev.config_space[cap_base + 12] = 0x40; // 64 bytes
+            pci_dev.config_space[cap_base + 13] = 0x00;
+            pci_dev.config_space[cap_base + 14] = 0x00;
+            pci_dev.config_space[cap_base + 15] = 0x00;
+
+            // Cap 2: Notifications (type 2).
+            let cap2 = 0x54usize;
+            pci_dev.config_space[cap2] = 0x09;
+            pci_dev.config_space[cap2 + 1] = 0x6C; // Next cap
+            pci_dev.config_space[cap2 + 2] = 0;
+            pci_dev.config_space[cap2 + 3] = 2;    // cfg_type = NOTIFY_CFG
+            pci_dev.config_space[cap2 + 4] = 0;    // BAR 0
+            pci_dev.config_space[cap2 + 8] = 0x00; // offset = 0x1000
+            pci_dev.config_space[cap2 + 9] = 0x10;
+            pci_dev.config_space[cap2 + 10] = 0x00;
+            pci_dev.config_space[cap2 + 11] = 0x00;
+            pci_dev.config_space[cap2 + 12] = 0x04; // length = 4
+            pci_dev.config_space[cap2 + 13] = 0x00;
+            pci_dev.config_space[cap2 + 14] = 0x00;
+            pci_dev.config_space[cap2 + 15] = 0x00;
+            // Notify offset multiplier (u32 at +16).
+            pci_dev.config_space[cap2 + 16] = 0x00;
+            pci_dev.config_space[cap2 + 17] = 0x00;
+            pci_dev.config_space[cap2 + 18] = 0x00;
+            pci_dev.config_space[cap2 + 19] = 0x00;
+
+            // Cap 3: ISR status (type 3).
+            let cap3 = 0x6Cusize;
+            pci_dev.config_space[cap3] = 0x09;
+            pci_dev.config_space[cap3 + 1] = 0x80; // Next cap
+            pci_dev.config_space[cap3 + 2] = 0;
+            pci_dev.config_space[cap3 + 3] = 3;    // cfg_type = ISR_CFG
+            pci_dev.config_space[cap3 + 4] = 0;    // BAR 0
+            pci_dev.config_space[cap3 + 8] = 0x00; // offset = 0x2000
+            pci_dev.config_space[cap3 + 9] = 0x20;
+            pci_dev.config_space[cap3 + 10] = 0x00;
+            pci_dev.config_space[cap3 + 11] = 0x00;
+            pci_dev.config_space[cap3 + 12] = 0x04; // length = 4
+            pci_dev.config_space[cap3 + 13] = 0x00;
+            pci_dev.config_space[cap3 + 14] = 0x00;
+            pci_dev.config_space[cap3 + 15] = 0x00;
+
+            // Cap 4: Device-specific config (type 4).
+            let cap4 = 0x80usize;
+            pci_dev.config_space[cap4] = 0x09;
+            pci_dev.config_space[cap4 + 1] = 0x00; // No next cap
+            pci_dev.config_space[cap4 + 2] = 0;
+            pci_dev.config_space[cap4 + 3] = 4;    // cfg_type = DEVICE_CFG
+            pci_dev.config_space[cap4 + 4] = 0;    // BAR 0
+            pci_dev.config_space[cap4 + 8] = 0x00; // offset = 0x3000
+            pci_dev.config_space[cap4 + 9] = 0x30;
+            pci_dev.config_space[cap4 + 10] = 0x00;
+            pci_dev.config_space[cap4 + 11] = 0x00;
+            pci_dev.config_space[cap4 + 12] = 0x40; // length = 64
+            pci_dev.config_space[cap4 + 13] = 0x00;
+            pci_dev.config_space[cap4 + 14] = 0x00;
+            pci_dev.config_space[cap4 + 15] = 0x00;
+
+            // Revision ID (VirtIO 1.0+).
+            pci_dev.config_space[0x08] = 0x01;
+
+            pci_bus.add_device(pci_dev);
+        }
+    }
+
+    /// Map the VirtIO GPU VRAM as a hypervisor memory region for fast
+    /// direct guest access. Must be called after `setup_virtio_gpu()`.
+    #[cfg(any(feature = "linux", feature = "windows"))]
+    pub fn setup_virtio_gpu_vram_mapping(&mut self) -> core::result::Result<(), VmError> {
+        if self.virtio_gpu_ptr.is_null() {
+            return Ok(());
+        }
+        // Slot 5: VirtIO GPU VRAM — separate from VGA slots (2, 4).
+        // Not mapped yet because VirtIO GPU uses DMA-based transfers,
+        // not direct framebuffer writes. The host reads the scanout
+        // framebuffer via the device struct directly.
+        // Future: if performance requires it, map VRAM BAR as a
+        // hypervisor memory region for zero-copy guest writes.
+        Ok(())
     }
 }
 

@@ -512,6 +512,7 @@ impl SettingsDialog {
                 egui::Color32::from_rgb(100, 100, 105),
                 match self.config.gpu_model {
                     GpuModel::StdVga => "Bochs VBE compatible adapter. Works with all guest operating systems.",
+                    GpuModel::VirtioGpu => "VirtIO GPU with 3D acceleration. Requires Vulkan on host. Drivers via Windows Update.",
                 },
             );
         });

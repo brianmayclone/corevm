@@ -8,6 +8,10 @@ pub enum GpuModel {
     /// QEMU Standard VGA (Bochs VBE DISPI) — widely compatible, works with
     /// every guest OS that has a VBE or VESA driver. PCI ID 1234:1111.
     StdVga,
+    /// VirtIO GPU — paravirtual GPU with 2D/3D acceleration support.
+    /// Uses host Vulkan for rendering. Windows gets WHQL-signed drivers
+    /// via Windows Update (viogpudo). PCI ID 1AF4:1050.
+    VirtioGpu,
 }
 
 impl GpuModel {
@@ -15,12 +19,14 @@ impl GpuModel {
     pub fn label(&self) -> &'static str {
         match self {
             GpuModel::StdVga => "Standard VGA (Bochs VBE)",
+            GpuModel::VirtioGpu => "VirtIO GPU (3D-accelerated)",
         }
     }
 
     /// All available GPU models (for UI combo boxes).
     pub const ALL: &'static [GpuModel] = &[
         GpuModel::StdVga,
+        GpuModel::VirtioGpu,
     ];
 }
 
