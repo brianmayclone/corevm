@@ -15,7 +15,7 @@ use libcorevm::ffi::{
     corevm_run_vcpu, corevm_handle_io_exit, corevm_handle_mmio_exit, corevm_handle_string_io_exit,
     corevm_setup_standard_devices, corevm_setup_acpi_tables, corevm_setup_acpi_tables_with_hpet, corevm_setup_ahci, corevm_setup_e1000, corevm_setup_hpet, corevm_setup_ac97, corevm_ac97_process,
     corevm_setup_uhci, corevm_uhci_process,
-    corevm_setup_virtio_gpu, corevm_virtio_gpu_process, corevm_virtio_gpu_get_framebuffer, corevm_virtio_gpu_get_mode, corevm_has_virtio_gpu,
+    corevm_setup_virtio_gpu, corevm_virtio_gpu_process, corevm_virtio_gpu_get_framebuffer, corevm_virtio_gpu_get_mode, corevm_has_virtio_gpu, corevm_virtio_gpu_scanout_active,
     corevm_complete_string_io,
     corevm_get_vcpu_regs,
     corevm_get_vcpu_sregs,
@@ -808,8 +808,10 @@ fn vm_run_loop(
 
 /// Read VGA state and update the shared framebuffer
 fn update_framebuffer(handle: u64, fb: &Arc<Mutex<FrameBufferData>>, diag: &DiagLog, fb_debug_count: &mut u32) {
-    // If VirtIO GPU is active, read its scanout framebuffer instead of VGA.
-    if corevm_has_virtio_gpu(handle) != 0 {
+    // If VirtIO GPU scanout is active (guest driver loaded and configured),
+    // read its framebuffer instead of VGA. Falls back to VGA during BIOS boot
+    // and until the guest driver issues SET_SCANOUT with a valid resource.
+    if corevm_virtio_gpu_scanout_active(handle) != 0 {
         let mut gpu_w: u32 = 0;
         let mut gpu_h: u32 = 0;
         let mut gpu_bpp: u8 = 0;
@@ -824,35 +826,27 @@ fn update_framebuffer(handle: u64, fb: &Arc<Mutex<FrameBufferData>>, diag: &Diag
                 let fb_size = (gpu_w as usize) * (gpu_h as usize) * 4; // BGRA32
                 if (fb_len as usize) >= fb_size {
                     let raw = unsafe { std::slice::from_raw_parts(fb_ptr, fb_size) };
-                    // Check if framebuffer has data (not all zero).
-                    let has_data = raw.chunks(raw.len() / 4).any(|chunk| {
-                        chunk.iter().take(64.min(chunk.len())).any(|&b| b != 0)
-                    });
-                    if has_data {
-                        if let Ok(mut fb_data) = fb.lock() {
-                            fb_data.text_mode = false;
-                            fb_data.width = gpu_w;
-                            fb_data.height = gpu_h;
-                            // VirtIO GPU framebuffer is BGRA32 — convert to RGBA32.
-                            let npixels = (gpu_w as usize) * (gpu_h as usize);
-                            fb_data.pixels.resize(npixels * 4, 255);
-                            for i in 0..npixels {
-                                let src = i * 4;
-                                let dst = i * 4;
-                                fb_data.pixels[dst] = raw[src + 2];     // R
-                                fb_data.pixels[dst + 1] = raw[src + 1]; // G
-                                fb_data.pixels[dst + 2] = raw[src];     // B
-                                fb_data.pixels[dst + 3] = 255;          // A
-                            }
-                            fb_data.dirty = true;
+                    if let Ok(mut fb_data) = fb.lock() {
+                        fb_data.text_mode = false;
+                        fb_data.width = gpu_w;
+                        fb_data.height = gpu_h;
+                        // VirtIO GPU framebuffer is BGRA32 — convert to RGBA32.
+                        let npixels = (gpu_w as usize) * (gpu_h as usize);
+                        fb_data.pixels.resize(npixels * 4, 255);
+                        for i in 0..npixels {
+                            let src = i * 4;
+                            let dst = i * 4;
+                            fb_data.pixels[dst] = raw[src + 2];     // R
+                            fb_data.pixels[dst + 1] = raw[src + 1]; // G
+                            fb_data.pixels[dst + 2] = raw[src];     // B
+                            fb_data.pixels[dst + 3] = 255;          // A
                         }
-                        return;
+                        fb_data.dirty = true;
                     }
+                    return;
                 }
             }
         }
-        // Fall through to VGA path if VirtIO GPU has no data yet
-        // (e.g., during BIOS boot before driver loads).
     }
 
     // Query VGA mode to get exact dimensions

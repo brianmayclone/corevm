@@ -2909,6 +2909,16 @@ pub extern "C" fn corevm_has_virtio_gpu(handle: u64) -> i32 {
     if vm.virtio_gpu_ptr.is_null() { 0 } else { 1 }
 }
 
+/// Check if the VirtIO GPU scanout is active (guest driver has configured display).
+/// Returns 1 if the guest driver has set up a scanout with a valid resource, 0 otherwise.
+/// Use this to decide whether to show the VirtIO GPU framebuffer or fall back to VGA.
+#[no_mangle]
+pub extern "C" fn corevm_virtio_gpu_scanout_active(handle: u64) -> i32 {
+    let vm = match get_vm(handle) { Some(v) => v, None => return 0 };
+    let gpu = match vm.virtio_gpu_ref() { Some(g) => g, None => return 0 };
+    if gpu.scanout_active { 1 } else { 0 }
+}
+
 // ── VirtIO-Net FFI ──
 
 /// Set up the VirtIO-Net device at PCI slot 00:08.0.

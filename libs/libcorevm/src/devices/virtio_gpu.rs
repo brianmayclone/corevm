@@ -206,6 +206,10 @@ pub struct VirtioGpu {
     pub fb_width: u32,
     /// Current framebuffer height.
     pub fb_height: u32,
+    /// True when the guest driver has configured a scanout with a valid resource.
+    /// Used by the display pipeline to decide whether to show the VirtIO GPU
+    /// framebuffer or fall back to VGA.
+    pub scanout_active: bool,
 
     // ── DMA ──
 
@@ -261,6 +265,7 @@ impl VirtioGpu {
             framebuffer,
             fb_width: DEFAULT_WIDTH,
             fb_height: DEFAULT_HEIGHT,
+            scanout_active: false,
 
             guest_mem_ptr: core::ptr::null_mut(),
             guest_mem_len: 0,
@@ -638,6 +643,7 @@ impl VirtioGpu {
         // resource_id == 0 means disable scanout.
         if resource_id == 0 {
             self.scanouts[scanout_id as usize].resource_id = 0;
+            if scanout_id == 0 { self.scanout_active = false; }
             return self.write_response(write_bufs, VIRTIO_GPU_RESP_OK_NODATA, &[]);
         }
 
@@ -653,6 +659,9 @@ impl VirtioGpu {
             scanout.width = r_w;
             scanout.height = r_h;
         }
+
+        // Mark scanout as active — the guest driver has configured display output.
+        if scanout_id == 0 { self.scanout_active = true; }
 
         // Update framebuffer dimensions if scanout size changed.
         if scanout_id == 0 && r_w > 0 && r_h > 0 {
