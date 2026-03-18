@@ -520,6 +520,10 @@ fn main() {
                     let mut exit = CExitReason::default();
                     let rc = corevm_run_vcpu(ap_handle, cpu_id, &mut exit);
                     if rc != 0 {
+                        if ap_total <= 10 || ap_total % 1000 == 0 {
+                            eprintln!("[vcpu-{}] run_vcpu FAILED rc={} (exit #{})", cpu_id, rc, ap_total);
+                        }
+                        ap_total += 1;
                         thread::sleep(Duration::from_millis(1));
                         continue;
                     }
@@ -532,6 +536,19 @@ fn main() {
                         eprintln!("[vcpu-{}] exits={} IO={}/{} MMIO={}/{} Hlt={} Cancel={}",
                             cpu_id, ap_total, ap_exits[0], ap_exits[1],
                             ap_exits[2], ap_exits[3], ap_exits[7], ap_exits[13]);
+                    }
+
+                    // Debug: log every non-Cancel exit and first 50 exits to trace SIPI handling
+                    if exit.reason != 13 || ap_total <= 50 {
+                        let mut ap_regs = libcorevm::backend::VcpuRegs::default();
+                        corevm_get_vcpu_regs(ap_handle, cpu_id, &mut ap_regs);
+                        let detail = match exit.reason {
+                            0 | 1 => format!("port={:#x} data={:#x}", exit.port, exit.data_u32),
+                            2 | 3 => format!("addr={:#x} size={}", exit.addr, exit.size),
+                            _ => String::new(),
+                        };
+                        eprintln!("[vcpu-{}] exit #{}: reason={} RIP={:#x} RFLAGS={:#x} {}",
+                            cpu_id, ap_total, exit.reason, ap_regs.rip, ap_regs.rflags, detail);
                     }
 
                     match exit.reason {
@@ -559,8 +576,8 @@ fn main() {
                             let mut data = exit.data_u64.to_le_bytes();
                             corevm_handle_mmio_exit(ap_handle, cpu_id, exit.addr, 1, exit.size, data.as_mut_ptr(), 0, 0);
                         }
-                        7 => { // Halted
-                            thread::sleep(Duration::from_millis(1));
+                        7 => { // Halted — re-enter KVM_RUN immediately.
+                            // KVM handles HLT internally and blocks until interrupt.
                         }
                         9 | 11 => { // Shutdown / Error
                             break;
@@ -1013,6 +1030,92 @@ fn main() {
                                         let s = core::str::from_utf8(&tsig[0..4]).unwrap_or("????");
                                         let tlen = u32::from_le_bytes([tsig[4], tsig[5], tsig[6], tsig[7]]);
                                         eprintln!("[acpi] XSDT[{}] -> {:#x} sig='{}' len={}", i, ptr, s, tlen);
+                                        // Dump DSDT from FADT
+                                        if s == "FACP" && tlen >= 44 {
+                                            let mut fadt = vec![0u8; tlen.min(256) as usize];
+                                            corevm_read_phys(handle, ptr, fadt.as_mut_ptr(), fadt.len() as u32);
+                                            let dsdt32 = u32::from_le_bytes([fadt[40], fadt[41], fadt[42], fadt[43]]);
+                                            let dsdt64 = if tlen >= 148 {
+                                                u64::from_le_bytes([fadt[140], fadt[141], fadt[142], fadt[143],
+                                                    fadt[144], fadt[145], fadt[146], fadt[147]])
+                                            } else { 0 };
+                                            let dsdt_addr = if dsdt64 != 0 { dsdt64 } else { dsdt32 as u64 };
+                                            eprintln!("[fadt] DSDT32={:#x} DSDT64={:#x} → using {:#x}", dsdt32, dsdt64, dsdt_addr);
+                                            if dsdt_addr > 0 && dsdt_addr < args.ram_mb as u64 * 1024 * 1024 {
+                                                let mut dsdt_hdr = [0u8; 8];
+                                                corevm_read_phys(handle, dsdt_addr, dsdt_hdr.as_mut_ptr(), 8);
+                                                let dsig = core::str::from_utf8(&dsdt_hdr[0..4]).unwrap_or("????");
+                                                let dlen = u32::from_le_bytes([dsdt_hdr[4], dsdt_hdr[5], dsdt_hdr[6], dsdt_hdr[7]]);
+                                                eprintln!("[dsdt] sig='{}' len={}", dsig, dlen);
+                                                // Read full DSDT and search for Processor opcodes (0x5B 0x83)
+                                                if dlen <= 4096 {
+                                                    let mut dsdt = vec![0u8; dlen as usize];
+                                                    corevm_read_phys(handle, dsdt_addr, dsdt.as_mut_ptr(), dlen);
+                                                    let mut proc_count = 0;
+                                                    for j in 0..dsdt.len().saturating_sub(1) {
+                                                        if dsdt[j] == 0x5B && dsdt[j+1] == 0x83 {
+                                                            // ProcessorOp found
+                                                            // After PkgLength, next 4 bytes = name, then 1 byte = ProcID
+                                                            if j + 7 < dsdt.len() {
+                                                                let pkg_len_byte = dsdt[j+2];
+                                                                let name_off = if pkg_len_byte & 0xC0 == 0 { j+3 } else { j+4 };
+                                                                if name_off + 5 <= dsdt.len() {
+                                                                    let name = core::str::from_utf8(&dsdt[name_off..name_off+4]).unwrap_or("????");
+                                                                    let proc_id = dsdt[name_off + 4];
+                                                                    eprintln!("[dsdt]   Processor: name='{}' id={}", name, proc_id);
+                                                                    proc_count += 1;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    eprintln!("[dsdt] Found {} Processor objects", proc_count);
+                                                    // Also search for \_PR_ scope (0x5C 0x5F 0x50 0x52 0x5F)
+                                                    let pr_sig = [0x5C, 0x5F, 0x50, 0x52, 0x5F]; // \_PR_
+                                                    let has_pr = dsdt.windows(5).any(|w| w == pr_sig);
+                                                    eprintln!("[dsdt] \\_PR_ scope present: {}", has_pr);
+                                                }
+                                            }
+                                        }
+                                        // Dump MADT entries if this is the APIC table
+                                        if s == "APIC" && tlen <= 512 {
+                                            let mut madt = vec![0u8; tlen as usize];
+                                            corevm_read_phys(handle, ptr, madt.as_mut_ptr(), tlen);
+                                            let lapic_addr = u32::from_le_bytes([madt[36], madt[37], madt[38], madt[39]]);
+                                            let madt_flags = u32::from_le_bytes([madt[40], madt[41], madt[42], madt[43]]);
+                                            eprintln!("[madt] LAPIC addr={:#x} flags={:#x}", lapic_addr, madt_flags);
+                                            let mut moff = 44;
+                                            while moff + 2 <= tlen as usize {
+                                                let etype = madt[moff];
+                                                let elen = madt[moff + 1] as usize;
+                                                if elen == 0 { break; }
+                                                match etype {
+                                                    0 if elen >= 8 => {
+                                                        let acpi_id = madt[moff + 2];
+                                                        let apic_id = madt[moff + 3];
+                                                        let eflags = u32::from_le_bytes([madt[moff+4], madt[moff+5], madt[moff+6], madt[moff+7]]);
+                                                        eprintln!("[madt]   LAPIC: acpi_id={} apic_id={} flags={:#x} ({})",
+                                                            acpi_id, apic_id, eflags,
+                                                            if eflags & 1 != 0 { "enabled" } else { "DISABLED" });
+                                                    }
+                                                    1 if elen >= 12 => {
+                                                        let ioapic_id = madt[moff + 2];
+                                                        let ioapic_addr = u32::from_le_bytes([madt[moff+4], madt[moff+5], madt[moff+6], madt[moff+7]]);
+                                                        let gsi_base = u32::from_le_bytes([madt[moff+8], madt[moff+9], madt[moff+10], madt[moff+11]]);
+                                                        eprintln!("[madt]   IOAPIC: id={} addr={:#x} gsi_base={}", ioapic_id, ioapic_addr, gsi_base);
+                                                    }
+                                                    2 if elen >= 10 => {
+                                                        let source = madt[moff + 3];
+                                                        let gsi = u32::from_le_bytes([madt[moff+4], madt[moff+5], madt[moff+6], madt[moff+7]]);
+                                                        let oflags = u16::from_le_bytes([madt[moff+8], madt[moff+9]]);
+                                                        eprintln!("[madt]   Override: source={} gsi={} flags={:#x}", source, gsi, oflags);
+                                                    }
+                                                    _ => {
+                                                        eprintln!("[madt]   type={} len={}", etype, elen);
+                                                    }
+                                                }
+                                                moff += elen;
+                                            }
+                                        }
                                     } else {
                                         eprintln!("[acpi] XSDT[{}] -> {:#x} (out of range)", i, ptr);
                                     }

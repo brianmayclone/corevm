@@ -233,6 +233,7 @@ pub extern "C" fn corevm_create_vcpu(handle: u64, vcpu_id: u32) -> i32 {
                 if vcpu_id > 0 {
                     let apic_base = 0xFEE0_0000u64 | (1 << 11);
                     let _ = vm.backend.set_msrs(vcpu_id, &[(0x1B, apic_base)]);
+                    // KVM_MP_STATE_INIT_RECEIVED (2) — AP waits for SIPI
                     let _ = vm.backend.set_mp_state(vcpu_id, 2);
                 }
                 // On WHP, APs have APIC_BASE set by create_vcpu already.
@@ -2945,18 +2946,20 @@ pub extern "C" fn corevm_setup_virtio_gpu(handle: u64, vram_mb: u32) -> i32 {
         router.virtio_gpu = vm.virtio_gpu_ptr;
     }
 
-    // Register the notify callback: pulse IRQ 11 and kick vCPU 0.
-    // This is the equivalent of QEMU's virtio_notify() — it ensures the
-    // guest immediately sees command completions without waiting for poll_irqs.
+    // Register the notify callback: kick vCPU 0 so poll_irqs runs promptly.
+    // Do NOT call set_irq_line here — IRQ 11 is shared between AHCI, E1000,
+    // VirtIO-GPU, and VirtIO-Net. Direct assert/de-assert from the callback
+    // races with poll_irqs and causes either lost AHCI interrupts (if we
+    // de-assert) or stuck IRQ line (if we only assert). Instead, the GPU
+    // sets isr_status in virtio_notify() and poll_irqs handles the shared
+    // IRQ 11 line correctly by checking all devices before assert/de-assert.
     #[cfg(feature = "linux")]
     if !vm.virtio_gpu_ptr.is_null() {
-        let bp = &mut vm.backend as *mut crate::backend::kvm::KvmBackend as usize;
         let vs = vm.backend.vm_slot;
         let gpu = unsafe { &mut *vm.virtio_gpu_ptr };
         gpu.notify_callback = Some(alloc::boxed::Box::new(move || {
-            let backend = unsafe { &mut *(bp as *mut crate::backend::kvm::KvmBackend) };
-            let _ = backend.set_irq_line(11, true);
-            let _ = backend.set_irq_line(11, false);
+            // Just kick the BSP so it re-enters the poll loop quickly.
+            // poll_irqs will see gpu.isr_status and deliver IRQ 11.
             crate::backend::kvm::cancel_vcpu_kvm(vs, 0);
         }));
     }

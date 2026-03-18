@@ -855,9 +855,18 @@ impl KvmBackend {
                 let mut ecx = e.ecx;
                 let mut edx = e.edx;
 
-                // Filter CPUID: hide VMX, keep KVM hypervisor signature.
+                // Filter CPUID: hide features that conflict with our
+                // PIIX3/i440FX platform emulation.
                 if e.function == 1 {
                     ecx &= !(1 << 5);   // VMX — not useful inside guest
+                    ecx &= !(1 << 21);  // x2APIC — our platform uses xAPIC only.
+                                         // Windows 10 tries to switch to x2APIC
+                                         // mode if exposed, which hangs with SMP
+                                         // on the PIIX3/i440FX chipset.
+                    ecx &= !(1 << 24);  // TSC-Deadline — requires LAPIC timer mode
+                                         // support that our platform doesn't fully
+                                         // implement. Windows 10 uses TSC-Deadline
+                                         // with SMP and hangs if it doesn't fire.
                     // Keep bit 31 (hypervisor present) — needed for KVM PV
                     // features including SMP wakeup used by SeaBIOS.
                     // EBX[31:24] and EBX[23:16] are set per-vCPU in create_vcpu
