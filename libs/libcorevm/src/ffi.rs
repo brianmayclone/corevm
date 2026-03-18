@@ -8,13 +8,38 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::vm::Vm;
 use crate::backend::types::*;
 #[cfg(any(feature = "linux", feature = "windows"))]
 use crate::backend::VmBackend;
 use crate::backend::VmExitReason;
+
+// ── I/O dispatch spinlock ───────────────────────────────────────────────────
+//
+// Multiple vCPU threads call handle_io_exit / handle_mmio_exit concurrently,
+// each obtaining `&mut Vm` via the unsafe global registry. Device handlers
+// (AHCI, PCI, serial, etc.) are NOT thread-safe, so concurrent access causes
+// data races (e.g., Windows Setup hangs at 1% with SMP).
+//
+// This spinlock serialises all I/O and MMIO dispatch. KVM_RUN itself is
+// per-vCPU (each thread has its own fd + kvm_run page) and does NOT need
+// the lock — only the userspace device handlers do.
+
+static IO_LOCK: AtomicBool = AtomicBool::new(false);
+
+#[inline]
+fn io_lock() {
+    while IO_LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        core::hint::spin_loop();
+    }
+}
+
+#[inline]
+fn io_unlock() {
+    IO_LOCK.store(false, Ordering::Release);
+}
 
 // ── Global VM registry ──────────────────────────────────────────────────────
 
@@ -511,7 +536,8 @@ pub extern "C" fn corevm_cmos_advance(handle: u64, ticks_32768: u64) -> u32 {
 /// The in-kernel PIC/IOAPIC/LAPIC handles vector injection automatically.
 #[no_mangle]
 pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
-    match get_vm(handle) {
+    io_lock();
+    let result = match get_vm(handle) {
         Some(vm) => {
             let mut injected = 0u32;
 
@@ -844,6 +870,51 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                 }
             }
 
+            // VirtIO-Net → IRQ 11 (level-triggered, shares with AHCI/E1000/VirtIO GPU)
+            if !vm.virtio_net_ptr.is_null() {
+                let net = unsafe { &mut *vm.virtio_net_ptr };
+                let want_asserted = net.isr_status != 0;
+                #[cfg(feature = "linux")]
+                {
+                    if want_asserted && !vm.virtio_net_irq_asserted {
+                        vm.virtio_net_irq_asserted = true;
+                        let _ = vm.backend.set_irq_line(11, true);
+                        injected += 1;
+                    } else if !want_asserted && vm.virtio_net_irq_asserted {
+                        vm.virtio_net_irq_asserted = false;
+                        if !vm.ahci_irq_asserted && !vm.e1000_irq_asserted && !vm.virtio_gpu_irq_asserted {
+                            let _ = vm.backend.set_irq_line(11, false);
+                        }
+                    }
+                }
+                #[cfg(feature = "windows")]
+                {
+                    if want_asserted && !vm.virtio_net_irq_asserted {
+                        vm.virtio_net_irq_asserted = true;
+                        if !vm.pic_ptr.is_null() {
+                            let pic = unsafe { &mut *vm.pic_ptr };
+                            pic.raise_irq(11);
+                        }
+                        vm.backend.ioapic_set_irq(11, true);
+                        injected += 1;
+                    } else if !want_asserted && vm.virtio_net_irq_asserted {
+                        vm.virtio_net_irq_asserted = false;
+                        if !vm.ahci_irq_asserted && !vm.e1000_irq_asserted && !vm.virtio_gpu_irq_asserted {
+                            vm.backend.ioapic_set_irq(11, false);
+                        }
+                    }
+                }
+                #[cfg(not(any(feature = "linux", feature = "windows")))]
+                {
+                    if want_asserted {
+                        if !vm.pic_ptr.is_null() {
+                            let pic = unsafe { &mut *vm.pic_ptr };
+                            pic.raise_irq(11);
+                        }
+                    }
+                }
+            }
+
             // Software PIC injection (non-Linux only).
             // On KVM/Linux the in-kernel irqchip handles injection automatically.
             #[cfg(not(feature = "linux"))]
@@ -892,7 +963,9 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
             injected
         }
         None => 0,
-    }
+    };
+    io_unlock();
+    result
 }
 
 /// Immediately check and update the AHCI IRQ on the in-kernel irqchip.
@@ -1211,8 +1284,10 @@ pub extern "C" fn corevm_handle_string_io_exit(
     handle: u64, vcpu_id: u32, port: u16, is_write: u8, count: u64, gpa: u64,
     step: i64, instr_len: u64, addr_size: u8, access_size: u8,
 ) -> i32 {
-    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
+    io_lock();
+    let vm = match get_vm(handle) { Some(v) => v, None => { io_unlock(); return -1 } };
     vm.handle_string_io(vcpu_id, port, is_write != 0, count, gpa, step, instr_len, addr_size, access_size);
+    io_unlock();
     0
 }
 
@@ -1222,8 +1297,9 @@ pub extern "C" fn corevm_handle_string_io_exit(
 pub extern "C" fn corevm_handle_io_exit(
     handle: u64, vcpu_id: u32, port: u16, is_write: u8, size: u8, data: *mut u8,
 ) -> i32 {
-    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
-    if data.is_null() { return -1; }
+    io_lock();
+    let vm = match get_vm(handle) { Some(v) => v, None => { io_unlock(); return -1 } };
+    if data.is_null() { io_unlock(); return -1; }
     let buf = unsafe { core::slice::from_raw_parts_mut(data, size as usize) };
     vm.handle_io(port, is_write != 0, size, buf);
 
@@ -1250,6 +1326,7 @@ pub extern "C" fn corevm_handle_io_exit(
             }
         }
     }
+    io_unlock();
     0
 }
 
@@ -1260,7 +1337,8 @@ pub extern "C" fn corevm_handle_io_exit(
 pub extern "C" fn corevm_complete_string_io(
     handle: u64, vcpu_id: u32, port: u16, is_write: u8, size: u8, count: u32,
 ) -> i32 {
-    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
+    io_lock();
+    let vm = match get_vm(handle) { Some(v) => v, None => { io_unlock(); return -1 } };
     #[cfg(feature = "linux")]
     {
         if is_write != 0 {
@@ -1273,6 +1351,7 @@ pub extern "C" fn corevm_complete_string_io(
     {
         let _ = (vm, vcpu_id, port, is_write, size, count);
     }
+    io_unlock();
     0
 }
 
@@ -1287,8 +1366,9 @@ pub extern "C" fn corevm_handle_mmio_exit(
     handle: u64, vcpu_id: u32, addr: u64, is_write: u8, size: u8, data: *mut u8,
     dest_reg: u8, instr_len: u8,
 ) -> i32 {
-    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
-    if data.is_null() { return -1; }
+    io_lock();
+    let vm = match get_vm(handle) { Some(v) => v, None => { io_unlock(); return -1 } };
+    if data.is_null() { io_unlock(); return -1; }
     let buf = unsafe { core::slice::from_raw_parts_mut(data, size as usize) };
     vm.handle_mmio(addr, is_write != 0, size, buf);
 
@@ -1333,6 +1413,7 @@ pub extern "C" fn corevm_handle_mmio_exit(
             }
         }
     }
+    io_unlock();
     0
 }
 
@@ -1548,6 +1629,7 @@ pub extern "C" fn corevm_setup_acpi_tables(handle: u64) -> i32 {
         has_ac97: !vm.ac97_ptr.is_null(),
         has_uhci: !vm.uhci_ptr.is_null(),
         has_virtio_gpu: !vm.virtio_gpu_ptr.is_null(),
+        has_virtio_net: !vm.virtio_net_ptr.is_null(),
     };
     let (rsdp, tables, loader) = crate::devices::acpi_tables::generate_acpi_tables_configured(false, num_cpus, &devices);
     dbg(&alloc::format!("Generated ACPI: {} CPUs, e1000={} ac97={} uhci={} virtio_gpu={}", num_cpus, devices.has_e1000, devices.has_ac97, devices.has_uhci, devices.has_virtio_gpu));
@@ -1559,7 +1641,7 @@ pub extern "C" fn corevm_setup_acpi_tables(handle: u64) -> i32 {
     // Set CMOS register 0x5F = CPU count for SeaBIOS SMP detection
     if !vm.cmos_ptr.is_null() {
         let cmos = unsafe { &mut *vm.cmos_ptr };
-        if num_cpus > 1 { cmos.data[0x5F] = num_cpus as u8; }
+        if num_cpus > 1 { cmos.data[0x5F] = (num_cpus - 1) as u8; }
     }
 
     dbg("ACPI files registered in fw_cfg");
@@ -1587,6 +1669,7 @@ pub extern "C" fn corevm_setup_acpi_tables_with_hpet(handle: u64) -> i32 {
         has_ac97: !vm.ac97_ptr.is_null(),
         has_uhci: !vm.uhci_ptr.is_null(),
         has_virtio_gpu: !vm.virtio_gpu_ptr.is_null(),
+        has_virtio_net: !vm.virtio_net_ptr.is_null(),
     };
     let (rsdp, tables, loader) = crate::devices::acpi_tables::generate_acpi_tables_configured(true, num_cpus, &devices);
     fw_cfg.add_file("etc/acpi/rsdp", rsdp);
@@ -1596,7 +1679,7 @@ pub extern "C" fn corevm_setup_acpi_tables_with_hpet(handle: u64) -> i32 {
     // Set CMOS register 0x5F = CPU count for SeaBIOS SMP detection
     if !vm.cmos_ptr.is_null() {
         let cmos = unsafe { &mut *vm.cmos_ptr };
-        if num_cpus > 1 { cmos.data[0x5F] = num_cpus as u8; }
+        if num_cpus > 1 { cmos.data[0x5F] = (num_cpus - 1) as u8; }
     }
 
     0
@@ -1715,6 +1798,7 @@ pub struct PciMmioRouter {
     pub e1000: *mut crate::devices::e1000::E1000,
     pub svga: *mut crate::devices::svga::Svga,
     pub virtio_gpu: *mut crate::devices::virtio_gpu::VirtioGpu,
+    pub virtio_net: *mut crate::devices::virtio_net::VirtioNet,
     pci_bus: *mut crate::devices::bus::PciBus,
 }
 
@@ -1752,6 +1836,14 @@ impl PciMmioRouter {
         if self.pci_bus.is_null() || self.virtio_gpu.is_null() { return 0; }
         let bus = unsafe { &mut *self.pci_bus };
         let val = bus.mmcfg_read(0, 7, 0, 0x10, 4);
+        val & 0xFFFFC000 // 16KB aligned
+    }
+
+    /// Read VirtIO-Net BAR0 (device 00:08.0, offset 0x10) from PCI config space.
+    fn virtio_net_bar0(&self) -> u64 {
+        if self.pci_bus.is_null() || self.virtio_net.is_null() { return 0; }
+        let bus = unsafe { &mut *self.pci_bus };
+        let val = bus.mmcfg_read(0, 8, 0, 0x10, 4);
         val & 0xFFFFC000 // 16KB aligned
     }
 }
@@ -1796,6 +1888,15 @@ impl crate::memory::mmio::MmioHandler for PciMmioRouter {
             }
         }
 
+        // Check VirtIO-Net BAR0 (16KB region)
+        if !self.virtio_net.is_null() {
+            let net_base = self.virtio_net_bar0();
+            if net_base != 0 && abs_addr >= net_base && abs_addr < net_base + 0x4000 {
+                let net = unsafe { &mut *self.virtio_net };
+                return net.read(abs_addr - net_base, size);
+            }
+        }
+
         Ok(0xFFFFFFFF)
     }
 
@@ -1832,6 +1933,15 @@ impl crate::memory::mmio::MmioHandler for PciMmioRouter {
             if gpu_base != 0 && abs_addr >= gpu_base && abs_addr < gpu_base + 0x4000 {
                 let gpu = unsafe { &mut *self.virtio_gpu };
                 return gpu.write(abs_addr - gpu_base, size, val);
+            }
+        }
+
+        // Check VirtIO-Net BAR0 (16KB region)
+        if !self.virtio_net.is_null() {
+            let net_base = self.virtio_net_bar0();
+            if net_base != 0 && abs_addr >= net_base && abs_addr < net_base + 0x4000 {
+                let net = unsafe { &mut *self.virtio_net };
+                return net.write(abs_addr - net_base, size, val);
             }
         }
 
@@ -1905,6 +2015,7 @@ pub extern "C" fn corevm_setup_ahci(handle: u64, num_ports: u8) -> i32 {
         e1000: core::ptr::null_mut(), // added later by corevm_setup_e1000()
         svga: vm.svga_ptr,
         virtio_gpu: vm.virtio_gpu_ptr, // may be null if not set up yet
+        virtio_net: vm.virtio_net_ptr, // may be null if not set up yet
         pci_bus: vm.pci_bus_ptr,
     });
     let router_ptr = &*router as *const PciMmioRouter as *mut PciMmioRouter;
@@ -2352,12 +2463,16 @@ pub extern "C" fn corevm_net_poll(handle: u64) -> i32 {
     #[cfg(feature = "std")]
     {
         let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
+        let use_e1000 = !vm.e1000_ptr.is_null();
+        let use_virtio_net = !vm.virtio_net_ptr.is_null();
 
-        // Take TX packets from E1000 and send to backend
-        let tx_packets = if !vm.e1000_ptr.is_null() {
+        // Take TX packets from the active NIC and send to backend.
+        let tx_packets = if use_virtio_net {
+            let vnet = unsafe { &mut *vm.virtio_net_ptr };
+            vnet.take_tx_packets()
+        } else if use_e1000 {
             let e1000 = unsafe { &mut *vm.e1000_ptr };
-            let pkts = e1000.take_tx_packets();
-            pkts
+            e1000.take_tx_packets()
         } else {
             alloc::vec::Vec::new()
         };
@@ -2374,24 +2489,26 @@ pub extern "C" fn corevm_net_poll(handle: u64) -> i32 {
         // Poll backend for periodic work (timers, TCP reads, etc.)
         backend.poll();
 
-        // Receive packets from backend and inject into E1000.
-        // Limit how many we inject to avoid overflowing the rx_buffer
-        // when the guest can't keep up with the RX descriptor ring.
+        // Receive packets from backend and inject into the active NIC.
         let rx_packets = backend.recv();
         let rx_count = rx_packets.len() as i32;
 
-        if !rx_packets.is_empty() && !vm.e1000_ptr.is_null() {
-            let e1000 = unsafe { &mut *vm.e1000_ptr };
-            // Only inject packets if the rx_buffer isn't already backed up.
-            // The RX ring typically has 256 descriptors; keep a healthy margin.
-            const RX_BUFFER_LIMIT: usize = 512;
-            for pkt in &rx_packets {
-                if e1000.rx_buffer.len() >= RX_BUFFER_LIMIT {
-                    break;
+        if !rx_packets.is_empty() {
+            if use_virtio_net {
+                let vnet = unsafe { &mut *vm.virtio_net_ptr };
+                for pkt in &rx_packets {
+                    vnet.receive_packet(pkt);
                 }
-                e1000.receive_packet(pkt);
+                vnet.process_rx();
+            } else if use_e1000 {
+                let e1000 = unsafe { &mut *vm.e1000_ptr };
+                const RX_BUFFER_LIMIT: usize = 512;
+                for pkt in &rx_packets {
+                    if e1000.rx_buffer.len() >= RX_BUFFER_LIMIT { break; }
+                    e1000.receive_packet(pkt);
+                }
+                e1000.process_rx_ring();
             }
-            e1000.process_rx_ring();
         }
 
         rx_count
@@ -2790,6 +2907,53 @@ pub extern "C" fn corevm_virtio_gpu_get_mode(
 pub extern "C" fn corevm_has_virtio_gpu(handle: u64) -> i32 {
     let vm = match get_vm(handle) { Some(v) => v, None => return 0 };
     if vm.virtio_gpu_ptr.is_null() { 0 } else { 1 }
+}
+
+// ── VirtIO-Net FFI ──
+
+/// Set up the VirtIO-Net device at PCI slot 00:08.0.
+/// Must be called AFTER corevm_setup_standard_devices() and
+/// AFTER corevm_setup_ahci() (which creates the PCI MMIO router).
+/// Returns 0 on success, -1 on error.
+#[no_mangle]
+pub extern "C" fn corevm_setup_virtio_net(handle: u64, mac: *const u8) -> i32 {
+    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
+    if mac.is_null() { return -1; }
+    let m: [u8; 6] = unsafe { [*mac, *mac.add(1), *mac.add(2), *mac.add(3), *mac.add(4), *mac.add(5)] };
+
+    vm.setup_virtio_net(m);
+
+    // Update the PCI MMIO router if it exists.
+    if !vm.pci_mmio_router_ptr.is_null() && !vm.virtio_net_ptr.is_null() {
+        let router = unsafe { &mut *vm.pci_mmio_router_ptr };
+        router.virtio_net = vm.virtio_net_ptr;
+    }
+
+    0
+}
+
+/// Process pending VirtIO-Net RX delivery (host → guest).
+/// Call periodically from the VM run loop alongside corevm_net_poll.
+/// Returns 1 if IRQ pending, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn corevm_virtio_net_process_rx(handle: u64) -> i32 {
+    let vm = match get_vm(handle) { Some(v) => v, None => return 0 };
+    let net = match vm.virtio_net() { Some(n) => n, None => return 0 };
+    net.process_rx();
+    if net.irq_pending {
+        net.irq_pending = false;
+        1
+    } else {
+        0
+    }
+}
+
+/// Check if the VirtIO-Net device is set up and active.
+/// Returns 1 if active, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn corevm_has_virtio_net(handle: u64) -> i32 {
+    let vm = match get_vm(handle) { Some(v) => v, None => return 0 };
+    if vm.virtio_net_ptr.is_null() { 0 } else { 1 }
 }
 
 // Re-export WHP debug callback setter for use by vmmanager.

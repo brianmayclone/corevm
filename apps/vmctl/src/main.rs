@@ -510,9 +510,6 @@ fn main() {
         let t = thread::Builder::new()
             .name(format!("vcpu-{}", cpu_id))
             .spawn(move || {
-                let mut ap_exit_count = 0u64;
-                let mut ap_error_count = 0u64;
-                let mut ap_exit_types = [0u64; 16];
                 loop {
                     if !ap_running.load(std::sync::atomic::Ordering::Relaxed) { break; }
                     if args.timeout > 0 && ap_start.elapsed() >= ap_timeout { break; }
@@ -520,32 +517,8 @@ fn main() {
                     let mut exit = CExitReason::default();
                     let rc = corevm_run_vcpu(ap_handle, cpu_id, &mut exit);
                     if rc != 0 {
-                        ap_error_count += 1;
-                        if ap_error_count <= 3 {
-                            eprintln!("[vcpu-{}] run_vcpu error #{}", cpu_id, ap_error_count);
-                        }
                         thread::sleep(Duration::from_millis(1));
                         continue;
-                    }
-                    ap_exit_count += 1;
-                    if (exit.reason as usize) < ap_exit_types.len() {
-                        ap_exit_types[exit.reason as usize] += 1;
-                    }
-                    if ap_exit_count <= 30 || (ap_exit_count % 10000 == 0) {
-                        // Get AP register state for debug
-                        let mut ap_regs = libcorevm::backend::VcpuRegs::default();
-                        let mut ap_sregs = libcorevm::backend::VcpuSregs::default();
-                        corevm_get_vcpu_regs(ap_handle, cpu_id, &mut ap_regs);
-                        corevm_get_vcpu_sregs(ap_handle, cpu_id, &mut ap_sregs);
-                        let detail = match exit.reason {
-                            0 => format!("IoIn port={:#x} size={}", exit.port, exit.size),
-                            1 => format!("IoOut port={:#x} size={} data={:#x}", exit.port, exit.size, exit.data_u32),
-                            7 => "Halted".into(),
-                            9 => "Shutdown".into(),
-                            13 => format!("Cancelled RIP={:#x} CS={:#x} CR0={:#x} IF={}", ap_regs.rip, ap_sregs.cs.selector, ap_sregs.cr0, if ap_regs.rflags & 0x200 != 0 { 1 } else { 0 }),
-                            _ => format!("reason={}", exit.reason),
-                        };
-                        eprintln!("[vcpu-{}] exit #{}: {}", cpu_id, ap_exit_count, detail);
                     }
 
                     match exit.reason {
@@ -591,11 +564,6 @@ fn main() {
                         _ => {}
                     }
                 }
-                eprintln!("[vcpu-{}] thread exit: exits={} errors={} IO={}/{} MMIO={}/{} Hlt={} Cancel={}",
-                    cpu_id, ap_exit_count, ap_error_count,
-                    ap_exit_types[0], ap_exit_types[1],
-                    ap_exit_types[2], ap_exit_types[3],
-                    ap_exit_types[7], ap_exit_types[13]);
             })
             .expect("failed to spawn AP thread");
         ap_threads.push(t);
@@ -861,20 +829,6 @@ fn main() {
                     eprintln!("[vm-kbd] BDA kbd buf head={:#06x} tail={:#06x} (keys pending!)", head, tail);
                 }
             }
-        }
-
-        // Dump SeaBIOS SMP variables (every 2s with vm-state)
-        if exit.reason == 13 && last_state.elapsed() >= Duration::from_secs(1) && num_cpus > 1 {
-            let mut buf4 = [0u8; 4];
-            corevm_read_phys(handle, 0x0F4B60, buf4.as_mut_ptr(), 4);
-            let count_cpus = u32::from_le_bytes(buf4);
-            corevm_read_phys(handle, 0x0F4B28, buf4.as_mut_ptr(), 4);
-            let spinlock = u32::from_le_bytes(buf4);
-            // Read BSP RBX (MaxCountCPUs) from register state
-            let mut regs = VcpuRegs::default();
-            corevm_get_vcpu_regs(handle, 0, &mut regs);
-            eprintln!("[smp-debug] CountCPUs@0F4B60={} spinlock={} RBX(MaxCount)={} RAX={}",
-                count_cpus, spinlock, regs.rbx, regs.rax);
         }
 
         // Check timeout

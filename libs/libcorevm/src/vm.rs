@@ -14,6 +14,7 @@ use crate::devices::e1000::E1000;
 use crate::devices::ac97::Ac97;
 use crate::devices::hpet::Hpet;
 use crate::devices::virtio_gpu::VirtioGpu;
+use crate::devices::virtio_net::VirtioNet;
 
 /// The virtual machine instance.
 ///
@@ -52,6 +53,7 @@ pub struct Vm {
     pub ac97_ptr: *mut Ac97,
     pub uhci_ptr: *mut crate::devices::uhci::Uhci,
     pub virtio_gpu_ptr: *mut VirtioGpu,
+    pub virtio_net_ptr: *mut VirtioNet,
 
     /// Pointer to the PCI MMIO router (lives inside the MMIO dispatch regions).
     /// Used by `corevm_setup_e1000()` to add E1000 to the router after AHCI setup.
@@ -68,6 +70,9 @@ pub struct Vm {
 
     /// Tracks whether VirtIO GPU IRQ is currently asserted (level-triggered).
     pub virtio_gpu_irq_asserted: bool,
+
+    /// Tracks whether VirtIO Net IRQ is currently asserted (level-triggered).
+    pub virtio_net_irq_asserted: bool,
 
     /// Set when the guest writes to port 0xCF9 requesting a system reset.
     pub cf9_reset_pending: bool,
@@ -148,11 +153,13 @@ impl Vm {
             ac97_ptr: core::ptr::null_mut(),
             uhci_ptr: core::ptr::null_mut(),
             virtio_gpu_ptr: core::ptr::null_mut(),
+            virtio_net_ptr: core::ptr::null_mut(),
             pci_mmio_router_ptr: core::ptr::null_mut(),
             pci_io_router_ptr: core::ptr::null_mut(),
             ahci_irq_asserted: false,
             e1000_irq_asserted: false,
             virtio_gpu_irq_asserted: false,
+            virtio_net_irq_asserted: false,
             cf9_reset_pending: false,
             vram_mb: 0,
             cpu_count: 1,
@@ -965,6 +972,141 @@ impl Vm {
         // Future: if performance requires it, map VRAM BAR as a
         // hypervisor memory region for zero-copy guest writes.
         Ok(())
+    }
+
+    /// Get a mutable reference to the VirtIO-Net device, if set up.
+    pub fn virtio_net(&mut self) -> Option<&mut VirtioNet> {
+        if self.virtio_net_ptr.is_null() { None }
+        else { Some(unsafe { &mut *self.virtio_net_ptr }) }
+    }
+
+    /// Set up the VirtIO-Net device at PCI slot 00:08.0.
+    /// Call after `setup_standard_devices()`.
+    pub fn setup_virtio_net(&mut self, mac: [u8; 6]) {
+        if !self.virtio_net_ptr.is_null() {
+            return; // already set up
+        }
+
+        use crate::devices::virtio_net::VIRTIO_NET_BAR0_SIZE;
+        use crate::devices::bus::PciDevice;
+
+        let net = Box::new(VirtioNet::new(mac));
+        let net_ptr = &*net as *const VirtioNet as *mut VirtioNet;
+        self.virtio_net_ptr = net_ptr;
+
+        // Give VirtIO-Net access to guest RAM for DMA.
+        let (ram_ptr, ram_len) = self.memory.ram_mut_ptr();
+        unsafe {
+            (*net_ptr).guest_mem_ptr = ram_ptr;
+            (*net_ptr).guest_mem_len = ram_len;
+        }
+
+        // Register BAR0 MMIO at a default address.
+        let bar0_addr: u64 = 0xFEA0_0000;
+        self.memory.add_mmio(bar0_addr, VIRTIO_NET_BAR0_SIZE as u64, net);
+
+        // Register PCI device at slot 8 (00:08.0).
+        if !self.pci_bus_ptr.is_null() {
+            let pci_bus = unsafe { &mut *self.pci_bus_ptr };
+            let mut pci_dev = PciDevice::new(
+                0x1AF4, // VirtIO vendor
+                0x1041, // VirtIO Net (non-transitional)
+                0x02,   // Network controller
+                0x00,   // Ethernet controller
+                0x00,   // prog-if
+            );
+            pci_dev.device = 8;
+
+            // Subsystem IDs.
+            pci_dev.config_space[0x2C] = 0xF4;
+            pci_dev.config_space[0x2D] = 0x1A;
+            pci_dev.config_space[0x2E] = 0x01; // Subsystem device ID (0x0001)
+            pci_dev.config_space[0x2F] = 0x00;
+
+            // BAR0: MMIO config space (16 KB).
+            pci_dev.set_bar(0, bar0_addr as u32, VIRTIO_NET_BAR0_SIZE, true);
+
+            // Interrupt: INTA → PIRQ routing.
+            // Device 8, INTA: PIRQ = (8+0)%4 = 0 → PIRQA → IRQ 11.
+            pci_dev.set_interrupt(11, 1);
+
+            // VirtIO PCI capability list.
+            pci_dev.config_space[0x34] = 0x40;
+            pci_dev.config_space[0x06] |= 0x10;
+
+            // Cap 1: Common configuration (type 1).
+            let cap_base = 0x40usize;
+            pci_dev.config_space[cap_base] = 0x09;
+            pci_dev.config_space[cap_base + 1] = 0x54;
+            pci_dev.config_space[cap_base + 2] = 0;
+            pci_dev.config_space[cap_base + 3] = 1;    // COMMON_CFG
+            pci_dev.config_space[cap_base + 4] = 0;    // BAR 0
+            pci_dev.config_space[cap_base + 8] = 0x00; // offset = 0x0000
+            pci_dev.config_space[cap_base + 9] = 0x00;
+            pci_dev.config_space[cap_base + 10] = 0x00;
+            pci_dev.config_space[cap_base + 11] = 0x00;
+            pci_dev.config_space[cap_base + 12] = 0x40;
+            pci_dev.config_space[cap_base + 13] = 0x00;
+            pci_dev.config_space[cap_base + 14] = 0x00;
+            pci_dev.config_space[cap_base + 15] = 0x00;
+
+            // Cap 2: Notifications (type 2).
+            let cap2 = 0x54usize;
+            pci_dev.config_space[cap2] = 0x09;
+            pci_dev.config_space[cap2 + 1] = 0x6C;
+            pci_dev.config_space[cap2 + 2] = 0;
+            pci_dev.config_space[cap2 + 3] = 2;    // NOTIFY_CFG
+            pci_dev.config_space[cap2 + 4] = 0;
+            pci_dev.config_space[cap2 + 8] = 0x00;
+            pci_dev.config_space[cap2 + 9] = 0x10; // offset = 0x1000
+            pci_dev.config_space[cap2 + 10] = 0x00;
+            pci_dev.config_space[cap2 + 11] = 0x00;
+            pci_dev.config_space[cap2 + 12] = 0x04;
+            pci_dev.config_space[cap2 + 13] = 0x00;
+            pci_dev.config_space[cap2 + 14] = 0x00;
+            pci_dev.config_space[cap2 + 15] = 0x00;
+            pci_dev.config_space[cap2 + 16] = 0x00;
+            pci_dev.config_space[cap2 + 17] = 0x00;
+            pci_dev.config_space[cap2 + 18] = 0x00;
+            pci_dev.config_space[cap2 + 19] = 0x00;
+
+            // Cap 3: ISR status (type 3).
+            let cap3 = 0x6Cusize;
+            pci_dev.config_space[cap3] = 0x09;
+            pci_dev.config_space[cap3 + 1] = 0x80;
+            pci_dev.config_space[cap3 + 2] = 0;
+            pci_dev.config_space[cap3 + 3] = 3;    // ISR_CFG
+            pci_dev.config_space[cap3 + 4] = 0;
+            pci_dev.config_space[cap3 + 8] = 0x00;
+            pci_dev.config_space[cap3 + 9] = 0x20; // offset = 0x2000
+            pci_dev.config_space[cap3 + 10] = 0x00;
+            pci_dev.config_space[cap3 + 11] = 0x00;
+            pci_dev.config_space[cap3 + 12] = 0x04;
+            pci_dev.config_space[cap3 + 13] = 0x00;
+            pci_dev.config_space[cap3 + 14] = 0x00;
+            pci_dev.config_space[cap3 + 15] = 0x00;
+
+            // Cap 4: Device-specific config (type 4).
+            let cap4 = 0x80usize;
+            pci_dev.config_space[cap4] = 0x09;
+            pci_dev.config_space[cap4 + 1] = 0x00; // No next cap
+            pci_dev.config_space[cap4 + 2] = 0;
+            pci_dev.config_space[cap4 + 3] = 4;    // DEVICE_CFG
+            pci_dev.config_space[cap4 + 4] = 0;
+            pci_dev.config_space[cap4 + 8] = 0x00;
+            pci_dev.config_space[cap4 + 9] = 0x30; // offset = 0x3000
+            pci_dev.config_space[cap4 + 10] = 0x00;
+            pci_dev.config_space[cap4 + 11] = 0x00;
+            pci_dev.config_space[cap4 + 12] = 0x10; // length = 16 bytes (MAC + status)
+            pci_dev.config_space[cap4 + 13] = 0x00;
+            pci_dev.config_space[cap4 + 14] = 0x00;
+            pci_dev.config_space[cap4 + 15] = 0x00;
+
+            // Revision ID (VirtIO 1.0+).
+            pci_dev.config_space[0x08] = 0x01;
+
+            pci_bus.add_device(pci_dev);
+        }
     }
 }
 

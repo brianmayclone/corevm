@@ -3,6 +3,7 @@ use std::fs;
 
 pub use libcorevm::setup::{GuestOs, GuestArch};
 pub use libcorevm::devices::gpu::GpuModel;
+pub use libcorevm::devices::nic::NicModel;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum BootOrder { DiskFirst, CdFirst, FloppyFirst }
@@ -40,6 +41,7 @@ pub struct VmConfig {
     pub bios_type: BiosType,
     pub gpu_model: GpuModel,
     pub vram_mb: u32,
+    pub nic_model: NicModel,
     pub net_enabled: bool,
     pub net_mode: NetMode,
     pub net_host_nic: String,
@@ -107,6 +109,7 @@ impl Default for VmConfig {
             bios_type: BiosType::SeaBios,
             gpu_model: GpuModel::StdVga,
             vram_mb: 16,
+            nic_model: NicModel::E1000,
             net_enabled: false,
             net_mode: NetMode::UserMode,
             net_host_nic: String::new(),
@@ -165,7 +168,7 @@ impl VmConfig {
         };
         let content = format!(
             "name={}\nguest_os={}\nguest_arch={}\nram={}\ncpu_cores={}\n{}iso={}\nboot={}\nbios={}\n\
-             ram_alloc={}\ngpu={}\nvram_mb={}\nnet_enabled={}\nnet_mode={}\nnet_host_nic={}\n\
+             ram_alloc={}\ngpu={}\nvram_mb={}\nnic={}\nnet_enabled={}\nnet_mode={}\nnet_host_nic={}\n\
              mac_mode={}\nmac_address={}\naudio_enabled={}\nusb_tablet={}\ndiagnostics={}\n\
              disk_cache_mb={}\ndisk_cache_mode={}\n",
             self.name, self.guest_os.to_config_str(), arch,
@@ -174,6 +177,7 @@ impl VmConfig {
             alloc,
             match self.gpu_model { GpuModel::StdVga => "stdvga", GpuModel::VirtioGpu => "virtiogpu" },
             self.vram_mb,
+            match self.nic_model { NicModel::E1000 => "e1000", NicModel::VirtioNet => "virtionet" },
             if self.net_enabled { "1" } else { "0" },
             net_mode, self.net_host_nic, mac_mode, self.mac_address,
             if self.audio_enabled { "1" } else { "0" },
@@ -250,6 +254,10 @@ impl VmConfig {
                     _ => GpuModel::StdVga,
                 },
                 "vram_mb" => cfg.vram_mb = val.parse().unwrap_or(16),
+                "nic" => cfg.nic_model = match val {
+                    "virtionet" | "virtio-net" | "virtio_net" => NicModel::VirtioNet,
+                    _ => NicModel::E1000,
+                },
                 "net_enabled" => cfg.net_enabled = val == "1",
                 "net_mode" => cfg.net_mode = match val {
                     "bridge" => NetMode::Bridge,

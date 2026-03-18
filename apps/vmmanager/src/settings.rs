@@ -816,7 +816,25 @@ impl SettingsDialog {
             ui.add_space(4.0);
 
             labeled_row(ui, "Adapter:", |ui| {
-                ui.label(egui::RichText::new("Intel E1000").color(egui::Color32::from_rgb(160, 160, 160)));
+                egui::ComboBox::from_id_salt("nic_model")
+                    .selected_text(self.config.nic_model.label())
+                    .show_ui(ui, |ui| {
+                        for model in crate::config::NicModel::ALL {
+                            ui.selectable_value(&mut self.config.nic_model, *model, model.label());
+                        }
+                    });
+            });
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add_space(LABEL_WIDTH + 8.0);
+                ui.colored_label(
+                    egui::Color32::from_rgb(100, 100, 105),
+                    match self.config.nic_model {
+                        crate::config::NicModel::E1000 => "Legacy Intel Gigabit NIC. Works with all guest OSes out of the box.",
+                        crate::config::NicModel::VirtioNet => "High-performance paravirtual NIC. Drivers via Windows Update (netkvm).",
+                    },
+                );
             });
 
             labeled_row(ui, "Mode:", |ui| {

@@ -25,6 +25,7 @@ use libcorevm::ffi::{
     corevm_ahci_flush_caches, corevm_ahci_needs_flush,
     corevm_ahci_poll_irq,
     corevm_setup_net, corevm_net_poll,
+    corevm_setup_virtio_net, corevm_virtio_net_process_rx, corevm_has_virtio_net,
 };
 use libcorevm::setup;
 use libcorevm::backend::{VcpuRegs, VcpuSregs};
@@ -104,25 +105,40 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
     // Setup AHCI controller (replaces IDE)
     corevm_setup_ahci(handle, 6);
 
-    // E1000 NIC — only if enabled in config
+    // Network adapter — only if enabled in config
     if config.net_enabled {
         let mac = setup::resolve_mac(
             &config.uuid,
             config.mac_mode == MacMode::Static,
             &config.mac_address,
         );
-        corevm_setup_e1000(handle, mac.as_ptr());
-        entry.diag_log.log(DiagCategory::Info, format!(
-            "E1000 NIC enabled (mac={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X})",
-            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-        ));
-        // Load E1000 PXE ROM — SeaBIOS needs this to initialize the NIC
-        let extra_bios_paths = platform::bios_search_paths();
-        match setup::load_e1000_rom(handle, &extra_bios_paths) {
-            Ok(()) => entry.diag_log.log(DiagCategory::Info, "E1000 PXE ROM loaded".into()),
-            Err(e) => entry.diag_log.log(DiagCategory::Info, format!("E1000 ROM warning: {}", e)),
+
+        match config.nic_model {
+            crate::config::NicModel::VirtioNet => {
+                corevm_setup_virtio_net(handle, mac.as_ptr());
+                entry.diag_log.log(DiagCategory::Info, format!(
+                    "VirtIO-Net NIC enabled (mac={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X})",
+                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+                ));
+                // VirtIO-Net doesn't need a PXE ROM — SeaBIOS doesn't support
+                // VirtIO PXE boot directly (iPXE ROM needed separately if desired).
+            }
+            crate::config::NicModel::E1000 => {
+                corevm_setup_e1000(handle, mac.as_ptr());
+                entry.diag_log.log(DiagCategory::Info, format!(
+                    "E1000 NIC enabled (mac={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X})",
+                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+                ));
+                // Load E1000 PXE ROM — SeaBIOS needs this to initialize the NIC
+                let extra_bios_paths = platform::bios_search_paths();
+                match setup::load_e1000_rom(handle, &extra_bios_paths) {
+                    Ok(()) => entry.diag_log.log(DiagCategory::Info, "E1000 PXE ROM loaded".into()),
+                    Err(e) => entry.diag_log.log(DiagCategory::Info, format!("E1000 ROM warning: {}", e)),
+                }
+            }
         }
-        // Set up network backend — mode is just a number, logic is in libcorevm
+
+        // Set up network backend — shared between E1000 and VirtIO-Net
         let net_mode_id = match config.net_mode {
             NetMode::Disconnected => 0,
             NetMode::UserMode => 1,
