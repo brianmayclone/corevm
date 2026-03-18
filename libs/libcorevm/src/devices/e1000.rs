@@ -584,13 +584,17 @@ impl E1000 {
     /// Note: this re-enters the KVM backend from within the MMIO handler.
     /// In practice this is safe because set_irq_line() only does an ioctl
     /// and doesn't touch the MMIO dispatch state.
-    fn fire_irq_callback(&mut self) {
+    /// Assert the IRQ line immediately if (ICR & IMS) != 0.
+    /// NEVER de-asserts — that is handled by poll_irqs which properly
+    /// checks the shared IRQ 11 line (E1000 + AHCI).
+    fn fire_irq_assert(&mut self) {
         let icr = self.regs[REG_ICR / 4];
         let ims = self.regs[REG_IMS / 4];
-        let want_asserted = (icr & ims) != 0;
-        #[cfg(feature = "std")]
-        if let Some(ref mut cb) = self.irq_callback {
-            cb(want_asserted);
+        if (icr & ims) != 0 {
+            #[cfg(feature = "std")]
+            if let Some(ref mut cb) = self.irq_callback {
+                cb(true);
+            }
         }
     }
 
@@ -1594,14 +1598,12 @@ impl MmioHandler for E1000 {
                 self.regs[REG_ICR / 4] |= new_val;
                 // Fire callback immediately — critical for the driver's
                 // interrupt test which expects synchronous delivery.
-                self.fire_irq_callback();
+                self.fire_irq_assert();
             }
 
             REG_IMS => {
                 self.regs[dword_offset] |= new_val;
-                // If pending ICR bits now match the newly enabled IMS bits,
-                // fire immediately (important for interrupt test sequence).
-                self.fire_irq_callback();
+                // Assertion handled by poll_irqs on next iteration.
             }
 
             REG_IMC => {
