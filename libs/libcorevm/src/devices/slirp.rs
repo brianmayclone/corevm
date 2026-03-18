@@ -136,8 +136,9 @@ struct TcpFlowKey {
     remote_port: u16,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Clone, Copy)]
 enum TcpState {
+    SynSent,     // We initiated a connection to the guest (FTP data)
     SynReceived,
     Established,
     FinWait,
@@ -179,6 +180,27 @@ struct UdpFlow {
     last_active: Instant,
 }
 
+// ── FTP ALG (Application Layer Gateway) ──────────────────────────────────────
+
+/// State for an FTP control connection (port 21).
+struct FtpControlState {
+    /// Line reassembly buffer for guest→server data (PORT commands).
+    guest_line_buf: Vec<u8>,
+    /// The host-side local address of the control connection (for PORT rewriting).
+    local_addr: Option<SocketAddr>,
+}
+
+/// A host-side listener waiting for an Active FTP data connection from the server.
+struct FtpDataListener {
+    listener: TcpListener,
+    /// Guest's data port (from the original PORT command).
+    guest_data_port: u16,
+    /// Remote FTP server IP.
+    server_ip: [u8; 4],
+    /// Creation timestamp for timeout.
+    created: Instant,
+}
+
 // ── SLIRP backend ────────────────────────────────────────────────────────────
 
 pub struct SlirpNet {
@@ -202,6 +224,10 @@ pub struct SlirpNet {
     dhcp_offered: bool,
     /// Pending TCP connects (non-blocking, completed in poll_tcp).
     pending_connects: Vec<(TcpFlowKey, std::sync::mpsc::Receiver<std::io::Result<TcpStream>>, u32, u32)>,
+    /// FTP ALG: tracks FTP control connections for PORT command rewriting.
+    ftp_control: BTreeMap<TcpFlowKey, FtpControlState>,
+    /// FTP ALG: active-mode data connection listeners.
+    ftp_data_listeners: Vec<FtpDataListener>,
 }
 
 impl SlirpNet {
@@ -221,6 +247,8 @@ impl SlirpNet {
             host_dns,
             dhcp_offered: false,
             pending_connects: Vec::new(),
+            ftp_control: BTreeMap::new(),
+            ftp_data_listeners: Vec::new(),
         }
     }
 
@@ -657,7 +685,25 @@ impl SlirpNet {
         if rst {
             // Guest sent RST — close connection
             self.tcp_conns.remove(&key);
+            self.ftp_control.remove(&key);
             return;
+        }
+
+        // Handle SYN-ACK from guest (response to our SYN for FTP data connection).
+        if syn && ack_flag {
+            if let Some(conn) = self.tcp_conns.get_mut(&key) {
+                if conn.state == TcpState::SynSent {
+                    conn.guest_isn = seq;
+                    conn.guest_seq = seq.wrapping_add(1);
+                    conn.our_seq = conn.our_seq.wrapping_add(1); // SYN consumed
+                    conn.state = TcpState::Established;
+                    let our_seq = conn.our_seq;
+                    let guest_seq = conn.guest_seq;
+                    // Send ACK to complete the handshake.
+                    self.send_tcp_flags(key, 0x10, our_seq, guest_seq, &[]);
+                    return;
+                }
+            }
         }
 
         if syn && !ack_flag {
@@ -676,6 +722,15 @@ impl SlirpNet {
 
             let our_seq: u32 = 0x1000_0000;
             self.pending_connects.push((key, rx, seq, our_seq));
+            // FTP ALG: track control connections (port 21).
+            if dst_port == 21 {
+                eprintln!("[slirp-ftp] FTP control connection detected: :{} → {}:21", src_port,
+                    Ipv4Addr::new(dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3]));
+                self.ftp_control.insert(key, FtpControlState {
+                    guest_line_buf: Vec::new(),
+                    local_addr: None,
+                });
+            }
             return;
         }
 
@@ -718,25 +773,43 @@ impl SlirpNet {
                 let expected = conn.guest_seq;
                 let seg_end = seq.wrapping_add(tcp_data.len() as u32);
 
-                // Use non-blocking write to avoid stalling the VM loop.
-                let _ = conn.stream.set_nonblocking(true);
-                if seq == expected {
-                    // In-order segment — forward all data
-                    let _ = conn.stream.write_all(tcp_data);
-                    conn.guest_seq = seg_end;
+                // Determine the new data bytes to forward.
+                let new_data: &[u8] = if seq == expected {
+                    tcp_data
                 } else if seq.wrapping_sub(expected) < 0x8000_0000 {
-                    // Future segment (seq > expected) — forward anyway
-                    let _ = conn.stream.write_all(tcp_data);
-                    conn.guest_seq = seg_end;
+                    tcp_data
                 } else {
-                    // Retransmit (seq < expected) — check for partial new data
                     let overlap = expected.wrapping_sub(seq) as usize;
-                    if overlap < tcp_data.len() {
-                        let _ = conn.stream.write_all(&tcp_data[overlap..]);
-                        conn.guest_seq = seg_end;
+                    if overlap < tcp_data.len() { &tcp_data[overlap..] } else { &[] }
+                };
+
+                if !new_data.is_empty() {
+                    // FTP ALG: intercept PORT commands on FTP control connections.
+                    let is_ftp = self.ftp_control.contains_key(&key);
+                    let write_data;
+                    if is_ftp {
+                        // Learn local address on first data write.
+                        if self.ftp_control.get(&key).and_then(|s| s.local_addr).is_none() {
+                            if let Ok(addr) = conn.stream.local_addr() {
+                                if let Some(state) = self.ftp_control.get_mut(&key) {
+                                    state.local_addr = Some(addr);
+                                }
+                            }
+                        }
+                        // Can't call &mut self method while conn is borrowed;
+                        // collect what we need and process after dropping conn.
+                        write_data = None; // handled below
+                    } else {
+                        write_data = Some(new_data.to_vec());
                     }
+
+                    if let Some(data) = write_data {
+                        let _ = conn.stream.set_nonblocking(true);
+                        let _ = conn.stream.write_all(&data);
+                        let _ = conn.stream.set_nonblocking(false);
+                    }
+                    conn.guest_seq = seg_end;
                 }
-                let _ = conn.stream.set_nonblocking(false);
             }
 
             if fin {
@@ -744,8 +817,17 @@ impl SlirpNet {
             }
         }
 
+        // FTP ALG: process PORT commands outside the conn borrow.
+        if self.ftp_control.contains_key(&key) && !tcp_data.is_empty() {
+            let rewritten = self.ftp_alg_rewrite_guest_data(&key, tcp_data);
+            if let Some(conn) = self.tcp_conns.get_mut(&key) {
+                let _ = conn.stream.set_nonblocking(true);
+                let _ = conn.stream.write_all(&rewritten);
+                let _ = conn.stream.set_nonblocking(false);
+            }
+        }
+
         // Now send TCP responses outside the mutable borrow of tcp_conns.
-        // Extract values we need before calling send_tcp_flags (which borrows &mut self).
         let (our_seq, guest_seq, conn_state) = match self.tcp_conns.get(&key) {
             Some(conn) => (conn.our_seq, conn.guest_seq, Some(conn.state == TcpState::FinWait)),
             None => return,
@@ -769,6 +851,172 @@ impl SlirpNet {
                     c.state = TcpState::Closed;
                 }
             }
+        }
+    }
+
+    // ── FTP ALG ──────────────────────────────────────────────────────────
+
+    /// Process guest→server FTP data, rewriting PORT commands.
+    /// Returns the data to forward to the host socket.
+    fn ftp_alg_rewrite_guest_data(&mut self, key: &TcpFlowKey, data: &[u8]) -> Vec<u8> {
+        let local_addr = match self.ftp_control.get(key) {
+            Some(s) => s.local_addr,
+            None => return data.to_vec(),
+        };
+
+        // Append to line buffer for reassembly.
+        if let Some(state) = self.ftp_control.get_mut(key) {
+            state.guest_line_buf.extend_from_slice(data);
+        }
+
+        let mut output = Vec::new();
+        loop {
+            let line_end = {
+                let state = match self.ftp_control.get(key) {
+                    Some(s) => s,
+                    None => break,
+                };
+                state.guest_line_buf.windows(2).position(|w| w == b"\r\n")
+                    .map(|p| p + 2)
+            };
+
+            match line_end {
+                Some(end) => {
+                    let line: Vec<u8> = {
+                        let state = self.ftp_control.get_mut(key).unwrap();
+                        state.guest_line_buf.drain(..end).collect()
+                    };
+
+                    // Check for PORT command.
+                    if let Some(rewritten) = self.ftp_rewrite_port(&line, key, local_addr) {
+                        output.extend_from_slice(&rewritten);
+                    } else {
+                        output.extend_from_slice(&line);
+                    }
+                }
+                None => break, // No complete line yet — keep buffered
+            }
+        }
+
+        output
+    }
+
+    /// Parse and rewrite a PORT command, opening a host-side listener.
+    fn ftp_rewrite_port(&mut self, line: &[u8], key: &TcpFlowKey, local_addr: Option<SocketAddr>) -> Option<Vec<u8>> {
+        let text = core::str::from_utf8(line).ok()?;
+        let upper = text.to_uppercase();
+
+        if !upper.starts_with("PORT ") {
+            return None;
+        }
+
+        // Parse PORT h1,h2,h3,h4,p1,p2\r\n
+        let args = text[5..].trim();
+        let parts: Vec<u16> = args.split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        if parts.len() != 6 { return None; }
+
+        let guest_data_port = (parts[4] << 8) | parts[5];
+
+        // Create host-side listener for the FTP server to connect to.
+        let listener = TcpListener::bind("0.0.0.0:0").ok()?;
+        let _ = listener.set_nonblocking(true);
+        let host_port = listener.local_addr().ok()?.port();
+
+        // Get host IP from the control connection's local address.
+        let host_ip = match local_addr {
+            Some(SocketAddr::V4(addr)) => addr.ip().octets(),
+            _ => [127, 0, 0, 1], // fallback
+        };
+
+        self.ftp_data_listeners.push(FtpDataListener {
+            listener,
+            guest_data_port,
+            server_ip: key.remote_ip,
+            created: Instant::now(),
+        });
+
+        let rewritten = alloc::format!("PORT {},{},{},{},{},{}\r\n",
+            host_ip[0], host_ip[1], host_ip[2], host_ip[3],
+            host_port >> 8, host_port & 0xFF);
+
+        eprintln!("[slirp-ftp] PORT rewrite: guest :{} → host {}:{}", guest_data_port,
+            Ipv4Addr::new(host_ip[0], host_ip[1], host_ip[2], host_ip[3]), host_port);
+
+        Some(rewritten.into_bytes())
+    }
+
+    /// Initiate a TCP connection from gateway to guest (for FTP active data).
+    fn ftp_initiate_data_conn(&mut self, server_ip: [u8; 4], server_port: u16,
+                               guest_port: u16, host_stream: TcpStream) {
+        let our_seq: u32 = 0x2000_0000;
+        let key = TcpFlowKey {
+            guest_port,
+            remote_ip: server_ip,
+            remote_port: server_port,
+        };
+
+        let conn = TcpConnection {
+            stream: host_stream,
+            state: TcpState::SynSent,
+            our_seq,
+            unacked: 0,
+            guest_seq: 0,
+            guest_isn: 0,
+            read_buf: [0u8; 4096],
+            guest_window: 0,
+            retransmit_queue: Vec::new(),
+            last_retransmit: None,
+        };
+
+        self.tcp_conns.insert(key, conn);
+        // Send SYN to guest — the guest's FTP client is listening on this port.
+        self.send_tcp_flags(key, 0x02, our_seq, 0, &[]); // SYN
+        eprintln!("[slirp-ftp] Initiated data connection: {}:{} → guest:{}",
+            Ipv4Addr::new(server_ip[0], server_ip[1], server_ip[2], server_ip[3]),
+            server_port, guest_port);
+    }
+
+    /// Poll FTP data listeners for incoming connections from FTP servers.
+    fn poll_ftp(&mut self) {
+        let now = Instant::now();
+        let mut accepted: Vec<(u16, [u8; 4], TcpStream, u16)> = Vec::new(); // (guest_port, server_ip, stream, server_port)
+        let mut to_remove: Vec<usize> = Vec::new();
+
+        for (i, listener) in self.ftp_data_listeners.iter().enumerate() {
+            // Timeout after 30 seconds.
+            if now.duration_since(listener.created).as_secs() > 30 {
+                to_remove.push(i);
+                continue;
+            }
+
+            match listener.listener.accept() {
+                Ok((stream, addr)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_nodelay(true);
+                    accepted.push((
+                        listener.guest_data_port,
+                        listener.server_ip,
+                        stream,
+                        addr.port(),
+                    ));
+                    to_remove.push(i);
+                }
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {}
+                Err(_) => { to_remove.push(i); }
+            }
+        }
+
+        // Remove processed/expired listeners (reverse order).
+        to_remove.sort_unstable();
+        for i in to_remove.into_iter().rev() {
+            self.ftp_data_listeners.swap_remove(i);
+        }
+
+        // Initiate data connections to the guest.
+        for (guest_port, server_ip, stream, server_port) in accepted {
+            self.ftp_initiate_data_conn(server_ip, server_port, guest_port, stream);
         }
     }
 
@@ -915,14 +1163,16 @@ impl SlirpNet {
 
         // Only remove connections that have been fully closed (both sides FIN'd)
         // or that have been in FinWait for too long (>10s timeout).
-        self.tcp_conns.retain(|_, conn| {
-            if conn.state == TcpState::Closed { return false; }
-            if conn.state == TcpState::FinWait {
-                if let Some(last) = conn.last_retransmit {
-                    if now.duration_since(last).as_secs() > 10 { return false; }
-                }
+        self.tcp_conns.retain(|key, conn| {
+            let remove = if conn.state == TcpState::Closed { true }
+                else if conn.state == TcpState::FinWait {
+                    conn.last_retransmit.map_or(false, |last| now.duration_since(last).as_secs() > 10)
+                } else { false };
+            if remove {
+                // Clean up FTP ALG state for closed connections.
+                self.ftp_control.remove(key);
             }
-            true
+            !remove
         });
 
     }
@@ -1041,6 +1291,7 @@ impl NetBackend for SlirpNet {
     fn poll(&mut self) {
         self.poll_dns();
         self.poll_udp();
+        self.poll_ftp();
         self.poll_tcp();
     }
 
