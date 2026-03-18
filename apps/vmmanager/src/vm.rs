@@ -397,12 +397,14 @@ fn vm_run_loop(
                     2 => {
                         let mut data = [0u8; 8];
                         corevm_handle_mmio_exit(ap_handle, cpu_id, exit.addr, 0, exit.size, data.as_mut_ptr(), exit.mmio_dest_reg, exit.mmio_instr_len);
-                        corevm_ahci_poll_irq(ap_handle);
+                        // Note: do NOT call corevm_ahci_poll_irq from AP threads.
+                        // The BSP's poll_irqs handles AHCI IRQ delivery. Calling it
+                        // from both BSP and AP causes races on ahci_irq_asserted
+                        // that can lose interrupts and hang the guest.
                     }
                     3 => {
                         let mut data = exit.data_u64.to_le_bytes();
                         corevm_handle_mmio_exit(ap_handle, cpu_id, exit.addr, 1, exit.size, data.as_mut_ptr(), 0, 0);
-                        corevm_ahci_poll_irq(ap_handle);
                     }
                     7 | 13 => { /* HLT/Cancel — re-enter immediately */ }
                     12 => {
@@ -855,17 +857,25 @@ fn update_framebuffer(handle: u64, fb: &Arc<Mutex<FrameBufferData>>, diag: &Diag
                         fb_data.width = gpu_w;
                         fb_data.height = gpu_h;
                         // VirtIO GPU framebuffer is BGRA32 — convert to RGBA32.
+                        // Use fast bulk copy instead of per-pixel loop.
                         let npixels = (gpu_w as usize) * (gpu_h as usize);
                         fb_data.pixels.resize(npixels * 4, 255);
+                        // BGRA → RGBA: swap bytes 0↔2 for each pixel
+                        let dst = &mut fb_data.pixels;
                         for i in 0..npixels {
-                            let src = i * 4;
-                            let dst = i * 4;
-                            fb_data.pixels[dst] = raw[src + 2];     // R
-                            fb_data.pixels[dst + 1] = raw[src + 1]; // G
-                            fb_data.pixels[dst + 2] = raw[src];     // B
-                            fb_data.pixels[dst + 3] = 255;          // A
+                            let s = i * 4;
+                            dst[s]     = raw[s + 2]; // R
+                            dst[s + 1] = raw[s + 1]; // G
+                            dst[s + 2] = raw[s];     // B
+                            dst[s + 3] = 255;        // A
                         }
                         fb_data.dirty = true;
+
+                        static mut GPU_FB_LOG: u32 = 0;
+                        unsafe { GPU_FB_LOG += 1; if GPU_FB_LOG <= 10 || GPU_FB_LOG % 300 == 0 {
+                            let nz = raw.iter().take(1000).filter(|&&b| b != 0).count();
+                            eprintln!("[vmmanager] virtio-gpu fb update: {}x{} dirty=true sample_nz={}/1000", gpu_w, gpu_h, nz);
+                        }}
                     }
                     return;
                 }

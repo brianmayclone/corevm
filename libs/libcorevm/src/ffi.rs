@@ -2945,6 +2945,22 @@ pub extern "C" fn corevm_setup_virtio_gpu(handle: u64, vram_mb: u32) -> i32 {
         router.virtio_gpu = vm.virtio_gpu_ptr;
     }
 
+    // Register the notify callback: pulse IRQ 11 and kick vCPU 0.
+    // This is the equivalent of QEMU's virtio_notify() — it ensures the
+    // guest immediately sees command completions without waiting for poll_irqs.
+    #[cfg(feature = "linux")]
+    if !vm.virtio_gpu_ptr.is_null() {
+        let bp = &mut vm.backend as *mut crate::backend::kvm::KvmBackend as usize;
+        let vs = vm.backend.vm_slot;
+        let gpu = unsafe { &mut *vm.virtio_gpu_ptr };
+        gpu.notify_callback = Some(alloc::boxed::Box::new(move || {
+            let backend = unsafe { &mut *(bp as *mut crate::backend::kvm::KvmBackend) };
+            let _ = backend.set_irq_line(11, true);
+            let _ = backend.set_irq_line(11, false);
+            crate::backend::kvm::cancel_vcpu_kvm(vs, 0);
+        }));
+    }
+
     0
 }
 
@@ -3084,6 +3100,36 @@ pub extern "C" fn corevm_setup_virtio_input(handle: u64) -> i32 {
         router.virtio_tablet = vm.virtio_tablet_ptr;
     }
 
+    // Register notify callbacks for keyboard and tablet: pulse IRQ 10 and kick vCPU 0.
+    #[cfg(feature = "linux")]
+    {
+        let backend_ptr = &mut vm.backend as *mut crate::backend::kvm::KvmBackend;
+        let vm_slot = vm.backend.vm_slot;
+
+        if !vm.virtio_kbd_ptr.is_null() {
+            let kbd = unsafe { &mut *vm.virtio_kbd_ptr };
+            let bp = backend_ptr as usize;
+            let vs = vm_slot;
+            kbd.notify_callback = Some(alloc::boxed::Box::new(move || {
+                let backend = unsafe { &mut *(bp as *mut crate::backend::kvm::KvmBackend) };
+                let _ = backend.set_irq_line(10, true);
+                let _ = backend.set_irq_line(10, false);
+                crate::backend::kvm::cancel_vcpu_kvm(vs, 0);
+            }));
+        }
+        if !vm.virtio_tablet_ptr.is_null() {
+            let tablet = unsafe { &mut *vm.virtio_tablet_ptr };
+            let bp = backend_ptr as usize;
+            let vs = vm_slot;
+            tablet.notify_callback = Some(alloc::boxed::Box::new(move || {
+                let backend = unsafe { &mut *(bp as *mut crate::backend::kvm::KvmBackend) };
+                let _ = backend.set_irq_line(10, true);
+                let _ = backend.set_irq_line(10, false);
+                crate::backend::kvm::cancel_vcpu_kvm(vs, 0);
+            }));
+        }
+    }
+
     0
 }
 
@@ -3117,20 +3163,7 @@ pub extern "C" fn corevm_virtio_kbd_ps2(handle: u64, scancode: u8) -> i32 {
             }
             kbd.inject_key(key, pressed);
             kbd.process_eventq();
-            // Immediately pulse IRQ and kick the vCPU out of KVM_RUN so the
-            // guest sees the interrupt. Without the kick, the vCPU may be in
-            // HLT (idle) and never wake up to process the event.
-            if kbd.irq_pending {
-                kbd.irq_pending = false;
-                #[cfg(feature = "linux")]
-                {
-                    let _ = vm.backend.set_irq_line(10, true);
-                    let _ = vm.backend.set_irq_line(10, false);
-                    // Kick vCPU 0 out of KVM_RUN via signal.
-                    let vm_slot = vm.backend.vm_slot;
-                    crate::backend::kvm::cancel_vcpu_kvm(vm_slot, 0);
-                }
-            }
+            // notify_callback handles IRQ pulse + vCPU kick automatically
         }
         None => {
             #[cfg(feature = "std")]
@@ -3153,16 +3186,7 @@ pub extern "C" fn corevm_virtio_tablet_move(handle: u64, x: u32, y: u32, buttons
     let tablet = match vm.virtio_tablet() { Some(t) => t, None => return -1 };
     tablet.inject_abs_tablet(x, y, buttons);
     tablet.process_eventq();
-    if tablet.irq_pending {
-        tablet.irq_pending = false;
-        #[cfg(feature = "linux")]
-        {
-            let _ = vm.backend.set_irq_line(10, true);
-            let _ = vm.backend.set_irq_line(10, false);
-            let vm_slot = vm.backend.vm_slot;
-            crate::backend::kvm::cancel_vcpu_kvm(vm_slot, 0);
-        }
-    }
+    // notify_callback handles IRQ pulse + vCPU kick automatically
     0
 }
 

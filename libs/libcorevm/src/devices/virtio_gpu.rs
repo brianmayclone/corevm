@@ -226,6 +226,12 @@ pub struct VirtioGpu {
 
     /// Set when the device has pending data that requires an interrupt.
     pub irq_pending: bool,
+
+    /// Callback to immediately signal an interrupt and kick the vCPU.
+    /// Called after writing to the used ring (like QEMU's virtio_notify).
+    /// Arguments: none. The callback should pulse the IRQ line and kick the vCPU.
+    #[cfg(feature = "std")]
+    pub notify_callback: Option<alloc::boxed::Box<dyn FnMut() + Send>>,
 }
 
 unsafe impl Send for VirtioGpu {}
@@ -274,6 +280,18 @@ impl VirtioGpu {
             msi_address: 0,
             msi_data: 0,
             irq_pending: false,
+            #[cfg(feature = "std")]
+            notify_callback: None,
+        }
+    }
+
+    /// Fire the notify callback (IRQ pulse + vCPU kick).
+    fn virtio_notify(&mut self) {
+        self.isr_status |= 1;
+        self.irq_pending = true;
+        #[cfg(feature = "std")]
+        if let Some(ref mut cb) = self.notify_callback {
+            cb();
         }
     }
 
@@ -408,9 +426,7 @@ impl VirtioGpu {
         self.queues[0].last_avail_idx = last_avail;
 
         if used_count > 0 {
-            // Signal interrupt.
-            self.isr_status |= 1;
-            self.irq_pending = true;
+            self.virtio_notify();
         }
     }
 

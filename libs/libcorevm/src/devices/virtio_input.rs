@@ -151,6 +151,10 @@ pub struct VirtioInput {
     pub guest_mem_len: usize,
 
     pub irq_pending: bool,
+
+    /// Callback to immediately signal an interrupt and kick the vCPU.
+    #[cfg(feature = "std")]
+    pub notify_callback: Option<alloc::boxed::Box<dyn FnMut() + Send>>,
 }
 
 unsafe impl Send for VirtioInput {}
@@ -174,6 +178,18 @@ impl VirtioInput {
             guest_mem_ptr: core::ptr::null_mut(),
             guest_mem_len: 0,
             irq_pending: false,
+            #[cfg(feature = "std")]
+            notify_callback: None,
+        }
+    }
+
+    /// Fire the notify callback (IRQ pulse + vCPU kick).
+    fn virtio_notify(&mut self) {
+        self.isr_status |= 1;
+        self.irq_pending = true;
+        #[cfg(feature = "std")]
+        if let Some(ref mut cb) = self.notify_callback {
+            cb();
         }
     }
 
@@ -399,8 +415,7 @@ impl VirtioInput {
         }
 
         if delivered > 0 {
-            self.isr_status |= 1;
-            self.irq_pending = true;
+            self.virtio_notify();
         }
     }
 

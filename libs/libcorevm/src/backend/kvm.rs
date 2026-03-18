@@ -875,7 +875,16 @@ impl KvmBackend {
                     if is_amd {
                         continue; // skip leaf 0xB on AMD
                     }
-                    edx = 0;
+                    edx = 0; // fixed per-vCPU in create_vcpu
+                }
+
+                // AMD Extended APIC ID (leaf 0x8000001E).
+                // EAX = Extended APIC ID. Must match the LAPIC ID.
+                // EBX[7:0] = Compute Unit ID, EBX[15:8] = threads per unit - 1
+                // Set per-vCPU in create_vcpu; clear here so the base is 0.
+                if e.function == 0x8000001E {
+                    eax = 0; // set per-vCPU in create_vcpu
+                    ebx = 0; // 1 thread per core (threads_per_unit - 1 = 0)
                 }
 
                 // Keep KVM hypervisor leaves (0x40000000+) — SeaBIOS uses
@@ -1323,6 +1332,12 @@ impl VmBackend for KvmBackend {
                     if e.function == 0xB {
                         // x2APIC topology: EDX = x2APIC ID = vcpu_id
                         e.edx = id as u32;
+                    }
+                    if e.function == 0x8000001E {
+                        // AMD Extended APIC ID: EAX = APIC ID = vcpu_id
+                        e.eax = id as u32;
+                        // EBX[7:0] = compute unit ID = vcpu_id (1 thread per core)
+                        e.ebx = id as u32;
                     }
                 }
                 // CPUID configured for vCPU with correct APIC ID and topology
