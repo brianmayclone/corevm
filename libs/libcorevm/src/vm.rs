@@ -316,8 +316,12 @@ impl Vm {
             vga.set_bar(0, 0xFD00_0000, bar0_size, true);
             // BAR2: Bochs dispi MMIO registers (4KB)
             vga.set_bar(2, 0xFEBE_0000, 0x1000, true);
-            // Interrupt: INTA → PIRQC → IRQ 11 (via PIIX3 swizzle: (2+0)%4=2)
-            vga.set_interrupt(11, 1);
+            // No interrupt — our VGA emulation never generates IRQs.
+            // Sharing IRQ 11 with AHCI causes "irq 11: nobody cared" when
+            // the bochs-drm driver receives AHCI interrupts it can't handle,
+            // leading Linux to disable IRQ 11 entirely (killing AHCI).
+            vga.config_space[0x3C] = 0; // interrupt line = none
+            vga.config_space[0x3D] = 0; // interrupt pin = none
             // Expansion ROM BAR (0xC0000 VGA BIOS area)
             vga.config_space[0x30] = 0x00; // ROM base (will be set by SeaBIOS)
             vga.config_space[0x31] = 0x00;

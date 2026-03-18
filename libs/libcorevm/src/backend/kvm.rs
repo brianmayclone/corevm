@@ -861,12 +861,11 @@ impl KvmBackend {
                     ecx &= !(1 << 5);   // VMX — not useful inside guest
                     ecx &= !(1 << 21);  // x2APIC — our platform uses xAPIC only.
                                          // Windows 10 tries to switch to x2APIC
-                                         // mode if exposed, which hangs with SMP
-                                         // on the PIIX3/i440FX chipset.
-                    ecx &= !(1 << 24);  // TSC-Deadline — requires LAPIC timer mode
-                                         // support that our platform doesn't fully
-                                         // implement. Windows 10 uses TSC-Deadline
-                                         // with SMP and hangs if it doesn't fire.
+                                         // mode if exposed, which conflicts with
+                                         // our PIIX3/i440FX chipset emulation.
+                    // Keep TSC-Deadline (bit 24) — Windows 10 needs it for
+                    // the LAPIC timer with SMP. KVM handles TSC-Deadline
+                    // in the in-kernel LAPIC automatically.
                     // Keep bit 31 (hypervisor present) — needed for KVM PV
                     // features including SMP wakeup used by SeaBIOS.
                     // EBX[31:24] and EBX[23:16] are set per-vCPU in create_vcpu

@@ -232,9 +232,21 @@ pub extern "C" fn corevm_create_vcpu(handle: u64, vcpu_id: u32) -> i32 {
                 #[cfg(feature = "linux")]
                 if vcpu_id > 0 {
                     let apic_base = 0xFEE0_0000u64 | (1 << 11);
-                    let _ = vm.backend.set_msrs(vcpu_id, &[(0x1B, apic_base)]);
+                    let _ = vm.backend.set_msrs(vcpu_id, &[
+                        (0x1B, apic_base),     // IA32_APIC_BASE: APIC enabled, not BSP
+                        (0x10, 0),             // IA32_TSC: synchronize with BSP (start at 0)
+                        (0x3B, 0),             // IA32_TSC_ADJUST: no offset
+                    ]);
                     // KVM_MP_STATE_INIT_RECEIVED (2) — AP waits for SIPI
                     let _ = vm.backend.set_mp_state(vcpu_id, 2);
+                }
+                // BSP: also ensure TSC starts at 0 for consistency
+                #[cfg(feature = "linux")]
+                if vcpu_id == 0 {
+                    let _ = vm.backend.set_msrs(vcpu_id, &[
+                        (0x10, 0),             // IA32_TSC: start at 0
+                        (0x3B, 0),             // IA32_TSC_ADJUST: no offset
+                    ]);
                 }
                 // On WHP, APs have APIC_BASE set by create_vcpu already.
                 // Put them in HLT state so they wait for SIPI via startup IPI.
@@ -827,6 +839,11 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
             }
 
             // VirtIO GPU → IRQ 11 (level-triggered, shares with AHCI/E1000)
+            // Only deliver IRQ if the guest driver is active (DRIVER_OK).
+            // If no driver is loaded (e.g. Windows using standard VGA),
+            // isr_status may be non-zero but nobody reads it to clear it,
+            // causing IRQ 11 to stay permanently asserted → IRQ storm that
+            // makes the kernel disable IRQ 11 entirely, killing AHCI too.
             if !vm.virtio_gpu_ptr.is_null() {
                 let gpu = unsafe { &mut *vm.virtio_gpu_ptr };
                 let want_asserted = gpu.isr_status != 0;

@@ -538,17 +538,9 @@ fn main() {
                             ap_exits[2], ap_exits[3], ap_exits[7], ap_exits[13]);
                     }
 
-                    // Debug: log every non-Cancel exit and first 50 exits to trace SIPI handling
-                    if exit.reason != 13 || ap_total <= 50 {
-                        let mut ap_regs = libcorevm::backend::VcpuRegs::default();
-                        corevm_get_vcpu_regs(ap_handle, cpu_id, &mut ap_regs);
-                        let detail = match exit.reason {
-                            0 | 1 => format!("port={:#x} data={:#x}", exit.port, exit.data_u32),
-                            2 | 3 => format!("addr={:#x} size={}", exit.addr, exit.size),
-                            _ => String::new(),
-                        };
-                        eprintln!("[vcpu-{}] exit #{}: reason={} RIP={:#x} RFLAGS={:#x} {}",
-                            cpu_id, ap_total, exit.reason, ap_regs.rip, ap_regs.rflags, detail);
+                    // Minimal AP logging - only first 30 non-cancel exits
+                    if exit.reason != 13 && ap_total <= 30 {
+                        eprintln!("[vcpu-{}] exit #{}: reason={}", cpu_id, ap_total, exit.reason);
                     }
 
                     match exit.reason {
