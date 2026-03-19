@@ -27,12 +27,47 @@ use crate::backend::VmExitReason;
 // per-vCPU (each thread has its own fd + kvm_run page) and does NOT need
 // the lock — only the userspace device handlers do.
 
+// I/O dispatch lock.
+//
+// Serialises access to device handlers from multiple vCPU threads.
+// Uses a hybrid approach: spin briefly (for the common uncontended case),
+// then yield the CPU (to avoid burning cycles when another vCPU holds the
+// lock during a long MMIO handler like AHCI DMA).
+//
+// A pure spinlock is catastrophic for SMP performance: if vCPU threads
+// share physical cores, a spinning waiter prevents the lock holder from
+// making progress, causing 100x slowdowns on disk I/O.
 static IO_LOCK: AtomicBool = AtomicBool::new(false);
 
 #[inline]
 fn io_lock() {
-    while IO_LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
-        core::hint::spin_loop();
+    // Fast path: try to acquire immediately (uncontended case).
+    if IO_LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+        return;
+    }
+    // Slow path: spin briefly, then yield.
+    io_lock_slow();
+}
+
+#[cold]
+fn io_lock_slow() {
+    let mut spin_count = 0u32;
+    loop {
+        if IO_LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            return;
+        }
+        spin_count += 1;
+        if spin_count < 64 {
+            core::hint::spin_loop();
+        } else {
+            // Yield the CPU so the lock holder can make progress.
+            // This is critical when vCPUs share physical cores.
+            #[cfg(feature = "std")]
+            std::thread::yield_now();
+            #[cfg(not(feature = "std"))]
+            core::hint::spin_loop();
+            spin_count = 0;
+        }
     }
 }
 

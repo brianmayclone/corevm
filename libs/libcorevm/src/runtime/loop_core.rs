@@ -43,8 +43,12 @@ use super::RuntimeControl;
 /// Action to take after dispatching a VM exit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExitAction {
-    /// Continue running (normal I/O, MMIO, HLT, cancel handled).
+    /// Continue running (normal I/O, MMIO, cancel handled).
     Continue,
+    /// vCPU executed HLT. KVM blocks in-kernel until an interrupt arrives.
+    /// BSP should briefly sleep for timer responsivity; APs must NOT sleep
+    /// (sleeping delays IPI delivery and kills SMP performance).
+    Halted,
     /// VM shut down (triple fault or ACPI shutdown).
     Shutdown,
     /// VM encountered a fatal error.
@@ -106,9 +110,11 @@ pub(crate) fn dispatch_exit(
         }
         7 => {
             // Halted — KVM blocks in-kernel until next interrupt.
-            // Brief sleep to avoid busy-looping on HLT exits.
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            ExitAction::Continue
+            // Do NOT sleep here: on APs, sleeping delays IPI delivery
+            // by up to 1ms causing severe SMP performance degradation.
+            // On the BSP, the cancel thread kicks us out periodically
+            // for timer advancement anyway.
+            ExitAction::Halted
         }
         8 => {
             // InterruptWindow — guest is ready to accept interrupts.
@@ -231,11 +237,8 @@ fn poll_devices(
     exit_reason: u32,
     last_audio: &mut Instant,
 ) {
-    // AHCI IRQ polling after MMIO exits (level-triggered interrupt semantics).
-    // Without this, AHCI interrupt state can go stale after MMIO register access.
-    if exit_reason == 2 || exit_reason == 3 {
-        corevm_ahci_poll_irq(handle);
-    }
+    // Note: AHCI IRQ polling is done in bsp_loop BEFORE poll_irqs,
+    // not here — ordering matters for interrupt latency.
 
     // UHCI USB frame processing on I/O exits.
     if config.usb_tablet && (exit_reason == 0 || exit_reason == 1) {
@@ -341,6 +344,11 @@ pub(crate) fn bsp_loop(
 
         match action {
             ExitAction::Continue => {}
+            ExitAction::Halted => {
+                // BSP: brief sleep so we don't busy-loop when the guest is idle.
+                // The cancel thread will kick us out for timer advancement.
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
             ExitAction::Shutdown => {
                 corevm_ahci_flush_caches(handle);
                 handler.on_event(VmEvent::Shutdown);
@@ -362,6 +370,16 @@ pub(crate) fn bsp_loop(
                 control.exited.store(true, Ordering::Relaxed);
                 break;
             }
+        }
+
+        // ── AHCI IRQ update (must happen BEFORE poll_irqs) ────────────
+        // AHCI uses level-triggered interrupts. After an MMIO exit that
+        // touches AHCI registers (e.g. command completion), the IRQ state
+        // must be updated before poll_irqs checks it. Without this ordering,
+        // poll_irqs sees stale IRQ state and the interrupt is delayed until
+        // the next cancel-kick — causing ~10x slower disk I/O.
+        if exit.reason == 2 || exit.reason == 3 {
+            corevm_ahci_poll_irq(handle);
         }
 
         // ── Timer advancement ───────────────────────────────────────────

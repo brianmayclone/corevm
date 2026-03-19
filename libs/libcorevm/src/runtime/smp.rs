@@ -62,7 +62,12 @@ fn ap_loop(handle: u64, cpu_id: u32, control: &RuntimeControl) {
         }
 
         match loop_core::dispatch_exit(handle, cpu_id, &exit) {
-            loop_core::ExitAction::Continue => {}
+            loop_core::ExitAction::Continue
+            | loop_core::ExitAction::Halted => {
+                // APs: do NOT sleep on HLT — KVM blocks in-kernel until
+                // an interrupt (IPI, timer) arrives. Sleeping here would
+                // delay IPI delivery by up to 1ms, killing SMP throughput.
+            }
             loop_core::ExitAction::Shutdown
             | loop_core::ExitAction::Error
             | loop_core::ExitAction::Reboot => {

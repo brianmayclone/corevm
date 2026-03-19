@@ -14,19 +14,20 @@ use std::time::Duration;
 use crate::ffi::corevm_cancel_vcpu;
 use super::RuntimeControl;
 
-/// Spawn the cancel thread that periodically kicks all vCPUs out of KVM_RUN.
+/// Spawn the cancel thread that periodically kicks the BSP out of KVM_RUN.
+///
+/// Only the BSP (vCPU 0) needs periodic cancel kicks — it uses them to
+/// advance timers (PIT, RTC), poll device IRQs, and drain I/O buffers.
+///
+/// APs are NOT cancelled: they run in KVM_RUN and block on HLT until
+/// an IPI arrives. Cancelling APs forces unnecessary userspace round-trips
+/// that contend on the I/O dispatch lock, causing severe disk I/O
+/// performance degradation with SMP.
 ///
 /// The thread runs until `control.stop` is set to `true`.
-///
-/// # Arguments
-///
-/// * `handle` - VM handle for `corevm_cancel_vcpu` calls
-/// * `num_cpus` - Number of vCPUs to cancel each interval
-/// * `interval` - Time between cancel kicks
-/// * `control` - Shared control flags (stop signal)
 pub(crate) fn spawn_cancel_thread(
     handle: u64,
-    num_cpus: u32,
+    _num_cpus: u32,
     interval: Duration,
     control: Arc<RuntimeControl>,
 ) -> thread::JoinHandle<()> {
@@ -35,9 +36,8 @@ pub(crate) fn spawn_cancel_thread(
         .spawn(move || {
             while !control.stop.load(Ordering::Relaxed) {
                 thread::sleep(interval);
-                for cpu_id in 0..num_cpus {
-                    corevm_cancel_vcpu(handle, cpu_id);
-                }
+                // Only cancel BSP (vCPU 0) — APs don't need periodic kicks.
+                corevm_cancel_vcpu(handle, 0);
             }
         })
         .expect("failed to spawn cancel thread")
