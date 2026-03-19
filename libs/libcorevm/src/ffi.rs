@@ -764,13 +764,6 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                 if !e1000.rx_buffer.is_empty() {
                     e1000.process_rx_ring();
                 }
-                // If fire_irq_assert already called set_irq_line(11, true),
-                // synchronize e1000_irq_asserted so poll_irqs doesn't get confused.
-                if e1000.irq_pending_assert {
-                    e1000.irq_pending_assert = false;
-                    vm.e1000_irq_asserted = true;
-                }
-
                 let icr = e1000.regs[0x00C0 / 4];
                 let ims = e1000.regs[0x00D0 / 4];
                 let want_asserted = (icr & ims) != 0;
@@ -1205,26 +1198,6 @@ pub extern "C" fn corevm_check_reset(handle: u64) -> i32 {
             // Check port 0xCF9 reset (stored in VM state)
             if vm.cf9_reset_pending {
                 vm.cf9_reset_pending = false;
-                return 1;
-            }
-            0
-        }
-        None => 0,
-    }
-}
-
-/// Check if the guest has requested an ACPI shutdown (SLP_EN + S5).
-/// Returns 1 if shutdown was requested (and clears the flag), 0 otherwise.
-#[no_mangle]
-pub extern "C" fn corevm_check_acpi_shutdown(handle: u64) -> i32 {
-    match get_vm(handle) {
-        Some(vm) => {
-            if vm.acpi_pm_ptr.is_null() {
-                return 0;
-            }
-            let acpi = unsafe { &mut *vm.acpi_pm_ptr };
-            if acpi.shutdown_requested {
-                acpi.shutdown_requested = false;
                 return 1;
             }
             0

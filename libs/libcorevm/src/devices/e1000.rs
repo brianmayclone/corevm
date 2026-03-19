@@ -635,25 +635,15 @@ impl E1000 {
     /// NEVER de-asserts — that is handled by poll_irqs which properly
     /// checks the shared IRQ 11 line (E1000 + AHCI).
     fn fire_irq_assert(&mut self) {
-        let icr = self.regs[REG_ICR / 4];
-        let ims = self.regs[REG_IMS / 4];
-        if (icr & ims) != 0 {
-            // Set flag so poll_irqs knows we already asserted.
-            self.irq_pending_assert = true;
-            #[cfg(feature = "std")]
-            if let Some(ref mut cb) = self.irq_callback {
-                cb(true); // only assert, never de-assert
-            }
-        }
+        // Interrupt delivery is handled entirely by poll_irqs in the
+        // VM loop.  The callback is NOT used because it creates state
+        // synchronization issues with e1000_irq_asserted in the VM struct.
+        // poll_irqs checks (ICR & IMS) on every iteration and asserts/
+        // de-asserts the IRQ line reliably.
     }
 
     fn raise_interrupt(&mut self, cause: u32) {
         self.regs[REG_ICR / 4] |= cause;
-        // Do NOT call fire_irq_assert here — the callback must only fire
-        // from explicit ICS/IMS writes.  If TX/RX interrupts fire the
-        // callback during the driver's interrupt test, the extra ICR bits
-        // (TXDW, TXQE) can corrupt the test result and cause a reset loop.
-        // poll_irqs delivers these interrupts on the next iteration.
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1626,12 +1616,6 @@ impl MmioHandler for E1000 {
             REG_CTRL => {
                 self.regs[dword_offset] = new_val;
                 if new_val & CTRL_RST != 0 {
-                    #[cfg(feature = "std")]
-                    {
-                        static mut RST_COUNT: u32 = 0;
-                        unsafe { RST_COUNT += 1; }
-                        eprintln!("[e1000] RST #{} (CTRL=0x{:08X})", unsafe { RST_COUNT }, new_val);
-                    }
                     self.reset();
                 }
                 if new_val & CTRL_PHY_RST != 0 {
