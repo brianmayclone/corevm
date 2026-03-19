@@ -554,8 +554,9 @@ impl IoHandler for Uhci {
                 _ => 0xFFFF,
             },
             4 => match port {
+                REG_USBCMD => (self.usbcmd as u32) | ((self.usbsts as u32) << 16),
+                REG_USBINTR => (self.usbintr as u32) | ((self.frnum as u32) << 16),
                 REG_FLBASEADD => self.flbaseadd,
-                // 32-bit read on PORTSC1 returns PORTSC1 (low) | PORTSC2 (high)
                 REG_PORTSC1 => (self.portsc[0] as u32) | ((self.portsc[1] as u32) << 16),
                 _ => 0xFFFFFFFF,
             },
@@ -601,8 +602,23 @@ impl IoHandler for Uhci {
             }
             4 => {
                 match port {
+                    REG_USBCMD => {
+                        // 32-bit write at 0x00: low 16 = USBCMD, high 16 = USBSTS
+                        // Handle USBCMD via the 16-bit path
+                        let cmd = val as u16;
+                        let sts = (val >> 16) as u16;
+                        if cmd & (CMD_HCRESET | CMD_GRESET) != 0 { self.reset(); return Ok(()); }
+                        self.usbcmd = cmd;
+                        if cmd & CMD_RS != 0 {
+                            self.usbsts &= !STS_HCH;
+                        } else {
+                            self.usbsts |= STS_HCH;
+                        }
+                        // Write-clear USBSTS bits
+                        self.usbsts &= !(sts & 0x001F);
+                        if self.usbsts & STS_USBINT == 0 { self.irq_pending = false; }
+                    }
                     REG_FLBASEADD => { self.flbaseadd = val & 0xFFFFF000; }
-                    // 32-bit write on PORTSC1: split into two 16-bit port writes
                     REG_PORTSC1 => {
                         self.handle_portsc_write_16(0, val as u16);
                         self.handle_portsc_write_16(1, (val >> 16) as u16);
