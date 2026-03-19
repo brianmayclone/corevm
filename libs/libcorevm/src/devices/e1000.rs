@@ -225,6 +225,7 @@ const CTRL_PHY_RST: u32  = 1 << 31;
 // STATUS register
 const STATUS_FD: u32     = 0x01;
 const STATUS_LU: u32     = 0x02;
+const STATUS_PHYRA: u32  = 1 << 10; // PHY Reset Asserted
 const STATUS_SPEED_1000: u32 = 0x80;
 
 // EECD register bits
@@ -428,8 +429,8 @@ impl E1000 {
     pub fn new(mac: [u8; 6]) -> Self {
         let mut regs = vec![0u32; REG_SPACE_DWORDS];
 
-        // STATUS: link up, full duplex, speed 1000 Mbps.
-        regs[REG_STATUS / 4] = STATUS_LU | STATUS_FD | STATUS_SPEED_1000;
+        // STATUS: link up, full duplex, speed 1000 Mbps, PHY reset asserted.
+        regs[REG_STATUS / 4] = STATUS_LU | STATUS_FD | STATUS_SPEED_1000 | STATUS_PHYRA;
 
         // CTRL: auto-speed detect, set link up, full duplex.
         regs[REG_CTRL / 4] = CTRL_ASDE | CTRL_SLU | CTRL_FD;
@@ -561,7 +562,7 @@ impl E1000 {
             *reg = 0;
         }
 
-        self.regs[REG_STATUS / 4] = STATUS_LU | STATUS_FD | STATUS_SPEED_1000;
+        self.regs[REG_STATUS / 4] = STATUS_LU | STATUS_FD | STATUS_SPEED_1000 | STATUS_PHYRA;
         self.regs[REG_CTRL / 4] = CTRL_ASDE | CTRL_SLU | CTRL_FD;
         self.regs[REG_PBA / 4] = 0x0030;
         self.regs[REG_TIPG / 4] = 10 | (10 << 10) | (10 << 20);
@@ -1610,7 +1611,13 @@ impl MmioHandler for E1000 {
             }
 
             REG_STATUS => {
-                // Read-only; ignore writes.
+                // STATUS is mostly read-only. Only PHYRA (bit 10) is
+                // writable: software clears it by writing 0 to that bit.
+                // Windows e1000 driver checks PHYRA after reset and will
+                // retry the reset indefinitely if it cannot clear this bit.
+                if new_val & STATUS_PHYRA == 0 {
+                    self.regs[dword_offset] &= !STATUS_PHYRA;
+                }
             }
 
             REG_CTRL_EXT | REG_FCAL | REG_FCAH | REG_FCT | REG_FCTTV
