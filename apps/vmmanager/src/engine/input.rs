@@ -87,6 +87,10 @@ pub fn scancode_for_key(key: egui::Key) -> Option<(u8, bool)> {
 static mut PREV_SHIFT: bool = false;
 static mut PREV_CTRL: bool = false;
 static mut PREV_ALT: bool = false;
+/// Track whether we sent Right Alt (AltGr) as E0+38 instead of plain 38.
+static mut PREV_ALTGR: bool = false;
+/// Track which keys are currently pressed to prevent duplicate press/release.
+static mut KEYS_DOWN: [bool; 256] = [false; 256];
 
 /// Handle keyboard events from egui and send to VM via libcorevm.
 /// vm_handle: the corevm VM handle (u64)
@@ -94,50 +98,104 @@ static mut PREV_ALT: bool = false;
 /// Returns a label for the last key pressed (if any) for status bar display.
 pub fn handle_keyboard_events(ctx: &egui::Context, vm_handle: u64, display_focused: bool) -> Option<String> {
     if !display_focused {
-        // Release all modifiers when focus is lost
+        // Release all tracked keys and modifiers when focus is lost
         unsafe {
+            for i in 0..256 {
+                if KEYS_DOWN[i] {
+                    libcorevm::ffi::corevm_ps2_key_release(vm_handle, i as u8);
+                    KEYS_DOWN[i] = false;
+                }
+            }
             if PREV_SHIFT { libcorevm::ffi::corevm_ps2_key_release(vm_handle, 0x2A); PREV_SHIFT = false; }
             if PREV_CTRL  { libcorevm::ffi::corevm_ps2_key_release(vm_handle, 0x1D); PREV_CTRL = false; }
             if PREV_ALT   { libcorevm::ffi::corevm_ps2_key_release(vm_handle, 0x38); PREV_ALT = false; }
+            if PREV_ALTGR {
+                libcorevm::ffi::corevm_ps2_key_press(vm_handle, 0xE0);
+                libcorevm::ffi::corevm_ps2_key_release(vm_handle, 0x38);
+                PREV_ALTGR = false;
+            }
         }
         return None;
     }
 
     let has_virtio_input = libcorevm::ffi::corevm_has_virtio_input(vm_handle) != 0;
 
-    // Helper: send a PS/2 scancode to both PS/2 and VirtIO (if available).
-    let send_key_press = |scancode: u8| {
+    // Helper: send a PS/2 scancode (with optional E0 prefix) to both PS/2 and VirtIO.
+    let send_key_press_ext = |scancode: u8, extended: bool| {
+        if extended {
+            libcorevm::ffi::corevm_ps2_key_press(vm_handle, 0xE0);
+        }
         libcorevm::ffi::corevm_ps2_key_press(vm_handle, scancode);
-        if has_virtio_input { libcorevm::ffi::corevm_virtio_kbd_ps2(vm_handle, scancode); }
+        if has_virtio_input {
+            if extended {
+                libcorevm::ffi::corevm_virtio_kbd_ps2(vm_handle, 0xE0);
+            }
+            libcorevm::ffi::corevm_virtio_kbd_ps2(vm_handle, scancode);
+        }
     };
-    let send_key_release = |scancode: u8| {
+    let send_key_release_ext = |scancode: u8, extended: bool| {
+        if extended {
+            libcorevm::ffi::corevm_ps2_key_press(vm_handle, 0xE0);
+        }
         libcorevm::ffi::corevm_ps2_key_release(vm_handle, scancode);
-        if has_virtio_input { libcorevm::ffi::corevm_virtio_kbd_ps2(vm_handle, scancode | 0x80); }
+        if has_virtio_input {
+            if extended {
+                libcorevm::ffi::corevm_virtio_kbd_ps2(vm_handle, 0xE0);
+            }
+            libcorevm::ffi::corevm_virtio_kbd_ps2(vm_handle, scancode | 0x80);
+        }
     };
+    let send_key_press = |scancode: u8| { send_key_press_ext(scancode, false); };
+    let send_key_release = |scancode: u8| { send_key_release_ext(scancode, false); };
 
-    // Track modifier state from egui and send press/release scancodes
+    // Track modifier state from egui and send press/release scancodes.
+    // Detect AltGr: on Linux/X11, AltGr is reported as ctrl+alt simultaneously.
+    // We detect this pattern and send Right Alt (E0 0x38) instead of Left Ctrl + Left Alt.
     let modifiers = ctx.input(|i| i.modifiers);
+
+    // Check if this looks like AltGr (both ctrl and alt pressed simultaneously,
+    // but no actual Ctrl key intent — i.e. the user pressed AltGr, not Ctrl+Alt).
+    // Heuristic: if both ctrl and alt become true in the same frame and we weren't
+    // tracking them individually, it's likely AltGr.
+    let is_altgr = modifiers.ctrl && modifiers.alt;
+
     unsafe {
-        if modifiers.shift && !PREV_SHIFT {
-            send_key_press(0x2A); // Left Shift
-            PREV_SHIFT = true;
-        } else if !modifiers.shift && PREV_SHIFT {
-            send_key_release(0x2A);
-            PREV_SHIFT = false;
+        if is_altgr && !PREV_ALTGR {
+            // AltGr pressed — send Right Alt (E0 + 0x38)
+            // First release any previously sent Left Ctrl/Alt
+            if PREV_CTRL { send_key_release(0x1D); PREV_CTRL = false; }
+            if PREV_ALT { send_key_release(0x38); PREV_ALT = false; }
+            send_key_press_ext(0x38, true); // Right Alt = E0 0x38
+            PREV_ALTGR = true;
+        } else if !is_altgr && PREV_ALTGR {
+            // AltGr released
+            send_key_release_ext(0x38, true);
+            PREV_ALTGR = false;
         }
-        if modifiers.ctrl && !PREV_CTRL {
-            send_key_press(0x1D); // Left Ctrl
-            PREV_CTRL = true;
-        } else if !modifiers.ctrl && PREV_CTRL {
-            send_key_release(0x1D);
-            PREV_CTRL = false;
-        }
-        if modifiers.alt && !PREV_ALT {
-            send_key_press(0x38); // Left Alt
-            PREV_ALT = true;
-        } else if !modifiers.alt && PREV_ALT {
-            send_key_release(0x38);
-            PREV_ALT = false;
+
+        if !PREV_ALTGR {
+            // Normal modifier handling (only when not in AltGr mode)
+            if modifiers.shift && !PREV_SHIFT {
+                send_key_press(0x2A); // Left Shift
+                PREV_SHIFT = true;
+            } else if !modifiers.shift && PREV_SHIFT {
+                send_key_release(0x2A);
+                PREV_SHIFT = false;
+            }
+            if modifiers.ctrl && !PREV_CTRL {
+                send_key_press(0x1D); // Left Ctrl
+                PREV_CTRL = true;
+            } else if !modifiers.ctrl && PREV_CTRL {
+                send_key_release(0x1D);
+                PREV_CTRL = false;
+            }
+            if modifiers.alt && !PREV_ALT {
+                send_key_press(0x38); // Left Alt
+                PREV_ALT = true;
+            } else if !modifiers.alt && PREV_ALT {
+                send_key_release(0x38);
+                PREV_ALT = false;
+            }
         }
     }
 
@@ -149,16 +207,23 @@ pub fn handle_keyboard_events(ctx: &egui::Context, vm_handle: u64, display_focus
         for event in &i.events {
             match event {
                 egui::Event::Key { key, pressed, repeat, .. } => {
-                    // Ignore key-repeat events — we only want actual press/release
-                    if *repeat {
-                        continue;
-                    }
-                    if let Some((scancode, _extended)) = scancode_for_key(*key) {
-                        if *pressed {
-                            send_key_press(scancode);
-                            last_key = Some(format!("{:?} (0x{:02X})", key, scancode));
-                        } else {
-                            send_key_release(scancode);
+                    if let Some((scancode, extended)) = scancode_for_key(*key) {
+                        let idx = scancode as usize;
+                        unsafe {
+                            if *pressed {
+                                // Only send press if not already down (dedup repeats)
+                                if !KEYS_DOWN[idx] {
+                                    KEYS_DOWN[idx] = true;
+                                    send_key_press_ext(scancode, extended);
+                                    last_key = Some(format!("{:?} (0x{:02X})", key, scancode));
+                                }
+                            } else {
+                                // Only send release if currently down
+                                if KEYS_DOWN[idx] {
+                                    KEYS_DOWN[idx] = false;
+                                    send_key_release_ext(scancode, extended);
+                                }
+                            }
                         }
                     }
                 }
@@ -173,27 +238,6 @@ pub fn handle_keyboard_events(ctx: &egui::Context, vm_handle: u64, display_focus
 /// Map ASCII characters to PS/2 scancode set 1 (for characters not covered by egui::Key)
 fn scancode_for_char(ch: char) -> Option<u8> {
     match ch {
-        '-' | '_' => Some(0x0C),
-        '=' | '+' => Some(0x0D),
-        '[' | '{' => Some(0x1A),
-        ']' | '}' => Some(0x1B),
-        '\\' | '|' => Some(0x2B),
-        ';' | ':' => Some(0x27),
-        '\'' | '"' => Some(0x28),
-        '`' | '~' => Some(0x29),
-        ',' | '<' => Some(0x33),
-        '.' | '>' => Some(0x34),
-        '/' | '?' => Some(0x35),
-        _ => None, // Letters, digits, space handled via Key events
-    }
-}
-
-const SC_LSHIFT: u8 = 0x2A;
-
-/// Map a character to its PS/2 scancode and whether Shift is required.
-/// Returns (scancode, needs_shift).
-fn char_to_scancode(ch: char) -> Option<(u8, bool)> {
-    match ch {
         'a'..='z' => {
             let idx = (ch as u8) - b'a';
             let scancodes: [u8; 26] = [
@@ -201,87 +245,81 @@ fn char_to_scancode(ch: char) -> Option<(u8, bool)> {
                 0x25, 0x26, 0x32, 0x31, 0x18, 0x19, 0x10, 0x13, 0x1F, 0x14,
                 0x16, 0x2F, 0x11, 0x2D, 0x15, 0x2C,
             ];
-            Some((scancodes[idx as usize], false))
+            Some(scancodes[idx as usize])
         }
-        'A'..='Z' => {
-            let idx = (ch as u8) - b'A';
-            let scancodes: [u8; 26] = [
-                0x1E, 0x30, 0x2E, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24,
-                0x25, 0x26, 0x32, 0x31, 0x18, 0x19, 0x10, 0x13, 0x1F, 0x14,
-                0x16, 0x2F, 0x11, 0x2D, 0x15, 0x2C,
-            ];
-            Some((scancodes[idx as usize], true))
-        }
-        '0' => Some((0x0B, false)),
-        '1' => Some((0x02, false)),
-        '2' => Some((0x03, false)),
-        '3' => Some((0x04, false)),
-        '4' => Some((0x05, false)),
-        '5' => Some((0x06, false)),
-        '6' => Some((0x07, false)),
-        '7' => Some((0x08, false)),
-        '8' => Some((0x09, false)),
-        '9' => Some((0x0A, false)),
-        ' ' => Some((0x39, false)),
-        '\n' => Some((0x1C, false)),
-        '\t' => Some((0x0F, false)),
-        // Unshifted symbols
-        '-' => Some((0x0C, false)),
-        '=' => Some((0x0D, false)),
-        '[' => Some((0x1A, false)),
-        ']' => Some((0x1B, false)),
-        '\\' => Some((0x2B, false)),
-        ';' => Some((0x27, false)),
-        '\'' => Some((0x28, false)),
-        '`' => Some((0x29, false)),
-        ',' => Some((0x33, false)),
-        '.' => Some((0x34, false)),
-        '/' => Some((0x35, false)),
-        // Shifted symbols
-        '!' => Some((0x02, true)),  // Shift+1
-        '@' => Some((0x03, true)),  // Shift+2
-        '#' => Some((0x04, true)),  // Shift+3
-        '$' => Some((0x05, true)),  // Shift+4
-        '%' => Some((0x06, true)),  // Shift+5
-        '^' => Some((0x07, true)),  // Shift+6
-        '&' => Some((0x08, true)),  // Shift+7
-        '*' => Some((0x09, true)),  // Shift+8
-        '(' => Some((0x0A, true)),  // Shift+9
-        ')' => Some((0x0B, true)),  // Shift+0
-        '_' => Some((0x0C, true)),  // Shift+-
-        '+' => Some((0x0D, true)),  // Shift+=
-        '{' => Some((0x1A, true)),  // Shift+[
-        '}' => Some((0x1B, true)),  // Shift+]
-        '|' => Some((0x2B, true)),  // Shift+\
-        ':' => Some((0x27, true)),  // Shift+;
-        '"' => Some((0x28, true)),  // Shift+'
-        '~' => Some((0x29, true)),  // Shift+`
-        '<' => Some((0x33, true)),  // Shift+,
-        '>' => Some((0x34, true)),  // Shift+.
-        '?' => Some((0x35, true)),  // Shift+/
+        '0' => Some(0x0B),
+        '1'..='9' => Some(0x02 + (ch as u8 - b'1')),
+        ' ' => Some(0x39),
+        '-' => Some(0x0C),
+        '=' => Some(0x0D),
+        '[' => Some(0x1A),
+        ']' => Some(0x1B),
+        '\\' => Some(0x2B),
+        ';' => Some(0x27),
+        '\'' => Some(0x28),
+        '`' => Some(0x29),
+        ',' => Some(0x33),
+        '.' => Some(0x34),
+        '/' => Some(0x35),
         _ => None,
     }
 }
 
-/// Inject a string as PS/2 keystrokes into the VM.
-/// Each character is mapped to its scancode, with Shift pressed as needed.
-/// Returns the number of characters successfully typed.
-pub fn type_string_to_vm(vm_handle: u64, text: &str) -> usize {
-    let mut count = 0;
+/// Map characters that require Shift to their base scancode.
+fn char_to_scancode(ch: char) -> Option<(u8, bool)> {
+    // Uppercase letters
+    if ch.is_ascii_uppercase() {
+        return scancode_for_char(ch.to_ascii_lowercase()).map(|sc| (sc, true));
+    }
+    // Check if it's a direct (unshifted) character
+    if let Some(sc) = scancode_for_char(ch) {
+        return Some((sc, false));
+    }
+    // Shifted symbols
+    match ch {
+        '!' => Some((0x02, true)),
+        '@' => Some((0x03, true)),
+        '#' => Some((0x04, true)),
+        '$' => Some((0x05, true)),
+        '%' => Some((0x06, true)),
+        '^' => Some((0x07, true)),
+        '&' => Some((0x08, true)),
+        '*' => Some((0x09, true)),
+        '(' => Some((0x0A, true)),
+        ')' => Some((0x0B, true)),
+        '_' => Some((0x0C, true)),
+        '+' => Some((0x0D, true)),
+        '{' => Some((0x1A, true)),
+        '}' => Some((0x1B, true)),
+        '|' => Some((0x2B, true)),
+        ':' => Some((0x27, true)),
+        '"' => Some((0x28, true)),
+        '~' => Some((0x29, true)),
+        '<' => Some((0x33, true)),
+        '>' => Some((0x34, true)),
+        '?' => Some((0x35, true)),
+        _ => None,
+    }
+}
+
+/// Type a string into the VM by injecting PS/2 scancodes.
+pub fn type_string_to_vm(vm_handle: u64, text: &str) {
     for ch in text.chars() {
         if let Some((scancode, needs_shift)) = char_to_scancode(ch) {
             if needs_shift {
-                libcorevm::ffi::corevm_ps2_key_press(vm_handle, SC_LSHIFT);
+                libcorevm::ffi::corevm_ps2_key_press(vm_handle, 0x2A); // Left Shift
             }
             libcorevm::ffi::corevm_ps2_key_press(vm_handle, scancode);
             libcorevm::ffi::corevm_ps2_key_release(vm_handle, scancode);
             if needs_shift {
-                libcorevm::ffi::corevm_ps2_key_release(vm_handle, SC_LSHIFT);
+                libcorevm::ffi::corevm_ps2_key_release(vm_handle, 0x2A);
             }
-            count += 1;
+        } else if ch == '\n' {
+            libcorevm::ffi::corevm_ps2_key_press(vm_handle, 0x1C);
+            libcorevm::ffi::corevm_ps2_key_release(vm_handle, 0x1C);
+        } else if ch == '\t' {
+            libcorevm::ffi::corevm_ps2_key_press(vm_handle, 0x0F);
+            libcorevm::ffi::corevm_ps2_key_release(vm_handle, 0x0F);
         }
-        // Skip characters we can't map (e.g. Unicode beyond ASCII)
     }
-    count
 }
-

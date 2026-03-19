@@ -47,6 +47,7 @@ struct TabletReport {
     buttons: u8,
     x: u16,
     y: u16,
+    wheel: i8,
 }
 
 impl TabletReport {
@@ -55,7 +56,7 @@ impl TabletReport {
             self.buttons,
             self.x as u8, (self.x >> 8) as u8,
             self.y as u8, (self.y >> 8) as u8,
-            0, // wheel
+            self.wheel as u8,
         ]
     }
 }
@@ -68,15 +69,50 @@ const DEV_DESC: [u8; 18] = [
     0x01, 0x02, 0x00, 0x01,
 ];
 
-const HID_REPORT_DESC: [u8; 53] = [
-    0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x09, 0x01, 0xA1, 0x00,
-    0x05, 0x09, 0x19, 0x01, 0x29, 0x03, 0x15, 0x00, 0x25, 0x01,
-    0x95, 0x03, 0x75, 0x01, 0x81, 0x02,
-    0x95, 0x01, 0x75, 0x05, 0x81, 0x01,
-    0x05, 0x01, 0x09, 0x30, 0x15, 0x00, 0x26, 0xFF, 0x7F,
-    0x75, 0x10, 0x95, 0x01, 0x81, 0x02,
-    0x09, 0x31, 0x81, 0x02,
-    0xC0, 0xC0,
+// HID Report Descriptor — based on QEMU usb-tablet format.
+// Report: buttons(1) + X(2) + Y(2) + wheel(1) = 6 bytes.
+const HID_REPORT_DESC: [u8; 74] = [
+    0x05, 0x01,       // Usage Page (Generic Desktop)
+    0x09, 0x02,       // Usage (Mouse)
+    0xA1, 0x01,       // Collection (Application)
+    0x09, 0x01,       //   Usage (Pointer)
+    0xA1, 0x00,       //   Collection (Physical)
+    // Buttons (3 bits + 5 padding)
+    0x05, 0x09,       //     Usage Page (Buttons)
+    0x19, 0x01,       //     Usage Minimum (1)
+    0x29, 0x03,       //     Usage Maximum (3)
+    0x15, 0x00,       //     Logical Minimum (0)
+    0x25, 0x01,       //     Logical Maximum (1)
+    0x95, 0x03,       //     Report Count (3)
+    0x75, 0x01,       //     Report Size (1)
+    0x81, 0x02,       //     Input (Data, Variable, Absolute)
+    0x95, 0x01,       //     Report Count (1)
+    0x75, 0x05,       //     Report Size (5)
+    0x81, 0x01,       //     Input (Constant) — padding
+    // X absolute (16-bit)
+    0x05, 0x01,       //     Usage Page (Generic Desktop)
+    0x09, 0x30,       //     Usage (X)
+    0x15, 0x00,       //     Logical Minimum (0)
+    0x26, 0xFF, 0x7F, //     Logical Maximum (32767)
+    0x35, 0x00,       //     Physical Minimum (0)
+    0x46, 0xFF, 0x7F, //     Physical Maximum (32767)
+    0x75, 0x10,       //     Report Size (16)
+    0x95, 0x01,       //     Report Count (1)
+    0x81, 0x02,       //     Input (Data, Variable, Absolute)
+    // Y absolute (16-bit)
+    0x09, 0x31,       //     Usage (Y)
+    0x81, 0x02,       //     Input (Data, Variable, Absolute)
+    0xC0,             //   End Collection (Physical)
+    // Scroll wheel — separate collection for relative axis
+    0x09, 0x38,       //   Usage (Wheel)
+    0x15, 0x81,       //   Logical Minimum (-127)
+    0x25, 0x7F,       //   Logical Maximum (127)
+    0x35, 0x00,       //   Physical Minimum (0)
+    0x45, 0x00,       //   Physical Maximum (0)
+    0x75, 0x08,       //   Report Size (8)
+    0x95, 0x01,       //   Report Count (1)
+    0x81, 0x06,       //   Input (Data, Variable, Relative)
+    0xC0,             // End Collection (Application)
 ];
 
 const CFG_DESC: [u8; 34] = [
@@ -85,7 +121,7 @@ const CFG_DESC: [u8; 34] = [
     // Interface
     9, 0x04, 0x00, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00,
     // HID
-    9, 0x21, 0x01, 0x01, 0x00, 0x01, 0x22, 53, 0x00,
+    9, 0x21, 0x01, 0x01, 0x00, 0x01, 0x22, 74, 0x00,
     // Endpoint IN 1, interrupt, 6 bytes, 10ms
     7, 0x05, 0x81, 0x03, 0x06, 0x00, 10,
 ];
@@ -130,7 +166,7 @@ impl Uhci {
             flbaseadd: 0,
             sofmod: 64,
             portsc: [PORT_ALWAYS1, PORT_ALWAYS1], // no devices connected initially
-            current_report: TabletReport { buttons: 0, x: 0, y: 0 },
+            current_report: TabletReport { buttons: 0, x: 0, y: 0, wheel: 0 },
             device_address: 0,
             configured: false,
             ctrl_response: Vec::new(),
@@ -155,11 +191,12 @@ impl Uhci {
         self.portsc[0] = PORT_CCS | PORT_CSC | PORT_ALWAYS1;
     }
 
-    pub fn tablet_move(&mut self, x: u16, y: u16, buttons: u8) {
+    pub fn tablet_move(&mut self, x: u16, y: u16, buttons: u8, wheel: i8) {
         self.current_report = TabletReport {
             buttons: buttons & 0x07,
             x: x.min(32767),
             y: y.min(32767),
+            wheel,
         };
     }
 

@@ -469,9 +469,9 @@ impl CoreVmApp {
                                             if text.is_empty() {
                                                 self.error_message = Some("Host clipboard is empty.".into());
                                             } else {
-                                                let typed = input::type_string_to_vm(handle, &text);
-                                                self.error_message = Some(format!(
-                                                    "Pasted {} characters to guest.", typed
+                                                input::type_string_to_vm(handle, &text);
+                                                self.info_message = Some(format!(
+                                                    "Pasted {} characters to guest.", text.len()
                                                 ));
                                             }
                                         }

@@ -2967,9 +2967,14 @@ pub extern "C" fn corevm_setup_uhci(handle: u64) -> i32 {
 /// x, y are in range 0..32767. buttons: bit0=left, bit1=right, bit2=middle.
 #[no_mangle]
 pub extern "C" fn corevm_usb_tablet_move(handle: u64, x: u16, y: u16, buttons: u8) -> i32 {
+    corevm_usb_tablet_move_wheel(handle, x, y, buttons, 0)
+}
+
+#[no_mangle]
+pub extern "C" fn corevm_usb_tablet_move_wheel(handle: u64, x: u16, y: u16, buttons: u8, wheel: i8) -> i32 {
     let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
     let uhci = match vm.uhci() { Some(u) => u, None => return -1 };
-    uhci.tablet_move(x, y, buttons);
+    uhci.tablet_move(x, y, buttons, wheel);
     0
 }
 

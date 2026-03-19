@@ -656,6 +656,10 @@ impl DisplayWidget {
 
         let has_virtio_input = libcorevm::ffi::corevm_has_virtio_input(vm_handle) != 0;
 
+        // Capture scroll wheel delta
+        let scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
+        let wheel: i8 = if scroll_y > 1.0 { 1 } else if scroll_y < -1.0 { -1 } else { 0 };
+
         // USB Tablet mode: send absolute coordinates AND PS/2 relative as fallback.
         // The guest will use whichever driver it has loaded (UHCI tablet or PS/2).
         if self.usb_tablet_mode || has_virtio_input {
@@ -672,9 +676,9 @@ impl DisplayWidget {
                     libcorevm::ffi::corevm_virtio_tablet_move(vm_handle, abs_x as u32, abs_y as u32, buttons);
                 }
 
-                // Send absolute coords to USB tablet
+                // Send absolute coords to USB tablet (with scroll wheel)
                 if self.usb_tablet_mode {
-                    libcorevm::ffi::corevm_usb_tablet_move(vm_handle, abs_x, abs_y, buttons);
+                    libcorevm::ffi::corevm_usb_tablet_move_wheel(vm_handle, abs_x, abs_y, buttons, wheel);
                 }
 
                 // Also send relative PS/2 mouse events as fallback
