@@ -25,11 +25,13 @@ impl Default for VmMetrics {
 }
 
 /// Render the status bar at the bottom.
+/// `capture_hint`: None = don't show, Some(true) = captured, Some(false) = not captured.
 pub fn render_statusbar(
     ctx: &egui::Context,
     metrics: Option<&VmMetrics>,
     vm_selected: bool,
     last_key: Option<&str>,
+    capture_hint: Option<bool>,
 ) {
     egui::TopBottomPanel::bottom("statusbar")
         .exact_height(26.0)
@@ -61,6 +63,24 @@ pub fn render_statusbar(
                         };
                         ui.colored_label(dot_color, "\u{25CF}");
                         ui.colored_label(value_color, egui::RichText::new(m.state_label).size(11.0));
+
+                        // Capture mode hint (separated by divider)
+                        if let Some(captured) = capture_hint {
+                            ui.add_space(12.0);
+                            ui.colored_label(theme::text_tertiary(), "|");
+                            ui.add_space(12.0);
+                            if captured {
+                                ui.colored_label(
+                                    theme::warning_orange(),
+                                    egui::RichText::new("Press Ctrl+Alt+G to release input").size(11.0),
+                                );
+                            } else {
+                                ui.colored_label(
+                                    theme::text_tertiary(),
+                                    egui::RichText::new("Click display to capture input").size(11.0),
+                                );
+                            }
+                        }
                     }
                     None => {
                         let msg = if vm_selected { "Ready" } else { "No VM selected" };

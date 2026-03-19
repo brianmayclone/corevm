@@ -232,6 +232,21 @@ fn image_from_png(png_data: &[u8]) -> egui::ColorImage {
     egui::ColorImage { size: [width, height], pixels }
 }
 
+/// State for the evdev input permission dialog (Linux only).
+#[cfg(target_os = "linux")]
+pub enum EvdevPermState {
+    /// Not yet checked
+    Unchecked,
+    /// Access is OK, no dialog needed
+    Ok,
+    /// No access — show dialog
+    NeedPermission,
+    /// pkexec was run, waiting for logout/login
+    GrantedNeedRelogin,
+    /// User dismissed the dialog
+    Dismissed,
+}
+
 pub struct CoreVmApp {
     pub vms: Vec<VmEntry>,
     pub layout: SidebarLayout,
@@ -258,6 +273,9 @@ pub struct CoreVmApp {
     pub sidebar_visible: bool,
     pub preferences: AppPreferences,
     pub preferences_dialog: Option<PreferencesDialog>,
+    /// evdev input device permission state (Linux only)
+    #[cfg(target_os = "linux")]
+    pub evdev_perm_state: EvdevPermState,
 }
 
 impl CoreVmApp {
@@ -310,6 +328,8 @@ impl CoreVmApp {
             sidebar_visible: true,
             preferences,
             preferences_dialog: None,
+            #[cfg(target_os = "linux")]
+            evdev_perm_state: EvdevPermState::Unchecked,
         }
     }
 
@@ -619,6 +639,98 @@ impl eframe::App for CoreVmApp {
         theme::apply_theme(ctx);
         self.load_os_icons(ctx);
 
+        // ── Linux evdev permission check (runs once on first frame) ──
+        #[cfg(target_os = "linux")]
+        {
+            use crate::engine::evdev_mouse;
+            if matches!(self.evdev_perm_state, EvdevPermState::Unchecked) {
+                if evdev_mouse::check_access() {
+                    self.evdev_perm_state = EvdevPermState::Ok;
+                } else {
+                    self.evdev_perm_state = EvdevPermState::NeedPermission;
+                }
+            }
+
+            // Show permission dialog if needed
+            match &self.evdev_perm_state {
+                EvdevPermState::NeedPermission => {
+                    let mut action = None;
+                    egui::Window::new("Input Device Access Required")
+                        .collapsible(false)
+                        .resizable(false)
+                        .default_width(440.0)
+                        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                        .show(ctx, |ui| {
+                            ui.spacing_mut().item_spacing.y = 8.0;
+                            ui.label(
+                                "CoreVM needs access to input devices (/dev/input/) for \
+                                 reliable mouse capture in virtual machines."
+                            );
+                            ui.label(
+                                "Your user account must be added to the 'input' group. \
+                                 This requires administrator privileges."
+                            );
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("Grant Access (requires password)").clicked() {
+                                    action = Some("grant");
+                                }
+                                if ui.button("Skip").clicked() {
+                                    action = Some("skip");
+                                }
+                            });
+                        });
+                    match action {
+                        Some("grant") => {
+                            match evdev_mouse::grant_access() {
+                                Ok(true) => {
+                                    self.evdev_perm_state = EvdevPermState::GrantedNeedRelogin;
+                                }
+                                Ok(false) => {
+                                    // User cancelled polkit dialog, stay on dialog
+                                }
+                                Err(e) => {
+                                    self.error_message = Some(format!("Failed to grant access: {}", e));
+                                    self.evdev_perm_state = EvdevPermState::Dismissed;
+                                }
+                            }
+                        }
+                        Some("skip") => {
+                            self.evdev_perm_state = EvdevPermState::Dismissed;
+                        }
+                        _ => {}
+                    }
+                }
+                EvdevPermState::GrantedNeedRelogin => {
+                    let mut close = false;
+                    egui::Window::new("Logout Required")
+                        .collapsible(false)
+                        .resizable(false)
+                        .default_width(400.0)
+                        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                        .show(ctx, |ui| {
+                            ui.spacing_mut().item_spacing.y = 8.0;
+                            ui.label(
+                                egui::RichText::new("Your user has been added to the 'input' group.")
+                                    .color(theme::success_green())
+                            );
+                            ui.label(
+                                "You need to log out and log back in for this change to take effect. \
+                                 Mouse capture will not work until then."
+                            );
+                            ui.add_space(4.0);
+                            if ui.button("OK").clicked() {
+                                close = true;
+                            }
+                        });
+                    if close {
+                        self.evdev_perm_state = EvdevPermState::Dismissed;
+                    }
+                }
+                _ => {}
+            }
+        }
+
         // Restore cursor if mouse capture was cleared externally (e.g., VM stopped via toolbar).
         // The display's release_mouse() can't be called from toolbar handlers because they
         // don't have ctx, so we check and restore here.
@@ -638,6 +750,9 @@ impl eframe::App for CoreVmApp {
                     egui::Event::Key { key: egui::Key::G, pressed: true, modifiers, .. }
                         if modifiers.ctrl && modifiers.alt
                 ) || matches!(e,
+                    egui::Event::Key { key: egui::Key::F, pressed: true, modifiers, .. }
+                        if modifiers.ctrl && modifiers.alt
+                ) || matches!(e,
                     egui::Event::Key { key: egui::Key::Escape, pressed: true, modifiers, .. }
                         if modifiers.ctrl && modifiers.alt
                 ))
@@ -645,16 +760,23 @@ impl eframe::App for CoreVmApp {
             // Also check via modifier state (works even if events are broken)
             let mod_release = ctx.input(|i| {
                 i.modifiers.ctrl && i.modifiers.alt
-                    && (i.key_pressed(egui::Key::G) || i.key_pressed(egui::Key::Escape))
+                    && (i.key_pressed(egui::Key::G) || i.key_pressed(egui::Key::F) || i.key_pressed(egui::Key::Escape))
             });
             if release || mod_release {
                 self.display.release_mouse(ctx);
+                // Strip release shortcut key events so they don't get forwarded to the VM
+                ctx.input_mut(|i| {
+                    i.events.retain(|e| !matches!(e,
+                        egui::Event::Key { key: egui::Key::G | egui::Key::F | egui::Key::Escape, pressed: true, modifiers, .. }
+                            if modifiers.ctrl && modifiers.alt
+                    ));
+                });
             }
         }
 
         // Intercept keyboard events BEFORE egui widgets consume Enter/Tab/etc.
-        // Use display_focused from the previous frame (updated at end of this frame).
-        if self.display_focused {
+        // Forward keys when display is focused OR mouse is captured (capture = full input grab).
+        if self.display_focused || self.display.mouse_captured {
             if let Some(uuid) = &self.selected_vm {
                 if let Some(vm) = self.vms.iter().find(|v| &v.config.uuid == uuid) {
                     if let Some(handle) = vm.vm_handle {
@@ -827,7 +949,12 @@ impl eframe::App for CoreVmApp {
 
         // Status bar
         let metrics = self.selected_metrics();
-        statusbar::render_statusbar(ctx, metrics.as_ref(), self.selected_vm.is_some(), self.last_key_label.as_deref());
+        let capture_hint = if vm_running || vm_paused {
+            Some(self.display.mouse_captured)
+        } else {
+            None
+        };
+        statusbar::render_statusbar(ctx, metrics.as_ref(), self.selected_vm.is_some(), self.last_key_label.as_deref(), capture_hint);
 
         // Sidebar
         let sidebar_actions = if self.sidebar_visible {

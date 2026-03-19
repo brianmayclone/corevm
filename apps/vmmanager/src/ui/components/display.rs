@@ -2,6 +2,9 @@ use eframe::egui;
 
 use crate::app::FrameBufferData;
 
+#[cfg(target_os = "linux")]
+use crate::engine::evdev_mouse::EvdevMouseReader;
+
 // Standard VGA 16-color palette as RGBA
 const VGA_PALETTE: [[u8; 4]; 16] = [
     [0, 0, 0, 255],       // 0: Black
@@ -406,8 +409,15 @@ pub struct DisplayWidget {
     right_click_start: Option<std::time::Instant>,
     /// Consecutive Escape press times for triple-press detection.
     escape_presses: Vec<std::time::Instant>,
-    /// USB tablet mode: send absolute coordinates, no capture needed.
+    /// USB tablet mode: send absolute coordinates via USB tablet device.
     pub usb_tablet_mode: bool,
+    /// Virtual absolute cursor position (0..32767) for USB tablet/VirtIO in capture mode.
+    abs_cursor_x: u16,
+    abs_cursor_y: u16,
+    /// Low-level evdev mouse reader (Linux only). Provides reliable raw deltas
+    /// independent of the windowing system.
+    #[cfg(target_os = "linux")]
+    evdev_mouse: Option<EvdevMouseReader>,
 }
 
 impl DisplayWidget {
@@ -428,6 +438,10 @@ impl DisplayWidget {
             right_click_start: None,
             escape_presses: Vec::new(),
             usb_tablet_mode: false,
+            abs_cursor_x: 16383, // center
+            abs_cursor_y: 16383, // center
+            #[cfg(target_os = "linux")]
+            evdev_mouse: EvdevMouseReader::open(),
         }
     }
 
@@ -499,8 +513,9 @@ impl DisplayWidget {
                 // Allocate interactive area for the display (click_and_drag for mouse)
                 let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
 
-                // Hide host cursor when hovering over the VM display area
-                if response.hovered() {
+                // Hide host cursor only when captured (locked mode hides it,
+                // but set_cursor_icon as extra safety). Show normal cursor otherwise.
+                if self.mouse_captured {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::None);
                 }
 
@@ -513,9 +528,9 @@ impl DisplayWidget {
                         egui::Color32::WHITE,
                     );
 
-                    // Show capture hint overlay when not captured and hovering (PS/2 mode only)
-                    if !self.usb_tablet_mode && !self.mouse_captured && response.hovered() {
-                        let hint = "Click to capture mouse (Ctrl+Alt+G or Ctrl+Alt+Esc to release)";
+                    // Show capture hint overlay when not captured and hovering
+                    if !self.mouse_captured && response.hovered() {
+                        let hint = "Click to capture input";
                         let text_pos = egui::pos2(rect.min.x + 8.0, rect.max.y - 24.0);
                         ui.painter().text(
                             text_pos,
@@ -527,8 +542,8 @@ impl DisplayWidget {
                     }
                 }
 
-                // Click on display → capture mouse (PS/2 mode only)
-                if !self.usb_tablet_mode && (response.clicked() || response.drag_started()) {
+                // Click on display → capture mouse and keyboard input
+                if response.clicked() || response.drag_started() {
                     ui.memory_mut(|m| m.request_focus(display_id));
                     if !self.mouse_captured {
                         self.capture_mouse(ctx);
@@ -556,28 +571,39 @@ impl DisplayWidget {
         (false, None)
     }
 
-    /// Capture the mouse: lock cursor for raw relative input.
+    /// Capture the mouse: lock cursor and start evdev reader for raw deltas.
     fn capture_mouse(&mut self, ctx: &egui::Context) {
         self.mouse_captured = true;
         self.last_mouse_pos = None;
         self.mouse_accum_x = 0.0;
         self.mouse_accum_y = 0.0;
-        self.warp_skip_frames = 2; // Skip first frames after grab to avoid phantom deltas
+        self.abs_cursor_x = 16383; // center
+        self.abs_cursor_y = 16383; // center
+        self.warp_skip_frames = 0;
         self.warp_counter = 0;
-        // Use Locked: provides raw relative deltas without cursor position warping.
-        // This avoids X11 rendering issues caused by CursorPosition viewport commands.
-        // Falls back to Confined if Locked is not supported on the platform.
+
+        // Start evdev raw mouse reader (Linux) for reliable deltas
+        #[cfg(target_os = "linux")]
+        if let Some(ref mut evdev) = self.evdev_mouse {
+            evdev.start();
+            eprintln!("[mouse] evdev reader started");
+        }
+
+        // Lock cursor — prevents it from leaving the window.
+        // Deltas come from evdev, not from egui pointer.delta().
         ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::Locked));
         ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(false));
-        eprintln!("[mouse] Captured (Locked) — Ctrl+Alt+G to release");
+        eprintln!("[mouse] Captured (Locked + evdev) — Ctrl+Alt+G/F to release");
     }
 
     /// Check all release mechanisms. Returns true if the mouse should be released.
     fn check_mouse_release(&mut self, ui: &egui::Ui, ctx: &egui::Context) -> bool {
-        // 1. Ctrl+Alt+G or Ctrl+Alt+Escape (via events — standard mechanism)
+        // 1. Ctrl+Alt+G/F/Escape (via events — standard mechanism)
         let key_release = ui.input(|i| {
             i.events.iter().any(|e| match e {
                 egui::Event::Key { key: egui::Key::G, pressed: true, modifiers, .. }
+                    if modifiers.ctrl && modifiers.alt => true,
+                egui::Event::Key { key: egui::Key::F, pressed: true, modifiers, .. }
                     if modifiers.ctrl && modifiers.alt => true,
                 egui::Event::Key { key: egui::Key::Escape, pressed: true, modifiers, .. }
                     if modifiers.ctrl && modifiers.alt => true,
@@ -585,17 +611,17 @@ impl DisplayWidget {
             })
         });
         if key_release {
-            eprintln!("[mouse] Release via Ctrl+Alt+G/Esc (event)");
+            eprintln!("[mouse] Release via Ctrl+Alt+G/F/Esc (event)");
             return true;
         }
 
-        // 2. Ctrl+Alt held + G pressed (via modifier state — works even if events are broken)
+        // 2. Ctrl+Alt held + G/F pressed (via modifier state — works even if events are broken)
         let mod_release = ctx.input(|i| {
             i.modifiers.ctrl && i.modifiers.alt
-                && (i.key_pressed(egui::Key::G) || i.key_pressed(egui::Key::Escape))
+                && (i.key_pressed(egui::Key::G) || i.key_pressed(egui::Key::F) || i.key_pressed(egui::Key::Escape))
         });
         if mod_release {
-            eprintln!("[mouse] Release via Ctrl+Alt+G/Esc (modifier state)");
+            eprintln!("[mouse] Release via Ctrl+Alt+G/F/Esc (modifier state)");
             return true;
         }
 
@@ -620,22 +646,30 @@ impl DisplayWidget {
         //     return true;
         // }
 
-        // // 5. Window focus lost — auto release
-        // let has_focus = ctx.input(|i| i.focused);
-        // if !has_focus {
-        //     eprintln!("[mouse] Release via focus loss");
-        //     return true;
-        // }
+        // 5. Window focus lost — auto release
+        let has_focus = ctx.input(|i| i.focused);
+        if !has_focus {
+            eprintln!("[mouse] Release via focus loss");
+            return true;
+        }
 
         false
     }
 
-    /// Release the mouse: show cursor and ungrab.
+    /// Release the mouse: show cursor, ungrab, and stop evdev reader.
     pub fn release_mouse(&mut self, ctx: &egui::Context) {
         self.mouse_captured = false;
         self.last_mouse_pos = None;
         self.right_click_start = None;
         self.escape_presses.clear();
+
+        // Stop evdev raw mouse reader
+        #[cfg(target_os = "linux")]
+        if let Some(ref mut evdev) = self.evdev_mouse {
+            evdev.stop();
+            eprintln!("[mouse] evdev reader stopped");
+        }
+
         ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
         ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
         eprintln!("[mouse] Released");
@@ -660,45 +694,8 @@ impl DisplayWidget {
         let scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
         let wheel: i8 = if scroll_y > 1.0 { 1 } else if scroll_y < -1.0 { -1 } else { 0 };
 
-        // USB Tablet mode: send absolute coordinates AND PS/2 relative as fallback.
-        // The guest will use whichever driver it has loaded (UHCI tablet or PS/2).
-        if self.usb_tablet_mode || has_virtio_input {
-            let hover_pos = response.hover_pos();
-
-            if let Some(pos) = hover_pos {
-                let rel_x = (pos.x - display_rect.left()) / display_rect.width();
-                let rel_y = (pos.y - display_rect.top()) / display_rect.height();
-                let abs_x = (rel_x.clamp(0.0, 1.0) * 32767.0) as u16;
-                let abs_y = (rel_y.clamp(0.0, 1.0) * 32767.0) as u16;
-
-                // Send to VirtIO tablet if available
-                if has_virtio_input {
-                    libcorevm::ffi::corevm_virtio_tablet_move(vm_handle, abs_x as u32, abs_y as u32, buttons);
-                }
-
-                // Send absolute coords to USB tablet (with scroll wheel)
-                if self.usb_tablet_mode {
-                    libcorevm::ffi::corevm_usb_tablet_move_wheel(vm_handle, abs_x, abs_y, buttons, wheel);
-                }
-
-                // Also send relative PS/2 mouse events as fallback
-                if let Some(last_pos) = self.last_mouse_pos {
-                    let dx = (pos.x - last_pos.x) as i16;
-                    let dy = -(pos.y - last_pos.y) as i16; // PS/2: Y inverted
-                    if dx != 0 || dy != 0 || buttons != self.last_mouse_buttons {
-                        libcorevm::ffi::corevm_ps2_mouse_move(vm_handle, dx, dy, buttons);
-                    }
-                } else if buttons != self.last_mouse_buttons {
-                    libcorevm::ffi::corevm_ps2_mouse_move(vm_handle, 0, 0, buttons);
-                }
-                self.last_mouse_pos = Some(pos);
-            }
-            self.last_mouse_buttons = buttons;
-            return;
-        }
-
+        // No mouse events to VM unless captured
         if !self.mouse_captured {
-            // Not captured — don't send mouse events to VM
             self.last_mouse_buttons = buttons;
             return;
         }
@@ -712,56 +709,96 @@ impl DisplayWidget {
             // Still handle button changes during skip
             if buttons != self.last_mouse_buttons {
                 libcorevm::ffi::corevm_ps2_mouse_move(vm_handle, 0, 0, buttons);
+                if self.usb_tablet_mode {
+                    libcorevm::ffi::corevm_usb_tablet_move_wheel(
+                        vm_handle, self.abs_cursor_x, self.abs_cursor_y, buttons, 0,
+                    );
+                }
                 self.last_mouse_buttons = buttons;
             }
             ctx.request_repaint();
             return;
         }
 
-        // With CursorGrab::Locked, pointer.delta() provides raw relative motion.
-        let (raw_dx, raw_dy) = ui.input(|i| {
-            let d = i.pointer.delta();
-            (d.x, d.y)
-        });
+        // Get raw mouse deltas from evdev (Linux) or fallback to egui pointer
+        let (evdev_dx, evdev_dy, evdev_wheel): (i32, i32, i32);
 
-        // Accumulate fractional movement
-        self.mouse_accum_x += raw_dx;
-        self.mouse_accum_y += raw_dy;
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(ref evdev) = self.evdev_mouse {
+                if evdev.is_running() {
+                    let (dx, dy, w) = evdev.take_deltas();
+                    evdev_dx = dx;
+                    evdev_dy = dy;
+                    evdev_wheel = w;
+                } else {
+                    evdev_dx = 0;
+                    evdev_dy = 0;
+                    evdev_wheel = 0;
+                }
+            } else {
+                evdev_dx = 0;
+                evdev_dy = 0;
+                evdev_wheel = 0;
+            }
+        }
 
-        // Extract integer part, keep fractional remainder
-        let int_x = self.mouse_accum_x as i16;
-        let int_y = self.mouse_accum_y as i16;
-        self.mouse_accum_x -= int_x as f32;
-        self.mouse_accum_y -= int_y as f32;
+        #[cfg(not(target_os = "linux"))]
+        {
+            // Fallback: use egui pointer delta (may not work on all platforms)
+            let d = ui.input(|i| i.pointer.delta());
+            evdev_dx = d.x as i32;
+            evdev_dy = d.y as i32;
+            evdev_wheel = 0;
+        }
 
-        let dx = int_x;
-        let dy = -int_y; // PS/2: positive Y = UP, screen: positive Y = DOWN
+        // evdev deltas: +X = right, +Y = down (screen coordinates)
+        let ps2_dx = evdev_dx as i16;
+        let ps2_dy = -(evdev_dy as i16); // PS/2: positive Y = UP
 
-        if dx != 0 || dy != 0 {
-            libcorevm::ffi::corevm_ps2_mouse_move(vm_handle, dx, dy, buttons);
-            // Mouse movement sent to PS/2
+        // Use evdev wheel if available, otherwise egui scroll
+        let final_wheel: i8 = if evdev_wheel != 0 {
+            evdev_wheel.clamp(-1, 1) as i8
+        } else {
+            wheel
+        };
+
+        // Send PS/2 relative mouse events
+        if ps2_dx != 0 || ps2_dy != 0 {
+            if self.mouse_debug_counter % 60 == 0 {
+                eprintln!("[mouse-evdev] dx={} dy={} abs=({},{})",
+                    ps2_dx, ps2_dy, self.abs_cursor_x, self.abs_cursor_y);
+            }
+            libcorevm::ffi::corevm_ps2_mouse_move(vm_handle, ps2_dx, ps2_dy, buttons);
         } else if buttons != self.last_mouse_buttons {
             libcorevm::ffi::corevm_ps2_mouse_move(vm_handle, 0, 0, buttons);
         }
 
-        self.last_mouse_buttons = buttons;
+        // For USB tablet / VirtIO: also send absolute coordinates.
+        // Track a virtual cursor position from accumulated deltas.
+        if evdev_dx != 0 || evdev_dy != 0 || buttons != self.last_mouse_buttons || final_wheel != 0 {
+            let scale_x = 32767.0 / display_rect.width();
+            let scale_y = 32767.0 / display_rect.height();
+            let new_x = (self.abs_cursor_x as f32 + evdev_dx as f32 * scale_x)
+                .clamp(0.0, 32767.0) as u16;
+            let new_y = (self.abs_cursor_y as f32 + evdev_dy as f32 * scale_y)
+                .clamp(0.0, 32767.0) as u16;
+            self.abs_cursor_x = new_x;
+            self.abs_cursor_y = new_y;
 
-        // Periodically re-center the invisible cursor to prevent it from
-        // reaching the screen/window edge, which stops delta generation on X11.
-        // We re-grab instead of using CursorPosition (which caused black screen
-        // on X11). Releasing and re-grabbing resets the internal cursor position.
-        self.warp_counter += 1;
-        if self.warp_counter >= 120 {
-            // Every ~2 seconds at 60fps: release and re-grab to reset cursor position.
-            // The cursor is invisible, so the user won't notice.
-            ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
-            ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::Locked));
-            self.warp_counter = 0;
-            self.warp_skip_frames = 1; // Skip next frame's delta (re-grab artifact)
-            self.mouse_accum_x = 0.0;
-            self.mouse_accum_y = 0.0;
+            if has_virtio_input {
+                libcorevm::ffi::corevm_virtio_tablet_move(
+                    vm_handle, new_x as u32, new_y as u32, buttons,
+                );
+            }
+            if self.usb_tablet_mode {
+                libcorevm::ffi::corevm_usb_tablet_move_wheel(
+                    vm_handle, new_x, new_y, buttons, final_wheel,
+                );
+            }
         }
 
+        self.last_mouse_buttons = buttons;
         ctx.request_repaint();
     }
 }

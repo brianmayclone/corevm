@@ -364,26 +364,61 @@ impl Uhci {
         let bm = data[0];
         let req = data[1];
         let w_value = u16::from_le_bytes([data[2], data[3]]);
-        let _w_index = u16::from_le_bytes([data[4], data[5]]);
+        let w_index = u16::from_le_bytes([data[4], data[5]]);
         let w_length = u16::from_le_bytes([data[6], data[7]]);
 
         // Reset control transfer state
         self.ctrl_response.clear();
         self.ctrl_response_offset = 0;
 
+        #[cfg(feature = "std")]
+        eprintln!("[uhci] SETUP bm={:#04x} req={:#04x} val={:#06x} idx={:#06x} len={}", bm, req, w_value, w_index, w_length);
+
         match (bm, req) {
             (0x00, 0x05) => {
+                // SET_ADDRESS
                 self.device_address = w_value as u8;
-                #[cfg(feature = "std")]
-                eprintln!("[uhci] SET_ADDRESS({})", self.device_address);
             }
             (0x00, 0x09) => {
+                // SET_CONFIGURATION
                 self.configured = w_value != 0;
-                #[cfg(feature = "std")]
-                eprintln!("[uhci] SET_CONFIGURATION({})", w_value);
+            }
+            (0x80, 0x00) => {
+                // GET_STATUS (device) — return 0x0000 (self-powered=0, remote-wakeup=0)
+                let len = (w_length as usize).min(2);
+                self.ctrl_response.extend_from_slice(&[0x00, 0x00][..len]);
+            }
+            (0x81, 0x00) => {
+                // GET_STATUS (interface) — return 0x0000
+                let len = (w_length as usize).min(2);
+                self.ctrl_response.extend_from_slice(&[0x00, 0x00][..len]);
+            }
+            (0x82, 0x00) => {
+                // GET_STATUS (endpoint) — return 0x0000 (not halted)
+                let len = (w_length as usize).min(2);
+                self.ctrl_response.extend_from_slice(&[0x00, 0x00][..len]);
+            }
+            (0x80, 0x08) => {
+                // GET_CONFIGURATION — return 1 if configured, 0 otherwise
+                self.ctrl_response.push(if self.configured { 1 } else { 0 });
+            }
+            (0x81, 0x0A) | (0x21, 0x0A) => {
+                // GET_IDLE / SET_IDLE (HID) — just ACK (no data response needed for SET)
+                if bm == 0x81 {
+                    self.ctrl_response.push(0); // idle rate = 0 (report only on change)
+                }
+            }
+            (0x21, 0x09) => {
+                // SET_REPORT (HID) — accept and ignore
+            }
+            (0x21, 0x0B) => {
+                // SET_PROTOCOL (HID) — accept (0=boot, 1=report)
+            }
+            (0x00, 0x01) | (0x01, 0x01) | (0x02, 0x01) => {
+                // CLEAR_FEATURE — just ACK
             }
             (0x80, 0x06) => {
-                // GET_DESCRIPTOR
+                // GET_DESCRIPTOR (device)
                 let desc_type = (w_value >> 8) as u8;
                 let desc_idx = (w_value & 0xFF) as u8;
                 let max = w_length as usize;
@@ -399,15 +434,14 @@ impl Uhci {
                         let len = CFG_DESC.len().min(max);
                         self.ctrl_response.extend_from_slice(&CFG_DESC[..len]);
                     }
-                    0x22 => {
-                        // HID Report descriptor
-                        let len = HID_REPORT_DESC.len().min(max);
-                        self.ctrl_response.extend_from_slice(&HID_REPORT_DESC[..len]);
-                    }
                     0x03 => {
                         // String descriptor
                         match desc_idx {
-                            0 => self.ctrl_response.extend_from_slice(&[4, 0x03, 0x09, 0x04]),
+                            0 => {
+                                let d = [4u8, 0x03, 0x09, 0x04];
+                                let len = d.len().min(max);
+                                self.ctrl_response.extend_from_slice(&d[..len]);
+                            }
                             1 => {
                                 let s = "CoreVM";
                                 let mut d = vec![0u8; 2 + s.len() * 2];
@@ -435,26 +469,39 @@ impl Uhci {
                             _ => {}
                         }
                     }
-                    _ => {}
+                    _ => {
+                        #[cfg(feature = "std")]
+                        eprintln!("[uhci] GET_DESCRIPTOR unknown type={:#04x}", desc_type);
+                    }
                 }
             }
             (0x81, 0x06) => {
-                // GET_DESCRIPTOR (interface) — HID report descriptor
+                // GET_DESCRIPTOR (interface) — HID class descriptors
                 let desc_type = (w_value >> 8) as u8;
-                if desc_type == 0x22 {
-                    let max = w_length as usize;
-                    let len = HID_REPORT_DESC.len().min(max);
-                    self.ctrl_response.extend_from_slice(&HID_REPORT_DESC[..len]);
+                let max = w_length as usize;
+                match desc_type {
+                    0x21 => {
+                        // HID Descriptor (from config descriptor, bytes 18..27)
+                        // Return the 9-byte HID descriptor embedded in CFG_DESC
+                        let hid_desc = &CFG_DESC[18..27];
+                        let len = hid_desc.len().min(max);
+                        self.ctrl_response.extend_from_slice(&hid_desc[..len]);
+                    }
+                    0x22 => {
+                        // HID Report descriptor
+                        let len = HID_REPORT_DESC.len().min(max);
+                        self.ctrl_response.extend_from_slice(&HID_REPORT_DESC[..len]);
+                    }
+                    _ => {
+                        #[cfg(feature = "std")]
+                        eprintln!("[uhci] GET_DESCRIPTOR(iface) unknown type={:#04x}", desc_type);
+                    }
                 }
             }
-            (0x21, 0x0A) | (0x21, 0x0B) => {
-                // SET_IDLE / SET_PROTOCOL — no data phase
+            _ => {
+                #[cfg(feature = "std")]
+                eprintln!("[uhci] UNHANDLED SETUP bm={:#04x} req={:#04x}", bm, req);
             }
-            (0x80, 0x00) => {
-                // GET_STATUS — return 0x0000 (self-powered, no remote wakeup)
-                self.ctrl_response.extend_from_slice(&[0x00, 0x00]);
-            }
-            _ => {}
         }
     }
 
