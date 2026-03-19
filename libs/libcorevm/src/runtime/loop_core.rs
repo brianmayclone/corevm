@@ -395,6 +395,13 @@ pub(crate) fn bsp_loop(
 
         poll_devices(handle, config, exit.reason, &mut last_audio);
 
+        // ── Second IRQ poll ─────────────────────────────────────────────
+        // Network RX and other device events from poll_devices may have
+        // set new interrupt causes (e.g. E1000 ICR_RXT0 from net_poll).
+        // Poll again so these interrupts are delivered immediately instead
+        // of waiting for the next cancel-kick (10ms delay kills TCP throughput).
+        corevm_poll_irqs(handle);
+
         // ── Disk cache flush ────────────────────────────────────────────
 
         cache_flush_counter += 1;
