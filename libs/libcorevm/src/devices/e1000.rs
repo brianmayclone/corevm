@@ -1238,7 +1238,18 @@ impl E1000 {
         let rdbah = self.regs[REG_RDBAH / 4] as u64;
         let rd_base = (rdbah << 32) | rdbal;
         let rdlen = self.regs[REG_RDLEN / 4] as u64;
-        if rdlen == 0 || rd_base == 0 { return; }
+        if rdlen == 0 || rd_base == 0 {
+            #[cfg(feature = "std")]
+            if !self.rx_buffer.is_empty() {
+                static mut RX_NOSETUP: u32 = 0;
+                unsafe { RX_NOSETUP += 1; }
+                if unsafe { RX_NOSETUP } <= 5 {
+                    eprintln!("[e1000] RX: ring not set up (rdbal=0x{:X} rdlen={}) pending={}",
+                        rdbal, rdlen, self.rx_buffer.len());
+                }
+            }
+            return;
+        }
 
         let rctl = self.regs[REG_RCTL / 4];
 
@@ -1264,6 +1275,15 @@ impl E1000 {
             if delivered_count >= MAX_RX_PER_POLL { break; }
 
             if head == tail {
+                #[cfg(feature = "std")]
+                {
+                    static mut RX_STALL_DIAG: u32 = 0;
+                    unsafe { RX_STALL_DIAG += 1; }
+                    if unsafe { RX_STALL_DIAG } <= 5 {
+                        eprintln!("[e1000] RX STALL: head={} tail={} rdlen={} rctl=0x{:X} pending={}",
+                            head, tail, rdlen, rctl, self.rx_buffer.len());
+                    }
+                }
                 // No available descriptors — drop excess packets to prevent
                 // unbounded memory growth.  Keep at most 64 packets queued
                 // so the guest can recover when it replenishes descriptors.
@@ -1376,6 +1396,17 @@ impl E1000 {
 
             self.dma_write(desc_addr, &desc);
             self.update_rx_stats(&pkt);
+
+            #[cfg(feature = "std")]
+            {
+                static mut RX_OK_COUNT: u32 = 0;
+                unsafe { RX_OK_COUNT += 1; }
+                if unsafe { RX_OK_COUNT } <= 3 {
+                    eprintln!("[e1000] RX OK: {} bytes desc[{}] head→{} rctl=0x{:X} icr=0x{:X}",
+                        write_len, head, (head + 1) % num_descs,
+                        rctl, self.regs[REG_ICR / 4]);
+                }
+            }
 
             head = (head + 1) % num_descs;
             delivered_count += 1;
