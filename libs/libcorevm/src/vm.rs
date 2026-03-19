@@ -946,9 +946,9 @@ impl Vm {
             // BAR0: MMIO config space (16 KB).
             pci_dev.set_bar(0, bar0_addr as u32, VIRTIO_GPU_BAR0_SIZE, true);
 
-            // Interrupt: INTA → PIRQ routing.
-            // Device 7, INTA: PIRQ = (7+0)%4 = 3 → PIRQD → IRQ 11.
-            pci_dev.set_interrupt(11, 1);
+            // Interrupt: INTA → dedicated IRQ 5 (not shared with AHCI/E1000/VirtIO-Net on IRQ 11).
+            // Using a separate IRQ avoids missed interrupts when other devices hold IRQ 11 high.
+            pci_dev.set_interrupt(5, 1);
 
             // VirtIO PCI capability list pointer.
             // Set capabilities pointer (offset 0x34) and status bit.

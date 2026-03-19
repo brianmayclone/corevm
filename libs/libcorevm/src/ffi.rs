@@ -700,8 +700,8 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                             injected += 1;
                         } else if !want_asserted && vm.ahci_irq_asserted {
                             vm.ahci_irq_asserted = false;
-                            // Only de-assert IRQ 11 if E1000 also doesn't need it
-                            if !vm.e1000_irq_asserted {
+                            // Only de-assert IRQ 11 if no other device on IRQ 11 needs it
+                            if !vm.e1000_irq_asserted && !vm.virtio_net_irq_asserted {
                                 let _ = vm.backend.set_irq_line(11, false);
                             }
                         }
@@ -877,6 +877,9 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
             // isr_status may be non-zero but nobody reads it to clear it,
             // causing IRQ 11 to stay permanently asserted → IRQ storm that
             // makes the kernel disable IRQ 11 entirely, killing AHCI too.
+            // VirtIO GPU → IRQ 5 (dedicated, no sharing with AHCI/E1000/VirtIO-Net)
+            // Previously on IRQ 11 shared with AHCI/E1000/VirtIO-Net, which caused
+            // missed interrupts when another device held the line high.
             if !vm.virtio_gpu_ptr.is_null() {
                 let gpu = unsafe { &mut *vm.virtio_gpu_ptr };
                 let want_asserted = gpu.isr_status != 0;
@@ -884,13 +887,11 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                 {
                     if want_asserted && !vm.virtio_gpu_irq_asserted {
                         vm.virtio_gpu_irq_asserted = true;
-                        let _ = vm.backend.set_irq_line(11, true);
+                        let _ = vm.backend.set_irq_line(5, true);
                         injected += 1;
                     } else if !want_asserted && vm.virtio_gpu_irq_asserted {
                         vm.virtio_gpu_irq_asserted = false;
-                        if !vm.ahci_irq_asserted && !vm.e1000_irq_asserted {
-                            let _ = vm.backend.set_irq_line(11, false);
-                        }
+                        let _ = vm.backend.set_irq_line(5, false);
                     }
                 }
                 #[cfg(feature = "windows")]
@@ -899,15 +900,13 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         vm.virtio_gpu_irq_asserted = true;
                         if !vm.pic_ptr.is_null() {
                             let pic = unsafe { &mut *vm.pic_ptr };
-                            pic.raise_irq(11);
+                            pic.raise_irq(5);
                         }
-                        vm.backend.ioapic_set_irq(11, true);
+                        vm.backend.ioapic_set_irq(5, true);
                         injected += 1;
                     } else if !want_asserted && vm.virtio_gpu_irq_asserted {
                         vm.virtio_gpu_irq_asserted = false;
-                        if !vm.ahci_irq_asserted && !vm.e1000_irq_asserted {
-                            vm.backend.ioapic_set_irq(11, false);
-                        }
+                        vm.backend.ioapic_set_irq(5, false);
                     }
                 }
                 #[cfg(not(any(feature = "linux", feature = "windows")))]
@@ -915,7 +914,7 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                     if want_asserted {
                         if !vm.pic_ptr.is_null() {
                             let pic = unsafe { &mut *vm.pic_ptr };
-                            pic.raise_irq(11);
+                            pic.raise_irq(5);
                         }
                     }
                 }
@@ -933,7 +932,7 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         injected += 1;
                     } else if !want_asserted && vm.virtio_net_irq_asserted {
                         vm.virtio_net_irq_asserted = false;
-                        if !vm.ahci_irq_asserted && !vm.e1000_irq_asserted && !vm.virtio_gpu_irq_asserted {
+                        if !vm.ahci_irq_asserted && !vm.e1000_irq_asserted {
                             let _ = vm.backend.set_irq_line(11, false);
                         }
                     }
@@ -950,7 +949,7 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         injected += 1;
                     } else if !want_asserted && vm.virtio_net_irq_asserted {
                         vm.virtio_net_irq_asserted = false;
-                        if !vm.ahci_irq_asserted && !vm.e1000_irq_asserted && !vm.virtio_gpu_irq_asserted {
+                        if !vm.ahci_irq_asserted && !vm.e1000_irq_asserted {
                             vm.backend.ioapic_set_irq(11, false);
                         }
                     }
@@ -1125,8 +1124,10 @@ pub extern "C" fn corevm_ahci_poll_irq(handle: u64) {
                 let _ = vm.backend.set_irq_line(11, true);
                 vm.ahci_irq_asserted = true;
             } else if !want_asserted && vm.ahci_irq_asserted {
-                let _ = vm.backend.set_irq_line(11, false);
                 vm.ahci_irq_asserted = false;
+                if !vm.e1000_irq_asserted && !vm.virtio_net_irq_asserted {
+                    let _ = vm.backend.set_irq_line(11, false);
+                }
             }
         }
     }
