@@ -3271,6 +3271,38 @@ pub extern "C" fn corevm_has_virtio_input(handle: u64) -> i32 {
     if vm.virtio_kbd_ptr.is_null() { 0 } else { 1 }
 }
 
+/// Set I/O activity callbacks on AHCI, E1000, and VirtioNet devices.
+/// `disk_cb(ctx, port_index)` is called on AHCI disk/cdrom I/O.
+/// `net_cb(ctx)` is called on network TX/RX.
+#[cfg(feature = "std")]
+pub fn corevm_set_io_activity_callbacks(
+    handle: u64,
+    disk_cb: Option<fn(*mut (), u8)>,
+    disk_ctx: *mut (),
+    net_cb: Option<fn(*mut ())>,
+    net_ctx: *mut (),
+) {
+    let vm = match get_vm(handle) { Some(v) => v, None => return };
+
+    if !vm.ahci_ptr.is_null() {
+        let ahci = unsafe { &mut *vm.ahci_ptr };
+        ahci.io_activity_cb = disk_cb;
+        ahci.io_activity_ctx = disk_ctx;
+    }
+
+    if !vm.e1000_ptr.is_null() {
+        let e1000 = unsafe { &mut *vm.e1000_ptr };
+        e1000.io_activity_cb = net_cb;
+        e1000.io_activity_ctx = net_ctx;
+    }
+
+    if !vm.virtio_net_ptr.is_null() {
+        let vnet = unsafe { &mut *vm.virtio_net_ptr };
+        vnet.io_activity_cb = net_cb;
+        vnet.io_activity_ctx = net_ctx;
+    }
+}
+
 // Re-export WHP debug callback setter for use by vmmanager.
 #[cfg(feature = "windows")]
 pub use crate::backend::whp::corevm_set_whp_debug_callback;

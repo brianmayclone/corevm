@@ -359,6 +359,45 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
         ..Default::default()
     };
 
+    // Wire up I/O activity callbacks so the UI can show device activity indicators
+    {
+        use crate::app::DeviceKind;
+        let activity = entry.device_activity.clone();
+
+        // AHCI callback: port 0..N = disk, ATAPI ports = cdrom
+        let activity_disk = Arc::into_raw(activity.clone()) as *mut ();
+        fn ahci_io_cb(ctx: *mut (), port: u8) {
+            let activity = unsafe { Arc::from_raw(ctx as *const std::sync::Mutex<crate::app::DeviceActivity>) };
+            if let Ok(mut a) = activity.lock() {
+                // Port 0 = first disk, port with ATAPI = cdrom
+                // Simplified: port 0 = Disk(0), port 1 = CdRom (ISO drive is typically last port)
+                if port == 0 {
+                    a.notify(DeviceKind::Disk(0));
+                } else {
+                    a.notify(DeviceKind::CdRom);
+                }
+            }
+            // Don't drop the Arc — leak it back
+            std::mem::forget(activity);
+        }
+
+        // Network callback
+        let activity_net = Arc::into_raw(activity.clone()) as *mut ();
+        fn net_io_cb(ctx: *mut ()) {
+            let activity = unsafe { Arc::from_raw(ctx as *const std::sync::Mutex<crate::app::DeviceActivity>) };
+            if let Ok(mut a) = activity.lock() {
+                a.notify(DeviceKind::Network);
+            }
+            std::mem::forget(activity);
+        }
+
+        libcorevm::ffi::corevm_set_io_activity_callbacks(
+            handle,
+            Some(ahci_io_cb), activity_disk,
+            Some(net_io_cb), activity_net,
+        );
+    }
+
     // EventHandler that routes events to DiagLog + FrameBufferData
     let handler = VmManagerEventHandler {
         fb: fb.clone(),

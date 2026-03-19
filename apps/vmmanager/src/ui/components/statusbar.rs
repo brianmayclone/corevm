@@ -32,7 +32,7 @@ pub fn render_statusbar(
     last_key: Option<&str>,
 ) {
     egui::TopBottomPanel::bottom("statusbar")
-        .exact_height(22.0)
+        .exact_height(26.0)
         .frame(
             egui::Frame::new()
                 .fill(theme::statusbar_bg())
@@ -81,19 +81,21 @@ pub fn render_statusbar(
                         ui.add_space(6.0);
                     }
 
-                    // Device icons (right-to-left, so render in reverse)
+                    // Device icons with activity dots (right-to-left, so render in reverse)
                     if let Some(m) = metrics {
                         for device in m.devices.iter().rev() {
-                            let icon_color = if device.active {
-                                theme::success_green()
-                            } else {
-                                theme::text_tertiary()
-                            };
-
                             let resp = ui.colored_label(
-                                icon_color,
+                                theme::text_secondary(),
                                 egui::RichText::new(device.icon).size(16.0),
                             );
+
+                            // Green activity dot (bottom-right of icon)
+                            if device.active {
+                                let icon_rect = resp.rect;
+                                let dot_center = icon_rect.right_bottom() - egui::vec2(2.0, 4.0);
+                                ui.painter().circle_filled(dot_center, 3.0, theme::success_green());
+                            }
+
                             resp.on_hover_text(&device.label);
                         }
                     }
