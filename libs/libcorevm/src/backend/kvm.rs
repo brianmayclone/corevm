@@ -869,6 +869,43 @@ impl KvmBackend {
                     ebx &= 0x0000_FFFF;
                 }
 
+                // Leaf 0x6 (Thermal/Power Management):
+                // Clear hardware P-state/frequency features that don't apply
+                // to a VM. Leaving them causes Linux to compare TSC frequency
+                // against P0 frequency and warn "TSC doesn't count with P0".
+                // Keep ARAT (bit 2) — Always Running APIC Timer (KVM needs it).
+                if e.function == 0x6 {
+                    eax = eax & (1 << 2); // keep only ARAT, clear everything else
+                    ebx = 0;
+                    ecx = 0;
+                }
+
+                // Leaf 0x15 (Time Stamp Counter / Core Crystal Clock):
+                // Clear to prevent the guest from trying to derive TSC from
+                // a crystal clock that doesn't exist in the VM.
+                if e.function == 0x15 {
+                    eax = 0;
+                    ebx = 0;
+                    ecx = 0;
+                }
+
+                // Leaf 0x16 (Processor Frequency Information):
+                // Clear to prevent TSC vs P0-frequency mismatch warnings.
+                // KVM provides TSC frequency via kvmclock or CPUID leaf 0x40000010.
+                if e.function == 0x16 {
+                    eax = 0;
+                    ebx = 0;
+                    ecx = 0;
+                }
+
+                // Leaf 0x80000008 (Address Size / CPU topology):
+                // ECX bits 12-15 = APIC ID size, bits 0-7 = NumPhysThreads
+                // Clear CPPC-related bits in EBX to prevent amd_pstate driver
+                // from trying to use CPPC which doesn't work in a VM.
+                if e.function == 0x80000008 {
+                    ebx = 0; // clear CPPC, RDPRU, MCOMMIT, etc.
+                }
+
                 // Leaf 0xB (Extended Topology Enumeration) is Intel-specific.
                 // On AMD, KVM_GET_SUPPORTED_CPUID returns it but with incorrect
                 // data. Linux validates APIC IDs from leaf 0xB against the real
@@ -881,6 +918,16 @@ impl KvmBackend {
                         continue; // skip leaf 0xB on AMD
                     }
                     edx = 0; // fixed per-vCPU in create_vcpu
+                }
+
+                // Leaf 0x80000007 (Advanced Power Management):
+                // Keep only Invariant TSC (EDX bit 8). Clear hardware P-state
+                // bits that don't apply to a VM (CPB, EffFreqRO, etc.).
+                if e.function == 0x80000007 {
+                    eax = 0;
+                    ebx = 0;
+                    ecx = 0;
+                    edx = edx & (1 << 8); // keep only InvariantTSC
                 }
 
                 // AMD Extended APIC ID (leaf 0x8000001E).

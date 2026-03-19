@@ -2898,6 +2898,10 @@ pub extern "C" fn corevm_setup_uhci(handle: u64) -> i32 {
     let mut uhci = Box::new(crate::devices::uhci::Uhci::new());
     let (ram_ptr, ram_size) = vm.memory.ram_mut_ptr();
     uhci.set_guest_memory(ram_ptr, ram_size);
+    // Connect the USB tablet device on port 1.
+    // The UHCI controller is only set up when the user enables USB tablet,
+    // so always connect the tablet here.
+    uhci.connect_tablet();
 
     let uhci_ptr = &*uhci as *const crate::devices::uhci::Uhci as *mut crate::devices::uhci::Uhci;
     vm.uhci_ptr = uhci_ptr;

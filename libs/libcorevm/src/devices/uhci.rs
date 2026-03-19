@@ -129,7 +129,7 @@ impl Uhci {
             frnum: 0,
             flbaseadd: 0,
             sofmod: 64,
-            portsc: [PORT_CCS | PORT_ALWAYS1, PORT_ALWAYS1], // port 1: tablet connected
+            portsc: [PORT_ALWAYS1, PORT_ALWAYS1], // no devices connected initially
             current_report: TabletReport { buttons: 0, x: 0, y: 0 },
             device_address: 0,
             configured: false,
@@ -145,6 +145,14 @@ impl Uhci {
     pub fn set_guest_memory(&mut self, ptr: *mut u8, size: usize) {
         self.ram_ptr = ptr as *const u8;
         self.ram_size = size;
+    }
+
+    /// Connect the USB tablet device on port 1.
+    /// Call this when the USB tablet is enabled in the VM config.
+    /// Without this call, port 1 reports no device and Linux won't
+    /// try to enumerate (avoiding "device descriptor read error -90").
+    pub fn connect_tablet(&mut self) {
+        self.portsc[0] = PORT_CCS | PORT_CSC | PORT_ALWAYS1;
     }
 
     pub fn tablet_move(&mut self, x: u16, y: u16, buttons: u8) {

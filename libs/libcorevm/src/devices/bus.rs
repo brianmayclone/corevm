@@ -330,11 +330,12 @@ impl PciBus {
             if size == 4 && register == 0x30 {
                 let val32 = val as u32;
                 if val32 == 0xFFFFFFFE || val32 == 0xFFFFFFFF {
-                    // Size probe: return size mask (0 if no ROM)
-                    config_write_u32(&mut dev.config_space, 0x30, dev.rom_bar_size);
+                    if dev.rom_bar_size != 0 {
+                        config_write_u32(&mut dev.config_space, 0x30, dev.rom_bar_size);
+                    }
+                    // rom_bar_size == 0 means no ROM — leave config as 0.
                     return;
                 }
-                // Normal write: store base address with enable bit
                 config_write_u32(&mut dev.config_space, 0x30, val32);
                 return;
             }
@@ -416,14 +417,6 @@ impl PciBus {
                 let bar_index = (register - 0x10) / 4;
                 if bar_index < 6 {
                     if val == 0xFFFFFFFF {
-                        #[cfg(feature = "std")]
-                        {
-                            static mut BAR_DBG: u32 = 0;
-                            unsafe { BAR_DBG += 1; if BAR_DBG <= 60 {
-                                eprintln!("[pci-cf8] BAR probe dev={} bar={} sizes={:#010X}",
-                                    device_num, bar_index, dev.bar_sizes[bar_index]);
-                            }}
-                        }
                         if dev.bar_sizes[bar_index] != 0 {
                             config_write_u32(&mut dev.config_space, register, dev.bar_sizes[bar_index]);
                         }
@@ -446,7 +439,9 @@ impl PciBus {
             // Expansion ROM BAR size probing (offset 0x30).
             if register == 0x30 {
                 if val == 0xFFFFFFFE || val == 0xFFFFFFFF {
-                    config_write_u32(&mut dev.config_space, 0x30, dev.rom_bar_size);
+                    if dev.rom_bar_size != 0 {
+                        config_write_u32(&mut dev.config_space, 0x30, dev.rom_bar_size);
+                    }
                     return;
                 }
                 config_write_u32(&mut dev.config_space, 0x30, val);
@@ -627,15 +622,6 @@ impl MmioHandler for PciMmcfgHandler {
 
     fn write(&mut self, offset: u64, size: u8, val: u64) -> Result<()> {
         let (bus, device, function, register) = Self::decode_offset(offset);
-        #[cfg(feature = "std")]
-        {
-            static mut MMCFG_WR_DBG: u32 = 0;
-            unsafe { MMCFG_WR_DBG += 1; if MMCFG_WR_DBG <= 80 {
-                if register >= 0x10 && register <= 0x24 {
-                    eprintln!("[mmcfg-wr] dev={} reg=0x{:02X} size={} val=0x{:X}", device, register, size, val);
-                }
-            }}
-        }
         let pci_bus = unsafe { &mut *self.bus_ptr };
         pci_bus.mmcfg_write(bus, device, function, register, size, val);
         Ok(())
