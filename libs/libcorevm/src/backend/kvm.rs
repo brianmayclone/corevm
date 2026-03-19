@@ -847,6 +847,7 @@ impl KvmBackend {
                 }
             }
 
+            let max_cpus = self.cpu_count.max(1);
             let mut cpuid_entries = Vec::new();
             for i in 0..nent {
                 let e = &*entries_ptr.add(i);
@@ -867,22 +868,37 @@ impl KvmBackend {
                     // features including SMP wakeup used by SeaBIOS.
                     // EBX[31:24] and EBX[23:16] are set per-vCPU in create_vcpu
                     ebx &= 0x0000_FFFF;
+
+                    // HTT (EDX bit 28): must be set when num_cpus > 1.
+                    // Despite its name ("Hyper-Threading Technology"), this bit
+                    // indicates that the package contains multiple logical
+                    // processors. Windows HAL checks this to decide whether
+                    // to start APs — without it, Windows stays uniprocessor.
+                    if max_cpus > 1 {
+                        edx |= 1 << 28;
+                    }
+                }
+
+                // Leaf 4 (Deterministic Cache Parameters, Intel):
+                // EAX[31:26] = max addressable IDs for logical CPUs sharing cache
+                // EAX[25:14] = max addressable IDs for cores in physical package
+                // Must reflect VM topology, not host topology.
+                if e.function == 4 {
+                    eax = (eax & 0x03FF_FFFF) | (((max_cpus - 1) & 0x3F) << 26);
+                    eax = (eax & 0xFC00_3FFF) | (((max_cpus - 1) & 0xFFF) << 14);
                 }
 
                 // Leaf 0x6 (Thermal/Power Management):
                 // Clear hardware P-state/frequency features that don't apply
-                // to a VM. Leaving them causes Linux to compare TSC frequency
-                // against P0 frequency and warn "TSC doesn't count with P0".
-                // Keep ARAT (bit 2) — Always Running APIC Timer (KVM needs it).
+                // to a VM. Keep ARAT (bit 2) — Always Running APIC Timer.
                 if e.function == 0x6 {
-                    eax = eax & (1 << 2); // keep only ARAT, clear everything else
+                    eax = eax & (1 << 2);
                     ebx = 0;
                     ecx = 0;
                 }
 
                 // Leaf 0x15 (Time Stamp Counter / Core Crystal Clock):
-                // Clear to prevent the guest from trying to derive TSC from
-                // a crystal clock that doesn't exist in the VM.
+                // Clear to prevent guest deriving TSC from non-existent crystal.
                 if e.function == 0x15 {
                     eax = 0;
                     ebx = 0;
@@ -891,31 +907,36 @@ impl KvmBackend {
 
                 // Leaf 0x16 (Processor Frequency Information):
                 // Clear to prevent TSC vs P0-frequency mismatch warnings.
-                // KVM provides TSC frequency via kvmclock or CPUID leaf 0x40000010.
                 if e.function == 0x16 {
                     eax = 0;
                     ebx = 0;
                     ecx = 0;
                 }
 
-                // Leaf 0x80000008 (Address Size / CPU topology):
-                // ECX bits 12-15 = APIC ID size, bits 0-7 = NumPhysThreads
-                // Clear CPPC-related bits in EBX to prevent amd_pstate driver
-                // from trying to use CPPC which doesn't work in a VM.
-                if e.function == 0x80000008 {
-                    ebx = 0; // clear CPPC, RDPRU, MCOMMIT, etc.
-                }
-
-                // Leaf 0xB (Extended Topology Enumeration) is Intel-specific.
-                // On AMD, KVM_GET_SUPPORTED_CPUID returns it but with incorrect
-                // data. Linux validates APIC IDs from leaf 0xB against the real
-                // LAPIC ID and reports "Firmware Bug: APIC id mismatch" on AMD.
-                // Fix: on AMD, drop leaf 0xB entirely so Linux falls back to
-                // leaf 1 EBX[31:24] for APIC ID detection.
-                // On Intel, fix EDX = x2APIC ID (set per-vCPU in create_vcpu).
+                // Leaf 0xB (Extended Topology Enumeration).
+                // Synthesize VM-specific topology instead of passing through
+                // host values. Our topology: 1 thread per core, max_cpus cores.
+                // EDX = x2APIC ID (set per-vCPU in create_vcpu).
                 if e.function == 0xB {
-                    if is_amd {
-                        continue; // skip leaf 0xB on AMD
+                    let subleaf = e.index;
+                    if subleaf == 0 {
+                        // SMT level: 1 thread per core
+                        eax = 0; // bits to shift = 0 (no SMT subdivision)
+                        ebx = 1; // 1 logical processor at this level
+                        ecx = (1 << 8) | 0; // level type = SMT (1), level number = 0
+                    } else if subleaf == 1 {
+                        // Core level: max_cpus cores per package
+                        // bits_to_shift: smallest power of 2 >= max_cpus
+                        let mut shift = 0u32;
+                        while (1u32 << shift) < max_cpus { shift += 1; }
+                        eax = shift;
+                        ebx = max_cpus; // total logical processors
+                        ecx = (2 << 8) | 1; // level type = Core (2), level number = 1
+                    } else {
+                        // Invalid level: terminate enumeration
+                        eax = 0;
+                        ebx = 0;
+                        ecx = subleaf; // level type = 0 (invalid)
                     }
                     edx = 0; // fixed per-vCPU in create_vcpu
                 }
@@ -928,6 +949,18 @@ impl KvmBackend {
                     ebx = 0;
                     ecx = 0;
                     edx = edx & (1 << 8); // keep only InvariantTSC
+                }
+
+                // Leaf 0x80000008 (AMD Processor Capacity):
+                // ECX[7:0] = NC = number of physical cores - 1
+                // ECX[15:12] = ApicIdSize = bits needed for APIC IDs
+                // EBX: clear CPPC/RDPRU bits that don't work in a VM.
+                if e.function == 0x8000_0008 {
+                    let nc = max_cpus - 1;
+                    let mut apic_id_size = 0u32;
+                    while (1u32 << apic_id_size) <= nc { apic_id_size += 1; }
+                    ebx = 0;
+                    ecx = (ecx & 0xFFFF_0000) | ((apic_id_size & 0xF) << 12) | (nc & 0xFF);
                 }
 
                 // AMD Extended APIC ID (leaf 0x8000001E).
@@ -955,6 +988,31 @@ impl KvmBackend {
                     ebx,
                     ecx,
                     edx,
+                });
+            }
+
+            // On AMD, KVM may not provide leaf 0xB at all. Synthesize it
+            // so Windows can enumerate the topology (Windows uses leaf 0xB
+            // even on AMD-branded guests for extended topology discovery).
+            if is_amd && !cpuid_entries.iter().any(|e| e.function == 0xB) && max_cpus > 1 {
+                // KVM_CPUID_FLAG_SIGNIFCANT_INDEX = 1 (subleaf matters)
+                let flags = 1u32;
+                let mut shift = 0u32;
+                while (1u32 << shift) < max_cpus { shift += 1; }
+                // Subleaf 0: SMT level
+                cpuid_entries.push(CpuidEntry {
+                    function: 0xB, index: 0, flags,
+                    eax: 0, ebx: 1, ecx: (1 << 8) | 0, edx: 0,
+                });
+                // Subleaf 1: Core level
+                cpuid_entries.push(CpuidEntry {
+                    function: 0xB, index: 1, flags,
+                    eax: shift, ebx: max_cpus, ecx: (2 << 8) | 1, edx: 0,
+                });
+                // Subleaf 2: terminator
+                cpuid_entries.push(CpuidEntry {
+                    function: 0xB, index: 2, flags,
+                    eax: 0, ebx: 0, ecx: 2, edx: 0,
                 });
             }
 
