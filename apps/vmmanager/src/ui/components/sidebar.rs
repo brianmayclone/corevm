@@ -204,18 +204,6 @@ fn render_vm_entry(
     let errors = vm_errors.get(uuid);
     let has_errors = errors.map_or(false, |e| !e.is_empty());
 
-    // Error icon with tooltip (rendered before the selectable row)
-    if has_errors {
-        ui.horizontal(|ui| {
-            let err_resp = ui.colored_label(
-                theme::error_red(),
-                egui::RichText::new("\u{26A0}").size(13.0), // ⚠
-            );
-            let tooltip_text = errors.unwrap().join("\n");
-            err_resp.on_hover_text(tooltip_text);
-        });
-    }
-
     // Combined icon + label as a single selectable widget
     let is_selected = selected.as_deref() == Some(uuid);
     let icon_size = 20.0;
@@ -246,17 +234,31 @@ fn render_vm_entry(
 
     let content_rect = rect.shrink2(padding);
 
-    // Paint icon
-    if let Some(&tex_id) = vm_icons.get(uuid) {
+    // Paint icon (error warning replaces OS icon)
+    let icon_rect = egui::Rect::from_min_size(
+        egui::pos2(content_rect.left(), content_rect.center().y - icon_size / 2.0),
+        egui::vec2(icon_size, icon_size),
+    );
+    if has_errors {
+        // Warning icon in place of OS icon, with tooltip
+        ui.painter().text(
+            icon_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "\u{26A0}",
+            egui::FontId::proportional(16.0),
+            theme::error_red(),
+        );
+        // Tooltip on the whole row
+        if resp.hovered() {
+            let tooltip_text = errors.unwrap().join("\n");
+            resp.clone().on_hover_text(tooltip_text);
+        }
+    } else if let Some(&tex_id) = vm_icons.get(uuid) {
         let tint = if state == VmState::Running {
             theme::icon_tint_active()
         } else {
             theme::icon_tint_inactive()
         };
-        let icon_rect = egui::Rect::from_min_size(
-            egui::pos2(content_rect.left(), content_rect.center().y - icon_size / 2.0),
-            egui::vec2(icon_size, icon_size),
-        );
         let img = egui::Image::new(egui::load::SizedTexture::new(tex_id, egui::vec2(icon_size, icon_size)))
             .tint(tint);
         img.paint_at(ui, icon_rect);
