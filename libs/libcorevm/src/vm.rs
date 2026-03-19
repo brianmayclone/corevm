@@ -367,9 +367,11 @@ impl Vm {
         {
             let mut vga = PciDevice::new(0x1234, 0x1111, 0x03, 0x00, 0x00);
             vga.device = cs.slots.vga;
-            // BAR0: linear framebuffer (prefetchable, required by Windows).
+            // BAR0+BAR1: 64-bit prefetchable linear framebuffer.
+            // Windows MSBDA driver requires 64-bit prefetchable BAR for the
+            // framebuffer. Uses BAR0 (low) + BAR1 (high, always 0).
             let bar0_size = unsafe { &*self.svga_ptr }.vram_size() as u32;
-            vga.set_bar_prefetchable(0, cs.mmio.vga_bar0 as u32, bar0_size);
+            vga.set_bar_64bit_prefetchable(0, cs.mmio.vga_bar0 as u32, bar0_size);
             // BAR2: Bochs dispi MMIO registers (4KB)
             vga.set_bar(2, cs.mmio.vga_bar2 as u32, 0x1000, true);
             // Interrupt: declare INTA so Windows PnP can allocate resources.
@@ -411,10 +413,15 @@ impl Vm {
             self.memory.add_mmio(0xFEE0_0000, 0x1000, Box::new(Lapic::new()));
         }
 
-        // Now register PIC pair covering both master and slave port ranges.
-        // Registered AFTER all other port-I/O devices so it has lowest priority.
-        // Ports 0x20-0x21 and 0xA0-0xA1 are the only ones PicPair responds to;
-        // all intermediate ports that already have handlers get matched first.
+        // Register PIC pair covering both master (0x20-0x21) and slave (0xA0-0xA1).
+        //
+        // IMPORTANT: The PIC is registered as a wide range (0x20, count=0x82) and
+        // MUST be registered LAST. IoDispatch uses first-match lookup, so all
+        // devices registered before the PIC take priority. PicPair's IoHandler
+        // returns 0xFF for any port outside 0x20/0x21/0xA0/0xA1.
+        //
+        // If a new device with ports in 0x22-0x9F is added, it must be registered
+        // BEFORE this point.
         let pic = Box::new(PicPair::new());
         self.pic_ptr = &*pic as *const PicPair as *mut PicPair;
         self.io.register(0x20, 0x82, pic);
@@ -452,7 +459,14 @@ impl Vm {
         // address is handled by the MMIO fallback proxy if any guest
         // driver tries to use it instead of the VBE address.
         // (Slot 0 = RAM below PCI hole, slot 1 = reserved for BIOS ROM, slot 3 = RAM above 4GB)
-        self.backend.set_memory_region(2, 0xE000_0000, fb_size, fb_ptr)?;
+        //
+        // Cap the LFB mapping to avoid overlapping with PCI device MMIO regions.
+        // The PCI MMIO catchall starts at 0xF200_0000 (PCI_MMIO_CATCHALL_BASE in ffi.rs),
+        // so the LFB must not extend past 0xF1FF_FFFF. Maximum safe size = 0x1200_0000 (288MB).
+        // IOAPIC at 0xFEC00000 and LAPIC at 0xFEE00000 are even harder limits.
+        let max_lfb_size: u64 = 0x1200_0000; // 288 MB, up to 0xF1FFFFFF
+        let lfb_size = fb_size.min(max_lfb_size);
+        self.backend.set_memory_region(2, 0xE000_0000, lfb_size, fb_ptr)?;
 
         // Slot 4: VGA LFB at PCI BAR0 address.
         // Linux bochs-drm uses the PCI BAR0 address, not the VBE default.
@@ -672,8 +686,8 @@ impl Vm {
     fn vga_bar2_offset(&self, addr: u64) -> Option<u64> {
         if self.pci_bus_ptr.is_null() { return None; }
         let pci_bus = unsafe { &*self.pci_bus_ptr };
-        // VGA is device 2 (00:02.0) — read BAR2 (config offset 0x18)
-        if let Some(vga_dev) = pci_bus.devices.iter().find(|d| d.device == 2 && d.function == 0) {
+        let vga_slot = self.chipset.slots.vga;
+        if let Some(vga_dev) = pci_bus.devices.iter().find(|d| d.device == vga_slot && d.function == 0) {
             let bar2 = u32::from_le_bytes([
                 vga_dev.config_space[0x18],
                 vga_dev.config_space[0x19],

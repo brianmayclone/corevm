@@ -96,6 +96,29 @@ impl MmioDispatch {
         (self.min_base, self.max_end)
     }
 
+    /// Update the base address of an existing MMIO region.
+    ///
+    /// Finds the region with `old_base` and moves it to `new_base`.
+    /// Returns `true` if the region was found and updated.
+    pub fn update_region_base(&mut self, old_base: u64, new_base: u64) -> bool {
+        if old_base == new_base { return true; }
+        for region in &mut self.regions {
+            if region.base == old_base {
+                region.base = new_base;
+                // Recompute min/max bounds.
+                self.min_base = u64::MAX;
+                self.max_end = 0;
+                for r in &self.regions {
+                    if r.base < self.min_base { self.min_base = r.base; }
+                    let end = r.base + r.size;
+                    if end > self.max_end { self.max_end = end; }
+                }
+                return true;
+            }
+        }
+        false
+    }
+
     #[inline]
     pub fn find(&mut self, addr: u64) -> Option<&mut MmioRegion> {
         // Fast rejection: skip linear scan if address is outside all MMIO regions.

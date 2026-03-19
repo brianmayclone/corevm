@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
 use eframe::egui;
-use crate::theme;
+use crate::ui::theme;
 
 const MAX_LOG_ENTRIES: usize = 2000;
 

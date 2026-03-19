@@ -1,5 +1,5 @@
 use eframe::egui;
-use crate::theme;
+use crate::ui::theme;
 
 /// Actions the toolbar can trigger
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -16,15 +16,15 @@ pub enum ToolbarAction {
 
 fn icon_button(ui: &mut egui::Ui, icon: &str, tooltip: &str, enabled: bool, accent: bool) -> bool {
     let color = if !enabled {
-        theme::TEXT_TERTIARY
+        theme::text_tertiary()
     } else if accent {
-        egui::Color32::WHITE
+        theme::text_on_accent()
     } else {
-        theme::TEXT_PRIMARY
+        theme::text_primary()
     };
 
     let fill = if accent && enabled {
-        theme::ACCENT_BLUE
+        theme::accent_blue()
     } else {
         egui::Color32::TRANSPARENT
     };
@@ -76,7 +76,7 @@ pub fn render_toolbar(
     }
 
     ui.add_space(2.0);
-    ui.colored_label(egui::Color32::from_rgb(50, 50, 52), "|");
+    ui.colored_label(theme::separator_color(), "|");
     ui.add_space(2.0);
 
     // Settings
@@ -97,7 +97,7 @@ pub fn render_toolbar(
     }
 
     ui.add_space(2.0);
-    ui.colored_label(egui::Color32::from_rgb(50, 50, 52), "|");
+    ui.colored_label(theme::separator_color(), "|");
     ui.add_space(2.0);
 
     // Clipboard Host → Guest (paste host clipboard as keystrokes)

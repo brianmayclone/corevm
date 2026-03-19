@@ -1689,6 +1689,10 @@ pub extern "C" fn corevm_setup_acpi_tables(handle: u64) -> i32 {
     let fw_cfg = unsafe { &mut *vm.fw_cfg_ptr };
 
     let num_cpus = vm.cpu_count.max(1);
+
+    // Tell fw_cfg the actual CPU count so SeaBIOS discovers and starts APs.
+    fw_cfg.set_cpu_count(num_cpus as u16);
+
     // Auto-detect which PCI devices are present from their pointers
     let devices = crate::devices::acpi_tables::AcpiDeviceConfig {
         has_e1000: !vm.e1000_ptr.is_null(),
@@ -1733,6 +1737,10 @@ pub extern "C" fn corevm_setup_acpi_tables_with_hpet(handle: u64) -> i32 {
     }
     let fw_cfg = unsafe { &mut *vm.fw_cfg_ptr };
     let num_cpus = vm.cpu_count.max(1);
+
+    // Tell fw_cfg the actual CPU count so SeaBIOS discovers and starts APs.
+    fw_cfg.set_cpu_count(num_cpus as u16);
+
     // Auto-detect which PCI devices are present from their pointers
     let devices = crate::devices::acpi_tables::AcpiDeviceConfig {
         has_e1000: !vm.e1000_ptr.is_null(),

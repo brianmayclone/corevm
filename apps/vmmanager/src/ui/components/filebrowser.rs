@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use eframe::egui;
-use crate::theme;
+use crate::ui::theme;
 
 pub struct FileBrowserDialog {
     current_dir: PathBuf,
@@ -132,7 +132,7 @@ impl FileBrowserDialog {
                 ui.horizontal(|ui| {
                     ui.label("Path:");
                     let dir_str = self.current_dir.to_string_lossy().to_string();
-                    ui.label(egui::RichText::new(&dir_str).monospace().color(egui::Color32::from_rgb(180, 180, 180)));
+                    ui.label(egui::RichText::new(&dir_str).monospace().color(theme::text_mono()));
                 });
                 ui.separator();
 
@@ -193,7 +193,7 @@ impl FileBrowserDialog {
                 });
 
                 if let Some(err) = &self.error {
-                    ui.colored_label(theme::ERROR_RED, err);
+                    ui.colored_label(theme::error_red(), err);
                 }
 
                 // Buttons
@@ -204,7 +204,7 @@ impl FileBrowserDialog {
                             button_close = true;
                         }
                         let ok_label = if self.save_mode { "Save" } else { "Open" };
-                        if ui.add(egui::Button::new(ok_label).fill(theme::ACCENT_BLUE).min_size(egui::vec2(80.0, 28.0))).clicked() {
+                        if ui.add(egui::Button::new(ok_label).fill(theme::accent_blue()).min_size(egui::vec2(80.0, 28.0))).clicked() {
                             if self.filename.is_empty() {
                                 self.error = Some("Please enter a filename.".into());
                             } else {

@@ -1,7 +1,18 @@
-//! Shared dialog helpers and re-exports.
+//! Dialog windows: VM creation, disk management, settings, about, snapshots.
+//!
+//! Also provides shared helpers (`labeled_row`, `button_row`) and constants
+//! used across all dialog implementations.
+
+pub mod about;
+pub mod add_disk;
+pub mod create_disk;
+pub mod create_vm;
+pub mod disk_pool;
+pub mod settings;
+pub mod snapshots;
 
 use eframe::egui;
-use crate::theme;
+use crate::ui::theme;
 
 pub const LABEL_WIDTH: f32 = 100.0;
 pub const FIELD_MIN_WIDTH: f32 = 220.0;
@@ -27,7 +38,7 @@ pub fn button_row(ui: &mut egui::Ui, ok_label: &str) -> (bool, bool) {
             if ui.add(egui::Button::new("Cancel").min_size(BUTTON_SIZE)).clicked() {
                 cancel = true;
             }
-            if ui.add(egui::Button::new(ok_label).fill(theme::ACCENT_BLUE).min_size(BUTTON_SIZE)).clicked() {
+            if ui.add(egui::Button::new(ok_label).fill(theme::accent_blue()).min_size(BUTTON_SIZE)).clicked() {
                 ok = true;
             }
         });
@@ -35,10 +46,11 @@ pub fn button_row(ui: &mut egui::Ui, ok_label: &str) -> (bool, bool) {
     (ok, cancel)
 }
 
-// Re-exports from separate dialog files
-pub use crate::dialog_create_vm::CreateVmDialog;
-pub use crate::dialog_create_disk::CreateDiskDialog;
-pub use crate::dialog_add_disk::{AddDiskDialog, AddDiskMode};
-pub use crate::dialog_disk_pool::DiskPoolDialog;
-pub use crate::dialog_about::AboutDialog;
-pub use crate::dialog_snapshots::SnapshotsDialog;
+// Re-exports for convenient access
+pub use about::AboutDialog;
+pub use add_disk::{AddDiskDialog, AddDiskMode};
+pub use create_disk::CreateDiskDialog;
+pub use create_vm::CreateVmDialog;
+pub use disk_pool::DiskPoolDialog;
+pub use settings::SettingsDialog;
+pub use snapshots::SnapshotsDialog;

@@ -124,9 +124,40 @@ impl PciDevice {
         self.set_bar_ex(bar_index, address, size, is_mmio, false);
     }
 
-    /// Set a BAR with prefetchable flag support.
+    /// Set a BAR with prefetchable flag support (32-bit).
     pub fn set_bar_prefetchable(&mut self, bar_index: usize, address: u32, size: u32) {
         self.set_bar_ex(bar_index, address, size, true, true);
+    }
+
+    /// Configure a 64-bit prefetchable MMIO BAR.
+    ///
+    /// Uses two consecutive BARs: `bar_index` holds the low 32 bits with
+    /// type=10b (64-bit) and prefetchable=1, `bar_index+1` holds the high
+    /// 32 bits (always 0 for addresses below 4GB).
+    ///
+    /// Required by the Windows Microsoft Basic Display Adapter driver which
+    /// only accepts 64-bit prefetchable framebuffer BARs.
+    pub fn set_bar_64bit_prefetchable(&mut self, bar_index: usize, address: u32, size: u32) {
+        if bar_index >= 5 { return; } // need two consecutive BARs
+
+        let offset_lo = 0x10 + bar_index * 4;
+        let offset_hi = 0x10 + (bar_index + 1) * 4;
+
+        // Low BAR: address with type=10b (64-bit), prefetchable=1
+        // Bits: [31:4]=address, [3]=prefetchable, [2:1]=10 (64-bit), [0]=0 (MMIO)
+        let bar_lo = (address & 0xFFFFFFF0) | 0x0C; // 0x0C = prefetchable(8) | 64-bit(4)
+        config_write_u32(&mut self.config_space, offset_lo, bar_lo);
+
+        // High BAR: upper 32 bits = 0 (all our addresses are below 4GB)
+        config_write_u32(&mut self.config_space, offset_hi, 0);
+
+        // Size mask for low BAR
+        if size > 0 {
+            let mask = !(size - 1);
+            self.bar_sizes[bar_index] = (mask & 0xFFFFFFF0) | (bar_lo & 0x0F);
+            // High BAR size mask: all zeros (size fits in 32 bits)
+            self.bar_sizes[bar_index + 1] = 0;
+        }
     }
 
     fn set_bar_ex(&mut self, bar_index: usize, address: u32, size: u32, is_mmio: bool, prefetchable: bool) {
@@ -338,6 +369,27 @@ impl PciBus {
                 }
                 config_write_u32(&mut dev.config_space, 0x30, val32);
                 return;
+            }
+
+            // Sub-dword writes to BAR region: protect type bits in the
+            // lowest byte of each BAR. Without this, byte/word writes via
+            // MMCONFIG could corrupt the I/O/MMIO type indicator bits.
+            if (size == 1 || size == 2) && register >= 0x10 && register <= 0x27 {
+                let bar_base = register & !0x03; // align down to BAR start
+                let bar_index = (bar_base - 0x10) / 4;
+                if bar_index < 6 && register == bar_base {
+                    // Writing to the lowest byte of a BAR — preserve type bits.
+                    let is_io = dev.config_space[bar_base] & 0x01 != 0;
+                    let preserve_mask = if is_io { 0x03u8 } else { 0x0Fu8 };
+                    let type_bits = dev.config_space[bar_base] & preserve_mask;
+                    let new_byte = (val as u8 & !preserve_mask) | type_bits;
+                    dev.config_space[register] = new_byte;
+                    if size == 2 && register + 1 < dev.config_space.len() {
+                        dev.config_space[register + 1] = (val >> 8) as u8;
+                    }
+                    return;
+                }
+                // Writes to non-base bytes of a BAR are allowed through.
             }
 
             // Read-only field protection.

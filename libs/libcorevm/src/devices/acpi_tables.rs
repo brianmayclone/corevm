@@ -114,8 +114,13 @@ fn build_fadt() -> Vec<u8> {
     write_u16(&mut t, 98, 0x03E9);
     // IAPC_BOOT_ARCH (8042, legacy devices)
     write_u16(&mut t, 109, 0x0003);
-    // FLAGS: WBINVD(0) | PROC_C1(2) | SLP_BUTTON(5) | RTC_S4(7) | TMR_VAL_EXT(8)
-    write_u32(&mut t, 112, 0x000001A5);
+    // FLAGS: WBINVD(0) | PROC_C1(2) | SLP_BUTTON(5) | RTC_S4(7) | TMR_VAL_EXT(8) | RESET_REG_SUP(10)
+    write_u32(&mut t, 112, 0x000005A5);
+
+    // RESET_REG (offset 116, GAS 12 bytes): port 0xCF9, byte access
+    write_gas_io(&mut t, 116, 0x0CF9, 8);
+    // RESET_VALUE (offset 128): 0x06 = full system reset via port 0xCF9
+    t[128] = 0x06;
 
     // ACPI 2.0 extended fields (offset 132+)
     // X_FIRMWARE_CTRL (u64 at offset 132), patched by loader
@@ -531,6 +536,19 @@ fn build_dsdt_with_cpus(num_cpus: u32, devices: &AcpiDeviceConfig, pci_mmio_star
         crs_body.extend_from_slice(&0xFFFFu32.to_le_bytes());
         crs_body.extend_from_slice(&0u32.to_le_bytes());
         crs_body.extend_from_slice(&0xF300u32.to_le_bytes());
+
+        // DWord Memory range: VGA legacy memory (0xA0000-0xBFFFF)
+        // Required by Windows to assign VGA resources to the display adapter.
+        // Without this, Windows reports Code 12 "not enough resources".
+        crs_body.extend_from_slice(&[0x87, 0x17, 0x00]); // tag + length(23) LE
+        crs_body.push(0x00); // ResourceType=0 (Memory)
+        crs_body.push(0x0C); // MinFixed | MaxFixed
+        crs_body.push(0x01); // ReadWrite
+        crs_body.extend_from_slice(&0u32.to_le_bytes()); // _GRA
+        crs_body.extend_from_slice(&0x000A_0000u32.to_le_bytes()); // _MIN
+        crs_body.extend_from_slice(&0x000B_FFFFu32.to_le_bytes()); // _MAX
+        crs_body.extend_from_slice(&0u32.to_le_bytes()); // _TRA
+        crs_body.extend_from_slice(&0x0002_0000u32.to_le_bytes()); // _LEN (128KB)
 
         // DWord Memory range: PCI MMIO window
         // Range is determined by chipset config — passed in from caller.

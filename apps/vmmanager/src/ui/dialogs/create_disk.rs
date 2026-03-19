@@ -1,6 +1,6 @@
 use eframe::egui;
-use crate::theme;
-use crate::dialogs::{labeled_row, button_row, FIELD_MIN_WIDTH};
+use crate::ui::theme;
+use crate::ui::dialogs::{labeled_row, button_row, FIELD_MIN_WIDTH};
 
 #[derive(PartialEq, Clone, Copy)]
 enum SizeUnit { MB, GB, TB }
@@ -24,7 +24,7 @@ impl CreateDiskDialog {
 
     pub fn with_vm_name(vm_name: &str) -> Self {
         let auto_path = if !vm_name.is_empty() {
-            let next = crate::platform::next_disk_name(vm_name);
+            let next = crate::engine::platform::next_disk_name(vm_name);
             next.to_string_lossy().to_string()
         } else {
             String::new()
@@ -112,7 +112,7 @@ impl CreateDiskDialog {
                 });
 
                 if let Some(err) = &self.error {
-                    ui.colored_label(theme::ERROR_RED, err);
+                    ui.colored_label(theme::error_red(), err);
                 }
 
                 ui.separator();
@@ -125,7 +125,7 @@ impl CreateDiskDialog {
                         // If only a filename (no directory), place it in the VM directory
                         let p = std::path::Path::new(&self.path);
                         if p.parent().map_or(true, |par| par.as_os_str().is_empty()) && !self.vm_name.is_empty() {
-                            let vm_dir = crate::platform::vm_dir(&self.vm_name);
+                            let vm_dir = crate::engine::platform::vm_dir(&self.vm_name);
                             let _ = std::fs::create_dir_all(&vm_dir);
                             self.path = vm_dir.join(&self.path).to_string_lossy().to_string();
                         }

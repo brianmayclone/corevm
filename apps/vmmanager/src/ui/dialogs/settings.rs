@@ -1,7 +1,7 @@
 use eframe::egui;
 use crate::app::FilePickTarget;
 use crate::config::{VmConfig, BootOrder, BiosType, RamAlloc, NetMode, MacMode, GuestOs, GuestArch};
-use crate::theme;
+use crate::ui::theme;
 
 const LABEL_WIDTH: f32 = 110.0;
 const FIELD_MIN_WIDTH: f32 = 250.0;
@@ -21,15 +21,15 @@ fn labeled_row(ui: &mut egui::Ui, label: &str, add_contents: impl FnOnce(&mut eg
 
 fn host_info_bar(ui: &mut egui::Ui, text: &str) {
     egui::Frame::new()
-        .fill(egui::Color32::from_rgb(35, 40, 48))
+        .fill(theme::info_bar_bg())
         .corner_radius(egui::CornerRadius::same(4))
         .inner_margin(egui::Margin::symmetric(10, 6))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.colored_label(theme::ACCENT_BLUE, egui::RichText::new("\u{2139}").size(14.0)); // ℹ
+                ui.colored_label(theme::accent_blue(), egui::RichText::new("\u{2139}").size(14.0)); // ℹ
                 ui.add_space(4.0);
                 ui.colored_label(
-                    egui::Color32::from_rgb(160, 170, 185),
+                    theme::info_bar_text(),
                     egui::RichText::new(text).size(12.0),
                 );
             });
@@ -38,7 +38,7 @@ fn host_info_bar(ui: &mut egui::Ui, text: &str) {
 
 fn section_heading(ui: &mut egui::Ui, text: &str) {
     ui.add_space(6.0);
-    ui.label(egui::RichText::new(text).strong().color(theme::ACCENT_BLUE));
+    ui.label(egui::RichText::new(text).strong().color(theme::accent_blue()));
     ui.separator();
     ui.add_space(2.0);
 }
@@ -210,7 +210,7 @@ impl SettingsDialog {
                         if ui.add(egui::Button::new("Cancel").min_size(BUTTON_SIZE)).clicked() {
                             button_close = true;
                         }
-                        if ui.add(egui::Button::new("Save").fill(theme::ACCENT_BLUE).min_size(BUTTON_SIZE)).clicked() {
+                        if ui.add(egui::Button::new("Save").fill(theme::accent_blue()).min_size(BUTTON_SIZE)).clicked() {
                             self.saved = true;
                             button_close = true;
                         }
@@ -229,13 +229,13 @@ impl SettingsDialog {
     // ── Sidebar ──────────────────────────────────────────────────────────
 
     fn render_sidebar(&mut self, ui: &mut egui::Ui) {
-        let sidebar_bg = egui::Color32::from_rgb(30, 30, 32);
-        let selected_bg = egui::Color32::from_rgb(50, 50, 55);
-        let hover_bg = egui::Color32::from_rgb(42, 42, 46);
-        let text_normal = egui::Color32::from_rgb(180, 180, 185);
-        let text_selected = egui::Color32::from_rgb(240, 240, 245);
-        let text_hover = egui::Color32::from_rgb(220, 220, 225);
-        let icon_color = theme::ACCENT_BLUE;
+        let sidebar_bg = theme::settings_sidebar_bg();
+        let selected_bg = theme::settings_selected_bg();
+        let hover_bg = theme::settings_hover_bg();
+        let text_normal = theme::text_secondary();
+        let text_selected = theme::text_bright();
+        let text_hover = theme::text_value();
+        let icon_color = theme::accent_blue();
 
         egui::Frame::new()
             .fill(sidebar_bg)
@@ -329,7 +329,7 @@ impl SettingsDialog {
                                 ui.separator();
                             }
                             ui.colored_label(
-                                egui::Color32::from_rgb(120, 120, 130),
+                                theme::text_subtle(),
                                 egui::RichText::new(cat).strong().small(),
                             );
                             current_cat = cat;
@@ -354,7 +354,7 @@ impl SettingsDialog {
     }
 
     fn page_processor(&mut self, ui: &mut egui::Ui) {
-        let host = crate::platform::host_info();
+        let host = crate::engine::platform::host_info();
 
         section_heading(ui, "Processor");
 
@@ -381,12 +381,12 @@ impl SettingsDialog {
             ui.add_space(LABEL_WIDTH + 8.0);
             if warn {
                 ui.colored_label(
-                    theme::WARNING_ORANGE,
+                    theme::warning_orange(),
                     format!("Exceeds host cores ({})! Performance may suffer.", host.cpu_cores),
                 );
             } else {
                 ui.colored_label(
-                    egui::Color32::from_rgb(110, 110, 115),
+                    theme::text_muted(),
                     format!("Recommended: {} cores (half of host)", recommended),
                 );
             }
@@ -394,7 +394,7 @@ impl SettingsDialog {
     }
 
     fn page_memory(&mut self, ui: &mut egui::Ui) {
-        let host = crate::platform::host_info();
+        let host = crate::engine::platform::host_info();
         let host_ram = host.ram_total_mb;
         let recommended_max = (host_ram * 3 / 4) as u32; // 75% of host
         let slider_max = (host_ram as f32).max(1024.0);
@@ -424,16 +424,16 @@ impl SettingsDialog {
 
             if gb >= 1.0 {
                 ui.colored_label(
-                    egui::Color32::from_rgb(180, 180, 185),
+                    theme::text_secondary(),
                     format!("{:.1} GB", gb),
                 );
                 ui.colored_label(
-                    egui::Color32::from_rgb(100, 100, 105),
+                    theme::text_dim(),
                     format!("({}% of host)", pct),
                 );
             } else {
                 ui.colored_label(
-                    egui::Color32::from_rgb(180, 180, 185),
+                    theme::text_secondary(),
                     format!("{} MB", self.config.ram_mb),
                 );
             }
@@ -444,7 +444,7 @@ impl SettingsDialog {
             ui.horizontal(|ui| {
                 ui.add_space(LABEL_WIDTH + 8.0);
                 ui.colored_label(
-                    theme::WARNING_ORANGE,
+                    theme::warning_orange(),
                     format!("Exceeds recommended maximum ({:.1} GB). Host may become unstable.",
                         recommended_max as f64 / 1024.0),
                 );
@@ -480,7 +480,7 @@ impl SettingsDialog {
         ui.horizontal(|ui| {
             ui.add_space(LABEL_WIDTH + 8.0);
             ui.colored_label(
-                egui::Color32::from_rgb(100, 100, 105),
+                theme::text_dim(),
                 if self.config.ram_alloc == RamAlloc::OnDemand {
                     "Memory is allocated as the guest uses it."
                 } else {
@@ -509,7 +509,7 @@ impl SettingsDialog {
         ui.horizontal(|ui| {
             ui.add_space(LABEL_WIDTH + 8.0);
             ui.colored_label(
-                egui::Color32::from_rgb(100, 100, 105),
+                theme::text_dim(),
                 match self.config.gpu_model {
                     GpuModel::StdVga => "Bochs VBE compatible adapter. Works with all guest operating systems.",
                     GpuModel::VirtioGpu => "VirtIO GPU with 3D acceleration. Requires Vulkan on host. Drivers via Windows Update.",
@@ -543,7 +543,7 @@ impl SettingsDialog {
             } else {
                 "128-256 MB: Maximum resolution support."
             };
-            ui.colored_label(egui::Color32::from_rgb(100, 100, 105), hint);
+            ui.colored_label(theme::text_dim(), hint);
         });
     }
 
@@ -557,13 +557,13 @@ impl SettingsDialog {
         if self.config.disk_images.is_empty() {
             ui.add_space(8.0);
             ui.colored_label(
-                egui::Color32::from_rgb(120, 120, 125),
+                theme::text_subtle(),
                 "No hard disks attached to this virtual machine.",
             );
             ui.add_space(8.0);
         } else {
-            let card_bg = egui::Color32::from_rgb(38, 38, 40);
-            let card_border = egui::Color32::from_rgb(55, 55, 58);
+            let card_bg = theme::disk_card_bg();
+            let card_border = theme::disk_card_border();
 
             for (i, disk) in self.config.disk_images.iter().enumerate() {
                 let filename = std::path::Path::new(disk)
@@ -581,7 +581,7 @@ impl SettingsDialog {
                     "File not found!".into()
                 };
 
-                let border_color = if file_exists { card_border } else { theme::ERROR_RED };
+                let border_color = if file_exists { card_border } else { theme::error_red() };
 
                 egui::Frame::new()
                     .fill(card_bg)
@@ -591,18 +591,18 @@ impl SettingsDialog {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             // Disk icon + name
-                            let icon_color = if file_exists { theme::ACCENT_BLUE } else { theme::ERROR_RED };
+                            let icon_color = if file_exists { theme::accent_blue() } else { theme::error_red() };
                             ui.colored_label(icon_color, egui::RichText::new("\u{1F4BE}").size(18.0));
                             ui.add_space(4.0);
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new(&filename)
-                                    .color(egui::Color32::from_rgb(210, 210, 215))
+                                    .color(theme::text_value())
                                     .strong());
                                 ui.horizontal(|ui| {
                                     let info_color = if file_exists {
-                                        egui::Color32::from_rgb(120, 120, 125)
+                                        theme::text_subtle()
                                     } else {
-                                        theme::ERROR_RED
+                                        theme::error_red()
                                     };
                                     ui.colored_label(
                                         info_color,
@@ -610,12 +610,12 @@ impl SettingsDialog {
                                     );
                                 });
                                 ui.colored_label(
-                                    egui::Color32::from_rgb(100, 100, 105),
+                                    theme::text_dim(),
                                     egui::RichText::new(disk).small(),
                                 );
                                 if !file_exists {
                                     ui.colored_label(
-                                        theme::ERROR_RED,
+                                        theme::error_red(),
                                         egui::RichText::new("This disk image could not be found. Remove or re-create it.").small(),
                                     );
                                 }
@@ -657,20 +657,20 @@ impl SettingsDialog {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         ui.colored_label(
-                            theme::WARNING_ORANGE,
+                            theme::warning_orange(),
                             egui::RichText::new("\u{26A0}").size(24.0),
                         );
                         ui.add_space(8.0);
                         ui.vertical(|ui| {
                             ui.colored_label(
-                                egui::Color32::from_rgb(255, 80, 80),
+                                theme::danger_red(),
                                 egui::RichText::new("WARNING: This will permanently destroy all data!").strong(),
                             );
                             ui.add_space(4.0);
                             ui.label("The virtual disk will be completely erased and recreated\nas an empty disk of the same size. This cannot be undone.");
                             ui.add_space(4.0);
                             ui.colored_label(
-                                egui::Color32::from_rgb(160, 160, 165),
+                                theme::text_disabled(),
                                 egui::RichText::new(&disk_name).small(),
                             );
                         });
@@ -683,7 +683,7 @@ impl SettingsDialog {
                         ui.add_space(8.0);
                         let btn = egui::Button::new(
                             egui::RichText::new("Reset Disk").color(egui::Color32::WHITE),
-                        ).fill(egui::Color32::from_rgb(180, 40, 40));
+                        ).fill(theme::danger_button_bg());
                         if ui.add(btn).clicked() {
                             action = 2;
                         }
@@ -714,7 +714,7 @@ impl SettingsDialog {
             }
             if !can_add {
                 ui.colored_label(
-                    egui::Color32::from_rgb(120, 120, 125),
+                    theme::text_subtle(),
                     format!("Maximum of {} disks reached.", max_disks),
                 );
             }
@@ -735,7 +735,7 @@ impl SettingsDialog {
             ui.horizontal(|ui| {
                 ui.add_space(LABEL_WIDTH + 8.0);
                 ui.colored_label(
-                    egui::Color32::from_rgb(100, 100, 105),
+                    theme::text_dim(),
                     match self.config.disk_cache_mode {
                         crate::config::DiskCacheMode::WriteBack =>
                             "Best performance. Writes are buffered and flushed periodically.\nSmall risk of data loss on host crash.",
@@ -782,7 +782,7 @@ impl SettingsDialog {
                 ui.horizontal(|ui| {
                     ui.add_space(LABEL_WIDTH + 8.0);
                     ui.colored_label(
-                        theme::ERROR_RED,
+                        theme::error_red(),
                         "ISO file not found! Eject or select a different image.",
                     );
                 });
@@ -791,7 +791,7 @@ impl SettingsDialog {
                 ui.horizontal(|ui| {
                     ui.add_space(LABEL_WIDTH + 8.0);
                     ui.colored_label(
-                        theme::WARNING_ORANGE,
+                        theme::warning_orange(),
                         "File does not have a .iso extension. CD images must be .iso files.",
                     );
                 });
@@ -829,7 +829,7 @@ impl SettingsDialog {
             ui.horizontal(|ui| {
                 ui.add_space(LABEL_WIDTH + 8.0);
                 ui.colored_label(
-                    egui::Color32::from_rgb(100, 100, 105),
+                    theme::text_dim(),
                     match self.config.nic_model {
                         crate::config::NicModel::E1000 => "Legacy Intel Gigabit NIC. Works with all guest OSes out of the box.",
                         crate::config::NicModel::VirtioNet => "High-performance paravirtual NIC. Drivers via Windows Update (netkvm).",
@@ -882,13 +882,13 @@ impl SettingsDialog {
         if self.config.audio_enabled {
             ui.add_space(4.0);
             labeled_row(ui, "Controller:", |ui| {
-                ui.label(egui::RichText::new("Intel AC'97 (ICH)").color(egui::Color32::from_rgb(160, 160, 160)));
+                ui.label(egui::RichText::new("Intel AC'97 (ICH)").color(theme::text_disabled()));
             });
         }
 
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::from_rgb(120, 120, 125),
+            theme::text_subtle(),
             "Emulates an Intel 82801AA AC'97 audio controller.\nDisable for server guests or if audio causes issues.",
         );
     }
@@ -902,18 +902,18 @@ impl SettingsDialog {
             ui.add_space(4.0);
 
             labeled_row(ui, "Controller:", |ui| {
-                ui.label(egui::RichText::new("Intel PIIX3 UHCI (USB 1.1)").color(egui::Color32::from_rgb(160, 160, 160)));
+                ui.label(egui::RichText::new("Intel PIIX3 UHCI (USB 1.1)").color(theme::text_disabled()));
             });
 
             section_heading(ui, "USB Devices");
 
             labeled_row(ui, "Tablet:", |ui| {
-                ui.label(egui::RichText::new("USB HID Tablet (absolute positioning)").color(egui::Color32::from_rgb(160, 160, 160)));
+                ui.label(egui::RichText::new("USB HID Tablet (absolute positioning)").color(theme::text_disabled()));
             });
 
             ui.add_space(4.0);
             ui.colored_label(
-                egui::Color32::from_rgb(110, 110, 115),
+                theme::text_muted(),
                 "The USB tablet provides absolute mouse coordinates,\nwhich works better than PS/2 relative mouse in most guests.",
             );
         }
@@ -926,21 +926,21 @@ impl SettingsDialog {
     fn page_expert(&mut self, ui: &mut egui::Ui) {
         // Warning banner
         egui::Frame::new()
-            .fill(egui::Color32::from_rgb(60, 40, 20))
-            .stroke(egui::Stroke::new(1.0, theme::WARNING_ORANGE))
+            .fill(theme::warning_banner_bg())
+            .stroke(egui::Stroke::new(1.0, theme::warning_orange()))
             .corner_radius(egui::CornerRadius::same(6))
             .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.colored_label(theme::WARNING_ORANGE, egui::RichText::new("\u{26A0}").size(18.0));
+                    ui.colored_label(theme::warning_orange(), egui::RichText::new("\u{26A0}").size(18.0));
                     ui.add_space(4.0);
                     ui.vertical(|ui| {
                         ui.colored_label(
-                            theme::WARNING_ORANGE,
+                            theme::warning_orange(),
                             egui::RichText::new("Expert Settings").strong(),
                         );
                         ui.colored_label(
-                            egui::Color32::from_rgb(210, 180, 130),
+                            theme::warning_banner_text(),
                             "Changing these settings can cause VM instability.\n\
                              For production use, keep the recommended defaults (SeaBIOS).",
                         );
@@ -960,7 +960,7 @@ impl SettingsDialog {
         ui.horizontal(|ui| {
             ui.add_space(LABEL_WIDTH + 8.0);
             ui.colored_label(
-                egui::Color32::from_rgb(100, 100, 105),
+                theme::text_dim(),
                 match self.config.bios_type {
                     BiosType::SeaBios => "Industry-standard BIOS. Recommended for most guests.",
                     BiosType::CoreVm  => "Experimental CoreVM BIOS. For development use only.",
@@ -975,7 +975,7 @@ impl SettingsDialog {
 
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::from_rgb(120, 120, 125),
+            theme::text_subtle(),
             "When enabled, a diagnostics window will open alongside the VM\nshowing I/O ports, MMIO, interrupts, and CPU state.",
         );
     }
@@ -985,7 +985,7 @@ impl SettingsDialog {
         ui.add_space(16.0);
         ui.vertical_centered(|ui| {
             ui.colored_label(
-                egui::Color32::from_rgb(130, 130, 135),
+                theme::text_placeholder(),
                 message,
             );
         });

@@ -1,6 +1,6 @@
 use eframe::egui;
 use egui::Color32;
-use crate::theme;
+use crate::ui::theme;
 
 /// Runtime metrics for the status bar
 pub struct VmMetrics {
@@ -26,7 +26,7 @@ pub fn render_statusbar(
         .exact_height(22.0)
         .frame(
             egui::Frame::new()
-                .fill(theme::STATUSBAR_BG)
+                .fill(theme::statusbar_bg())
                 .inner_margin(egui::Margin::symmetric(12, 0)),
         )
         .show(ctx, |ui| {
@@ -34,21 +34,21 @@ pub fn render_statusbar(
             let rect = ui.max_rect();
             ui.painter().line_segment(
                 [rect.left_top(), rect.right_top()],
-                egui::Stroke::new(0.5, Color32::from_rgb(55, 55, 58)),
+                egui::Stroke::new(0.5, theme::border_color()),
             );
 
             ui.horizontal_centered(|ui| {
-                let label_color = theme::TEXT_SECONDARY;
-                let value_color = theme::TEXT_PRIMARY;
+                let label_color = theme::text_secondary();
+                let value_color = theme::text_primary();
                 ui.style_mut().spacing.item_spacing = egui::vec2(4.0, 0.0);
 
                 match metrics {
                     Some(m) => {
                         // State dot
                         let dot_color = match m.state_label {
-                            "Running" => theme::SUCCESS_GREEN,
-                            "Paused" => theme::WARNING_ORANGE,
-                            _ => theme::TEXT_TERTIARY,
+                            "Running" => theme::success_green(),
+                            "Paused" => theme::warning_orange(),
+                            _ => theme::text_tertiary(),
                         };
                         ui.colored_label(dot_color, "\u{25CF}");
                         ui.colored_label(value_color, egui::RichText::new(m.state_label).size(11.0));
@@ -62,7 +62,7 @@ pub fn render_statusbar(
                 if let Some(key_str) = last_key {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.colored_label(
-                            theme::TEXT_TERTIARY,
+                            theme::text_tertiary(),
                             egui::RichText::new(format!("Key: {}", key_str)).size(11.0),
                         );
                     });

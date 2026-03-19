@@ -10,6 +10,7 @@ use std::{env, thread};
 use libcorevm::ffi::*;
 use libcorevm::setup;
 use libcorevm::backend::{VcpuRegs, VcpuSregs};
+use libcorevm::runtime::{VmRuntime, VmRuntimeConfig, VmEvent, EventHandler};
 
 // ── Argument parsing ──
 
@@ -367,34 +368,74 @@ fn main() {
     // Write COM1 base address into BDA so SeaBIOS finds the serial port.
     setup::setup_bda_com1(handle);
 
-    // Install SIGUSR1 handler so cancel_vcpu can interrupt KVM_RUN mid-execution
-    #[cfg(target_os = "linux")]
-    libcorevm::backend::kvm::install_sigusr1_handler();
+    // ── VM Runtime ────────────────────────────────────────────────────────
+    //
+    // The VM execution loop is handled by VmRuntime from libcorevm.
+    // We only configure it and provide an EventHandler for serial output.
 
-    // Timer thread to cancel vCPU periodically (needed for CMOS/RTC advance,
-    // HPET timer polling, and AHCI IRQ polling when guest is in HLT/idle state).
-    // 10ms when HPET is enabled (Windows needs timely HPET interrupts ~64 Hz),
-    // 100ms otherwise (avoids excessive VM exits for Linux guests).
-    // On WHP, need 1ms cancel interval because WHP returns unreliable
-    // RFLAGS in IO port exit contexts. Only CANCELED exits provide
-    // correct RFLAGS/ExecutionState, so we need them frequently.
-    // On KVM, 100ms is sufficient since the in-kernel irqchip handles delivery.
-    #[cfg(target_os = "windows")]
-    let cancel_interval_ms: u64 = 1;
-    #[cfg(not(target_os = "windows"))]
-    let cancel_interval_ms: u64 = if args.hpet { 10 } else { 100 };
-    let cancel_handle = handle;
-    let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let running2 = running.clone();
-    let cancel_num_cpus = num_cpus;
-    thread::spawn(move || {
-        while running2.load(std::sync::atomic::Ordering::Relaxed) {
-            thread::sleep(Duration::from_millis(cancel_interval_ms));
-            for cpu_id in 0..cancel_num_cpus {
-                corevm_cancel_vcpu(cancel_handle, cpu_id);
+    // Event handler for headless CLI — prints serial output to stdout.
+    struct VmctlEventHandler {
+        serial_bytes: u64,
+    }
+    impl EventHandler for VmctlEventHandler {
+        fn on_event(&mut self, event: VmEvent) {
+            match event {
+                VmEvent::SerialOutput(data) => {
+                    for &ch in &data {
+                        if ch >= 0x20 || ch == b'\n' || ch == b'\r' || ch == b'\t' {
+                            print!("{}", ch as char);
+                            self.serial_bytes += 1;
+                            if ch == b'\n' {
+                                use std::io::Write;
+                                let _ = std::io::stdout().flush();
+                            }
+                        }
+                    }
+                }
+                VmEvent::DebugOutput(data) => {
+                    if let Ok(s) = std::str::from_utf8(&data) {
+                        print!("{}", s);
+                    }
+                }
+                VmEvent::Shutdown => {
+                    eprintln!("[vmctl] VM shutdown");
+                }
+                VmEvent::Error { message } => {
+                    eprintln!("[vmctl] VM error: {}", message);
+                }
+                VmEvent::RebootRequested => {
+                    eprintln!("[vmctl] VM reboot requested");
+                }
+                VmEvent::Diagnostic(msg) => {
+                    eprintln!("[vmctl] {}", msg);
+                }
             }
         }
-    });
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    let cancel_interval_ms: u64 = if args.hpet { 10 } else { 100 };
+    #[cfg(target_os = "windows")]
+    let cancel_interval_ms: u64 = 1;
+
+    let rt_config = VmRuntimeConfig {
+        handle,
+        num_cpus,
+        usb_tablet: false,
+        audio_enabled: false,
+        net_enabled: tap_device.is_some(),
+        virtio_gpu: false,
+        virtio_input: false,
+        diagnostics: false,
+        cancel_interval: Duration::from_millis(cancel_interval_ms),
+        timeout: Duration::from_secs(args.timeout as u64),
+        ..Default::default()
+    };
+
+    let mut runtime = VmRuntime::new(rt_config, VmctlEventHandler { serial_bytes: 0 });
+
+    // Use the runtime handle for auxiliary threads that need direct FFI access.
+    let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
 
     // Key injection thread: schedule keypresses at specified delays
     if !args.send_keys.is_empty() {
@@ -495,400 +536,22 @@ fn main() {
     println!("--- SERIAL OUTPUT ---");
 
     let start = Instant::now();
-    let timeout = Duration::from_secs(args.timeout as u64);
 
-    // Spawn AP threads (vCPU 1..N-1) — each runs its own exit-handling loop.
-    // APs start in INIT state and wait for SIPI from the BSP. Once the guest
-    // OS sends SIPI, KVM automatically wakes the AP and it begins executing.
-    let ap_running = running.clone();
-    let mut ap_threads = Vec::new();
-    for cpu_id in 1..num_cpus {
-        let ap_handle = handle;
-        let ap_running = ap_running.clone();
-        let ap_timeout = timeout;
-        let ap_start = start;
-        let t = thread::Builder::new()
-            .name(format!("vcpu-{}", cpu_id))
-            .spawn(move || {
-                let mut ap_exits = [0u64; 16];
-                let mut ap_total = 0u64;
-                let ap_t0 = std::time::Instant::now();
-                loop {
-                    if !ap_running.load(std::sync::atomic::Ordering::Relaxed) { break; }
-                    if args.timeout > 0 && ap_start.elapsed() >= ap_timeout { break; }
+    // Start the VM runtime (spawns BSP, AP, and cancel threads).
+    runtime.start();
 
-                    let mut exit = CExitReason::default();
-                    let rc = corevm_run_vcpu(ap_handle, cpu_id, &mut exit);
-                    if rc != 0 {
-                        if ap_total <= 10 || ap_total % 1000 == 0 {
-                            eprintln!("[vcpu-{}] run_vcpu FAILED rc={} (exit #{})", cpu_id, rc, ap_total);
-                        }
-                        ap_total += 1;
-                        thread::sleep(Duration::from_millis(1));
-                        continue;
-                    }
-                    ap_total += 1;
-                    if (exit.reason as usize) < ap_exits.len() {
-                        ap_exits[exit.reason as usize] += 1;
-                    }
-                    // Log every 5s
-                    if ap_t0.elapsed().as_secs() % 5 == 0 && ap_total % 100 == 1 {
-                        eprintln!("[vcpu-{}] exits={} IO={}/{} MMIO={}/{} Hlt={} Cancel={}",
-                            cpu_id, ap_total, ap_exits[0], ap_exits[1],
-                            ap_exits[2], ap_exits[3], ap_exits[7], ap_exits[13]);
-                    }
-
-                    // Minimal AP logging - only first 30 non-cancel exits
-                    if exit.reason != 13 && ap_total <= 30 {
-                        eprintln!("[vcpu-{}] exit #{}: reason={}", cpu_id, ap_total, exit.reason);
-                    }
-
-                    match exit.reason {
-                        0 => { // IoIn
-                            if exit.io_count > 1 {
-                                corevm_complete_string_io(ap_handle, cpu_id, exit.port, 0, exit.size, exit.io_count);
-                            } else {
-                                let mut data = [0u8; 4];
-                                corevm_handle_io_exit(ap_handle, cpu_id, exit.port, 0, exit.size, data.as_mut_ptr());
-                            }
-                        }
-                        1 => { // IoOut
-                            if exit.io_count > 1 {
-                                corevm_complete_string_io(ap_handle, cpu_id, exit.port, 1, exit.size, exit.io_count);
-                            } else {
-                                let mut data = exit.data_u32.to_le_bytes();
-                                corevm_handle_io_exit(ap_handle, cpu_id, exit.port, 1, exit.size, data.as_mut_ptr());
-                            }
-                        }
-                        2 => { // MmioRead
-                            let mut data = [0u8; 8];
-                            corevm_handle_mmio_exit(ap_handle, cpu_id, exit.addr, 0, exit.size, data.as_mut_ptr(), exit.mmio_dest_reg, exit.mmio_instr_len);
-                        }
-                        3 => { // MmioWrite
-                            let mut data = exit.data_u64.to_le_bytes();
-                            corevm_handle_mmio_exit(ap_handle, cpu_id, exit.addr, 1, exit.size, data.as_mut_ptr(), 0, 0);
-                        }
-                        7 => { // Halted — re-enter KVM_RUN immediately.
-                            // KVM handles HLT internally and blocks until interrupt.
-                        }
-                        9 | 11 => { // Shutdown / Error
-                            break;
-                        }
-                        12 => { // StringIo
-                            corevm_handle_string_io_exit(
-                                ap_handle, cpu_id, exit.port, exit.string_io_is_write,
-                                exit.string_io_count, exit.string_io_gpa,
-                                exit.string_io_step, exit.string_io_instr_len,
-                                exit.string_io_addr_size, exit.size,
-                            );
-                        }
-                        13 => { } // Cancelled
-                        _ => {}
-                    }
-                }
-            })
-            .expect("failed to spawn AP thread");
-        ap_threads.push(t);
-    }
-
-    let mut exit_count: u64 = 0;
-    let mut serial_bytes: u64 = 0;
-    let mut exit_reason = "timeout";
-    let mut last_state = Instant::now();
-    let mut last_pit_tick = Instant::now();
-    let mut last_rtc_tick = Instant::now();
-    let mut exit_types = [0u64; 16]; // count by exit.reason
-    let mut total_irqs: u64 = 0;
-    let mut mmio_addrs: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
-    let mut io_ports: std::collections::HashMap<u16, u64> = std::collections::HashMap::new();
-    let mut last_net_poll = Instant::now();
-    let mut last_audio_poll = Instant::now();
-    let mut net_packets: u64 = 0;
-    let mut audio_samples: u64 = 0;
-
-    loop {
-        let mut exit = CExitReason::default();
-        let rc = corevm_run_vcpu(handle, 0, &mut exit);
-        if rc != 0 {
-            thread::sleep(Duration::from_millis(1));
-            if start.elapsed() >= timeout && args.timeout > 0 { break; }
-            continue;
-        }
-
-        match exit.reason {
-            0 => { // IoIn
-                *io_ports.entry(exit.port).or_insert(0) += 1;
-                if exit.io_count > 1 {
-                    corevm_complete_string_io(handle, 0, exit.port, 0, exit.size, exit.io_count);
-                } else {
-                    let mut data = [0u8; 4];
-                    corevm_handle_io_exit(handle, 0, exit.port, 0, exit.size, data.as_mut_ptr());
-                }
-            }
-            1 => { // IoOut
-                *io_ports.entry(exit.port).or_insert(0) += 1;
-                if exit.io_count > 1 {
-                    // String I/O (REP OUTSB): handle all iterations at once
-                    corevm_complete_string_io(handle, 0, exit.port, 1, exit.size, exit.io_count);
-                } else {
-                    let mut data = exit.data_u32.to_le_bytes();
-                    corevm_handle_io_exit(handle, 0, exit.port, 1, exit.size, data.as_mut_ptr());
-                }
-            }
-            2 => { // MmioRead
-                *mmio_addrs.entry(exit.addr & !0xFFF).or_insert(0) += 1;
-                let mut data = [0u8; 8];
-                corevm_handle_mmio_exit(handle, 0, exit.addr, 0, exit.size, data.as_mut_ptr(), exit.mmio_dest_reg, exit.mmio_instr_len);
-            }
-            3 => { // MmioWrite
-                *mmio_addrs.entry(exit.addr & !0xFFF).or_insert(0) += 1;
-                let mut data = exit.data_u64.to_le_bytes();
-                corevm_handle_mmio_exit(handle, 0, exit.addr, 1, exit.size, data.as_mut_ptr(), 0, 0);
-            }
-            7 => { // Halted
-                thread::sleep(Duration::from_millis(1));
-            }
-            9 => { // Shutdown
-                exit_reason = "shutdown";
-                eprintln!("[vmctl] VM shutdown (triple fault)");
-                break;
-            }
-            11 => { // Error
-                exit_reason = "error";
-                eprintln!("[vmctl] VM error");
-                break;
-            }
-            12 => { // StringIo
-                corevm_handle_string_io_exit(
-                    handle, 0, exit.port, exit.string_io_is_write,
-                    exit.string_io_count, exit.string_io_gpa,
-                    exit.string_io_step, exit.string_io_instr_len,
-                    exit.string_io_addr_size, exit.size,
-                );
-            }
-            13 => { // Cancelled — timer kicked us out of KVM_RUN
-            }
-            _ => {}
-        }
-
-        // Time-based PIT ticking: advance channels proportional to elapsed real time.
-        // PIT runs at 1.193182 MHz. Tick every ~100µs (~119 ticks) to keep channel 2
-        // output responsive for port 0x61 delay loops.
-        {
-            let now = Instant::now();
-            let elapsed_us = now.duration_since(last_pit_tick).as_micros() as u64;
-            if elapsed_us >= 100 {
-                let pit_ticks = ((elapsed_us * 1193) / 1000) as u32;
-                corevm_pit_advance(handle, pit_ticks);
-                last_pit_tick = now;
-            }
-        }
-
-        // Advance CMOS RTC periodic timer (32.768 kHz base clock)
-        {
-            let now = Instant::now();
-            let elapsed_us = now.duration_since(last_rtc_tick).as_micros() as u64;
-            if elapsed_us >= 100 {
-                let rtc_ticks = (elapsed_us * 32768) / 1_000_000;
-                if rtc_ticks > 0 {
-                    corevm_cmos_advance(handle, rtc_ticks);
-                    last_rtc_tick = now;
-                }
-            }
-        }
-
-        // Poll IRQs
-        total_irqs += corevm_poll_irqs(handle) as u64;
-
-        // Network polling: exchange packets between TAP and E1000 (~every 1ms)
-        #[cfg(target_os = "linux")]
-        if tap_device.is_some() {
-            let now = Instant::now();
-            if now.duration_since(last_net_poll).as_micros() >= 1000 {
-                let tap = tap_device.as_ref().unwrap();
-                let n = libcorevm::net::tap::poll_network(tap, handle);
-                net_packets += n as u64;
-                last_net_poll = now;
-            }
-        }
-
-        // Audio polling: process AC97 DMA (~every 10ms)
-        {
-            let now = Instant::now();
-            if now.duration_since(last_audio_poll).as_millis() >= 10 {
-                corevm_ac97_process(handle);
-                // Drain audio samples (discard in vmctl — no audio output in headless mode)
-                let mut audio_buf = [0i16; 8192];
-                let n = corevm_ac97_take_audio(handle, audio_buf.as_mut_ptr(), audio_buf.len() as u32);
-                audio_samples += n as u64;
-                last_audio_poll = now;
-            }
-        }
-
-        // Drain debug port
-        {
-            let mut dbg = [0u8; 1024];
-            let n = corevm_debug_port_take_output(handle, dbg.as_mut_ptr(), dbg.len() as u32);
-            if n > 0 {
-                if let Ok(s) = std::str::from_utf8(&dbg[..n as usize]) {
-                    print!("{}", s);
-                    serial_bytes += n as u64;
-                }
-            }
-        }
-
-        // Drain serial output (catches string I/O and any other writes to THR)
-        {
-            let mut ser = [0u8; 4096];
-            let n = corevm_serial_take_output(handle, ser.as_mut_ptr(), ser.len() as u32);
-            if n > 0 {
-                for &ch in &ser[..n as usize] {
-                    if ch >= 0x20 || ch == b'\n' || ch == b'\r' || ch == b'\t' {
-                        print!("{}", ch as char);
-                        serial_bytes += 1;
-                        if ch == b'\n' {
-                            use std::io::Write;
-                            let _ = std::io::stdout().flush();
-                        }
-                    }
-                }
-            }
-        }
-
-        exit_count += 1;
-        if (exit.reason as usize) < exit_types.len() {
-            exit_types[exit.reason as usize] += 1;
-        }
-
-        // Periodic state dump (every 2s)
-        if last_state.elapsed() >= Duration::from_secs(2) {
-            last_state = Instant::now();
-            let mut regs = VcpuRegs::default();
-            let mut sregs = VcpuSregs::default();
-            corevm_get_vcpu_regs(handle, 0, &mut regs);
-            corevm_get_vcpu_sregs(handle, 0, &mut sregs);
-            let mut vga_buf = [0u8; 160];
-            corevm_read_phys(handle, 0xB8000, vga_buf.as_mut_ptr(), 160);
-            let vga_line: String = (0..80).map(|i| {
-                let ch = vga_buf[i * 2];
-                if ch >= 0x20 && ch < 0x7F { ch as char } else { ' ' }
-            }).collect::<String>().trim_end().to_string();
-            eprintln!("[vm-state] #{} exit={} RIP={:#x} CS={:#x} CR0={:#x} IF={} PE={} PG={} VGA=[{}]",
-                exit_count, exit.reason, regs.rip, sregs.cs.selector, sregs.cr0,
-                if regs.rflags & 0x200 != 0 { 1 } else { 0 },
-                if sregs.cr0 & 1 != 0 { 1 } else { 0 },
-                if sregs.cr0 & (1 << 31) != 0 { 1 } else { 0 },
-                vga_line);
-            // Exit type distribution: 0=IoIn 1=IoOut 2=MmioRd 3=MmioWr 7=Hlt 9=Shutdown 13=Cancel
-            eprintln!("[vm-exits] IO={}/{} MMIO={}/{} Hlt={} Cancel={} Other={}",
-                exit_types[0], exit_types[1], exit_types[2], exit_types[3],
-                exit_types[7], exit_types[13],
-                exit_types[4]+exit_types[5]+exit_types[6]+exit_types[8]+exit_types[9]+exit_types[10]+exit_types[11]+exit_types[12]);
-            // VGA mode and framebuffer info
-            {
-                let mut w: u32 = 0;
-                let mut h: u32 = 0;
-                let mut bpp: u8 = 0;
-                let mode_rc = corevm_vga_get_mode(handle, &mut w, &mut h, &mut bpp);
-                let lfb_addr = corevm_vga_get_lfb_addr(handle);
-                let (fb_nonzero, fb_total_nz, fb_offset) = if !vga_fb_ptr.is_null() {
-                    let fb = unsafe { core::slice::from_raw_parts(vga_fb_ptr, vga_fb_size as usize) };
-                    let head_nz = fb.iter().take(1024 * 4 * 100).filter(|&&b| b != 0).count();
-                    let total_nz = fb.iter().filter(|&&b| b != 0).count();
-                    // Find first non-zero 4KB page beyond the first 100 lines
-                    let mut off = 0usize;
-                    for page_start in (0..fb.len()).step_by(4096) {
-                        let page_end = (page_start + 4096).min(fb.len());
-                        if fb[page_start..page_end].iter().any(|&b| b != 0) {
-                            off = page_start;
-                            break;
-                        }
-                    }
-                    (head_nz, total_nz, off)
-                } else { (0, 0, 0) };
-                let vbe_fb_off = corevm_vga_get_fb_offset(handle);
-                eprintln!("[vm-gfx] mode={}x{}x{} rc={} lfb={:#x} fb_nz={}/{} off={:#x} vbe_off={:#x} irqs={}",
-                    w, h, bpp, mode_rc, lfb_addr, fb_nonzero, fb_total_nz, fb_offset, vbe_fb_off, total_irqs);
-            }
-            // Check BIOS tick counter at BDA 0x40:0x6C (physical 0x46C)
-            {
-                let mut tick_buf = [0u8; 4];
-                corevm_read_phys(handle, 0x046C, tick_buf.as_mut_ptr(), 4);
-                let bios_ticks = u32::from_le_bytes(tick_buf);
-                eprintln!("[vm-timer] BIOS_ticks={} (~{:.1}s)", bios_ticks, bios_ticks as f64 / 18.2);
-            }
-            // LAPIC diagnostics (KVM in-kernel IRQCHIP)
-            {
-                let mut lapic_buf = [0u8; 1024];
-                let rc = corevm_get_lapic(handle, 0, lapic_buf.as_mut_ptr());
-                if rc == 0 {
-                    // LAPIC registers at 16-byte aligned offsets (only first 4 bytes of each 16-byte slot)
-                    let read32 = |off: usize| -> u32 {
-                        u32::from_le_bytes([lapic_buf[off], lapic_buf[off+1], lapic_buf[off+2], lapic_buf[off+3]])
-                    };
-                    let apic_id = read32(0x20);        // APIC ID
-                    let lvt_timer = read32(0x320);     // LVT Timer
-                    let timer_icr = read32(0x380);     // Timer Initial Count
-                    let timer_ccr = read32(0x390);     // Timer Current Count
-                    let timer_dcr = read32(0x3E0);     // Timer Divide Config
-                    let spurious = read32(0xF0);       // Spurious Interrupt Vector
-                    let isr0 = read32(0x100);          // In-Service Register bits 0-31
-                    let irr0 = read32(0x200);          // IRQ Request Register bits 0-31
-                    let irr1 = read32(0x210);          // IRQ Request Register bits 32-63
-                    let irr7 = read32(0x270);          // IRQ Request Register bits 224-255 (timer vec 0xEC=236)
-                    let isr7 = read32(0x170);          // In-Service Register bits 224-255
-                    eprintln!("[vm-lapic] id={} spur={:#x} lvt_timer={:#010x} icr={} ccr={} dcr={:#x} isr0={:#x} irr0={:#x} irr7={:#x} isr7={:#x}",
-                        apic_id >> 24, spurious, lvt_timer, timer_icr, timer_ccr, timer_dcr, isr0, irr0, irr7, isr7);
-                }
-            }
-            // Check BDA keyboard buffer: head @ 0x41A, tail @ 0x41C
-            {
-                let mut kbd_buf = [0u8; 4];
-                corevm_read_phys(handle, 0x041A, kbd_buf.as_mut_ptr(), 4);
-                let head = u16::from_le_bytes([kbd_buf[0], kbd_buf[1]]);
-                let tail = u16::from_le_bytes([kbd_buf[2], kbd_buf[3]]);
-                if head != tail {
-                    eprintln!("[vm-kbd] BDA kbd buf head={:#06x} tail={:#06x} (keys pending!)", head, tail);
-                }
-            }
-        }
-
-        // Check timeout
-        if args.timeout > 0 && start.elapsed() >= timeout {
-            break;
-        }
-    }
+    // Wait for the runtime to finish (shutdown, error, timeout, or reboot).
+    runtime.wait();
 
     running.store(false, std::sync::atomic::Ordering::Relaxed);
-    // Cancel all AP vCPUs so their threads can observe the running=false flag
-    for cpu_id in 1..num_cpus {
-        corevm_cancel_vcpu(handle, cpu_id);
-    }
-    // Wait for AP threads to finish
-    for t in ap_threads {
-        let _ = t.join();
-    }
-    let runtime = start.elapsed();
+    let run_duration = start.elapsed();
+    let exit_reason = if run_duration >= Duration::from_secs(args.timeout as u64) && args.timeout > 0 {
+        "timeout"
+    } else {
+        "exit"
+    };
 
-    // MMIO address distribution
-    if !mmio_addrs.is_empty() {
-        let mut addrs: Vec<_> = mmio_addrs.iter().collect();
-        addrs.sort_by(|a, b| b.1.cmp(a.1));
-        eprintln!("[vmctl] MMIO address distribution (page-aligned):");
-        for (addr, count) in addrs.iter().take(10) {
-            eprintln!("  {:#010x}: {} accesses", addr, count);
-        }
-    }
-
-    // IO port distribution
-    if !io_ports.is_empty() {
-        let mut ports: Vec<_> = io_ports.iter().collect();
-        ports.sort_by(|a, b| b.1.cmp(a.1));
-        eprintln!("[vmctl] IO port distribution:");
-        for (port, count) in ports.iter().take(50) {
-            eprintln!("  {:#06x}: {} accesses", port, count);
-        }
-    }
+    // Post-mortem diagnostics
 
     // LAPIC register dump (Linux/KVM only)
     {
@@ -1208,12 +871,7 @@ fn main() {
 
     println!("--- VM EXIT SUMMARY ---");
     println!("exit_reason: {}", exit_reason);
-    println!("runtime_ms: {}", runtime.as_millis());
-    println!("exit_count: {}", exit_count);
-    println!("serial_bytes: {}", serial_bytes);
-    println!("exit_types: IoIn={} IoOut={} MmioRd={} MmioWr={} Hlt={} Cancel={} Shutdown={} Err={}",
-        exit_types[0], exit_types[1], exit_types[2], exit_types[3],
-        exit_types[7], exit_types[13], exit_types[9], exit_types[11]);
+    println!("runtime_ms: {}", run_duration.as_millis());
     println!("--- END SUMMARY ---\n");
 
     if args.show_screen {

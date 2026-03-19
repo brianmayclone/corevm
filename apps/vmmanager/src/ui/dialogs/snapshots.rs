@@ -1,5 +1,6 @@
 use eframe::egui;
-use crate::dialogs::BUTTON_SIZE;
+use crate::ui::dialogs::BUTTON_SIZE;
+use crate::ui::theme;
 
 pub struct SnapshotsDialog {
     pub open: bool,
@@ -24,9 +25,9 @@ impl SnapshotsDialog {
             .show(ctx, |ui| {
                 ui.add_space(16.0);
                 ui.vertical_centered(|ui| {
-                    ui.label(egui::RichText::new("No snapshots yet").color(egui::Color32::from_rgb(160, 160, 160)));
+                    ui.label(egui::RichText::new("No snapshots yet").color(theme::text_disabled()));
                     ui.add_space(8.0);
-                    ui.label(egui::RichText::new("Snapshot support coming soon.").italics().color(egui::Color32::from_rgb(120, 120, 120)));
+                    ui.label(egui::RichText::new("Snapshot support coming soon.").italics().color(theme::text_subtle()));
                 });
                 ui.add_space(16.0);
                 ui.separator();

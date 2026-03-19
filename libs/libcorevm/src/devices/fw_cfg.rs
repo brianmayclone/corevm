@@ -85,6 +85,8 @@ pub struct FwCfg {
     setup_size: u32,
     setup_data: Vec<u8>,
     kernel_entry: u32,
+    /// Number of CPUs (for FW_CFG_NB_CPUS and FW_CFG_MAX_CPUS).
+    cpu_count: u16,
 }
 
 // Safety: FwCfg is only used from the single VM thread.
@@ -137,6 +139,7 @@ impl FwCfg {
             setup_size: 0,
             setup_data: Vec::new(),
             kernel_entry: 0,
+            cpu_count: 1,
         };
 
         // Tell SeaBIOS about RAM above 4 GB.
@@ -145,6 +148,14 @@ impl FwCfg {
         }
 
         fw
+    }
+
+    /// Set the number of CPUs reported via FW_CFG_NB_CPUS and FW_CFG_MAX_CPUS.
+    ///
+    /// SeaBIOS uses these values to discover and start Application Processors.
+    /// Must be called before the VM starts executing.
+    pub fn set_cpu_count(&mut self, count: u16) {
+        self.cpu_count = count.max(1);
     }
 
     /// Set the guest RAM pointer for DMA operations.
@@ -279,12 +290,10 @@ impl FwCfg {
                 0u16.to_le_bytes().to_vec()
             }
             FW_CFG_NB_CPUS => {
-                // 1 CPU.
-                1u16.to_le_bytes().to_vec()
+                self.cpu_count.to_le_bytes().to_vec()
             }
             FW_CFG_MAX_CPUS => {
-                // Max 1 APIC ID.
-                1u16.to_le_bytes().to_vec()
+                self.cpu_count.to_le_bytes().to_vec()
             }
             FW_CFG_BOOT_MENU => {
                 // No boot menu.

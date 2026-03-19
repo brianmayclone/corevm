@@ -219,6 +219,14 @@ impl GuestMemory {
         unsafe { &*self.mmio.get() }.bounds()
     }
 
+    /// Update the base address of an existing MMIO region.
+    ///
+    /// Used when SeaBIOS or a guest OS remaps a PCI BAR to a new address.
+    /// Returns `true` if the region was found and updated.
+    pub fn update_mmio_base(&self, old_base: u64, new_base: u64) -> bool {
+        self.mmio_mut().update_region_base(old_base, new_base)
+    }
+
     /// Dispatch an MMIO read to the registered handler.
     ///
     /// Returns the value read, or `None` if no handler covers `addr`.

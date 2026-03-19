@@ -1,6 +1,6 @@
 use eframe::egui;
-use crate::theme;
-use crate::dialogs::{labeled_row, button_row, FIELD_MIN_WIDTH};
+use crate::ui::theme;
+use crate::ui::dialogs::{labeled_row, button_row, FIELD_MIN_WIDTH};
 
 #[derive(PartialEq, Clone, Copy)]
 pub enum AddDiskMode {
@@ -33,7 +33,7 @@ impl AddDiskDialog {
 
     pub fn with_vm_name(vm_name: &str) -> Self {
         let auto_path = if !vm_name.is_empty() {
-            let next = crate::platform::next_disk_name(vm_name);
+            let next = crate::engine::platform::next_disk_name(vm_name);
             next.to_string_lossy().to_string()
         } else {
             String::new()
@@ -97,7 +97,7 @@ impl AddDiskDialog {
                         });
                         ui.add_space(2.0);
                         ui.colored_label(
-                            egui::Color32::from_rgb(130, 130, 135),
+                            theme::text_placeholder(),
                             "Select an existing .img or .raw disk image file.",
                         );
                     }
@@ -110,7 +110,7 @@ impl AddDiskDialog {
                         });
                         ui.add_space(2.0);
                         ui.colored_label(
-                            egui::Color32::from_rgb(130, 130, 135),
+                            theme::text_placeholder(),
                             "The VMDK will be converted to a raw .img in the disk pool.",
                         );
                         if self.importing {
@@ -156,7 +156,7 @@ impl AddDiskDialog {
 
                 if let Some(err) = &self.error {
                     ui.add_space(4.0);
-                    ui.colored_label(theme::ERROR_RED, err);
+                    ui.colored_label(theme::error_red(), err);
                 }
 
                 ui.add_space(4.0);
@@ -212,7 +212,7 @@ impl AddDiskDialog {
                 let stem = src.file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "imported".into());
-                let pool = crate::platform::disk_pool_dir();
+                let pool = crate::engine::platform::disk_pool_dir();
                 let dest = pool.join(format!("{}.img", stem));
 
                 match std::fs::copy(src, &dest) {
@@ -229,7 +229,7 @@ impl AddDiskDialog {
                 // If only a filename (no directory), place it in the VM directory
                 let p = std::path::Path::new(&self.path);
                 if p.parent().map_or(true, |par| par.as_os_str().is_empty()) && !self.vm_name.is_empty() {
-                    let vm_dir = crate::platform::vm_dir(&self.vm_name);
+                    let vm_dir = crate::engine::platform::vm_dir(&self.vm_name);
                     let _ = std::fs::create_dir_all(&vm_dir);
                     self.path = vm_dir.join(&self.path).to_string_lossy().to_string();
                 }

@@ -4,24 +4,8 @@ use eframe::egui;
 
 mod app;
 mod config;
-mod diagnostics;
-mod dialog_create_vm;
-mod dialog_create_disk;
-mod dialog_add_disk;
-mod dialog_disk_pool;
-mod dialog_about;
-mod dialog_snapshots;
-mod dialogs;
-mod display;
-mod filebrowser;
-mod input;
-mod platform;
-mod sidebar;
-mod statusbar;
-mod theme;
-mod settings;
-mod toolbar;
-mod vm;
+mod engine;
+mod ui;
 
 /// Show a native error message box. On Windows this uses MessageBoxW,
 /// on other platforms it prints to stderr.
@@ -90,7 +74,7 @@ fn check_hardware_support() -> Result<(), String> {
         diag.push_str("If running in WSL, ensure Hyper-V is enabled on the Windows host.\n");
 
         // Try to get the specific error from libcorevm
-        let err = vm::get_last_error_public();
+        let err = engine::vm::get_last_error_public();
         if let Some(e) = err {
             diag.push_str(&format!("\nBackend error: {}\n", e));
         }

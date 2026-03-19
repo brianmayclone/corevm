@@ -3,6 +3,7 @@ use std::path::Path;
 
 use eframe::egui;
 use egui::Color32;
+use crate::ui::theme;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum VmState {
@@ -181,21 +182,13 @@ impl SidebarLayout {
     }
 }
 
-fn state_color(state: VmState) -> Color32 {
-    match state {
-        VmState::Running => Color32::from_rgb(48, 209, 88),
-        VmState::Paused => Color32::from_rgb(255, 159, 10),
-        VmState::Stopped => Color32::from_rgb(99, 99, 102),
-    }
-}
-
 /// Render a single VM entry. Returns a drag source ID if dragging.
 fn render_vm_entry(
     ui: &mut egui::Ui,
     uuid: &str,
     vm_names: &HashMap<String, String>,
     vm_states: &HashMap<String, VmState>,
-    vm_icons: &HashMap<String, &'static str>,
+    vm_icons: &HashMap<String, egui::TextureId>,
     vm_errors: &HashMap<String, Vec<String>>,
     selected: &mut Option<String>,
     drag_vm: &mut Option<String>,
@@ -210,36 +203,73 @@ fn render_vm_entry(
     let state = vm_states.get(uuid).copied().unwrap_or(VmState::Stopped);
     let errors = vm_errors.get(uuid);
     let has_errors = errors.map_or(false, |e| !e.is_empty());
-    let color = if has_errors {
-        Color32::from_rgb(255, 59, 48) // red
-    } else {
-        state_color(state)
-    };
 
-    let inner_resp = ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
-        // Draw a filled circle as status indicator
-        let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-        let center = dot_rect.center() + egui::vec2(0.0, 2.0);
-        ui.painter().circle_filled(center, 4.0, color);
-
-        // Error icon with tooltip
-        if has_errors {
+    // Error icon with tooltip (rendered before the selectable row)
+    if has_errors {
+        ui.horizontal(|ui| {
             let err_resp = ui.colored_label(
-                Color32::from_rgb(255, 59, 48),
+                theme::error_red(),
                 egui::RichText::new("\u{26A0}").size(13.0), // ⚠
             );
             let tooltip_text = errors.unwrap().join("\n");
             err_resp.on_hover_text(tooltip_text);
-        }
+        });
+    }
 
-        let icon = vm_icons.get(uuid).copied().unwrap_or("\u{1F5A5}");
-        ui.selectable_value(selected, Some(uuid.to_string()), format!("{} {}", icon, name))
-    }).inner;
+    // Combined icon + label as a single selectable widget
+    let is_selected = selected.as_deref() == Some(uuid);
+    let icon_size = 20.0;
+    let padding = egui::vec2(4.0, 2.0);
+    let icon_text_gap = 4.0;
 
-    if inner_resp.clicked() {
+    let label_text = if state == VmState::Running {
+        egui::RichText::new(name).strong()
+    } else {
+        egui::RichText::new(name)
+    };
+    let widget_text: egui::WidgetText = label_text.into();
+    let galley = widget_text.into_galley(ui, Some(egui::TextWrapMode::Truncate), ui.available_width() - icon_size - icon_text_gap - padding.x * 2.0, egui::FontSelection::Default);
+
+    let row_height = icon_size.max(galley.size().y) + padding.y * 2.0;
+    let desired_size = egui::vec2(ui.available_width(), row_height);
+    let (rect, resp) = ui.allocate_exact_size(desired_size, egui::Sense::click());
+
+    if resp.clicked() {
         *selected = Some(uuid.to_string());
     }
+
+    // Paint background
+    let visuals = ui.style().interact_selectable(&resp, is_selected);
+    if is_selected || resp.hovered() {
+        ui.painter().rect_filled(rect, visuals.corner_radius, visuals.bg_fill);
+    }
+
+    let content_rect = rect.shrink2(padding);
+
+    // Paint icon
+    if let Some(&tex_id) = vm_icons.get(uuid) {
+        let tint = if state == VmState::Running {
+            theme::icon_tint_active()
+        } else {
+            theme::icon_tint_inactive()
+        };
+        let icon_rect = egui::Rect::from_min_size(
+            egui::pos2(content_rect.left(), content_rect.center().y - icon_size / 2.0),
+            egui::vec2(icon_size, icon_size),
+        );
+        let img = egui::Image::new(egui::load::SizedTexture::new(tex_id, egui::vec2(icon_size, icon_size)))
+            .tint(tint);
+        img.paint_at(ui, icon_rect);
+    }
+
+    // Paint text
+    let text_pos = egui::pos2(
+        content_rect.left() + icon_size + icon_text_gap,
+        content_rect.center().y - galley.size().y / 2.0,
+    );
+    ui.painter().galley(text_pos, galley, visuals.text_color());
+
+    let inner_resp = resp;
 
     // Drag source
     if inner_resp.dragged() {
@@ -303,7 +333,7 @@ pub fn render_sidebar(
     layout: &mut SidebarLayout,
     vm_names: &HashMap<String, String>,
     vm_states: &HashMap<String, VmState>,
-    vm_icons: &HashMap<String, &'static str>,
+    vm_icons: &HashMap<String, egui::TextureId>,
     vm_errors: &HashMap<String, Vec<String>>,
     selected: &mut Option<String>,
     sidebar_state: &mut SidebarState,
@@ -316,7 +346,7 @@ pub fn render_sidebar(
         .exact_width(230.0)
         .frame(
             egui::Frame::new()
-                .fill(Color32::from_rgb(28, 28, 30))
+                .fill(theme::sidebar_bg())
                 .inner_margin(egui::Margin::symmetric(10, 12)),
         )
         .show(ctx, |ui| {
@@ -328,12 +358,12 @@ pub fn render_sidebar(
                     egui::RichText::new("Machines")
                         .size(13.0)
                         .strong()
-                        .color(Color32::from_rgb(142, 142, 147)),
+                        .color(theme::text_secondary()),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.add(
                         egui::Button::new(egui::RichText::new("\u{1F4C1}").size(13.0))
-                            .fill(Color32::from_rgb(54, 54, 56))
+                            .fill(theme::button_bg())
                             .corner_radius(egui::CornerRadius::same(6))
                             .min_size(egui::vec2(24.0, 24.0)),
                     ).on_hover_text("New folder").clicked() {
@@ -341,8 +371,8 @@ pub fn render_sidebar(
                         sidebar_state.new_folder_name = "New Folder".to_string();
                     }
                     if ui.add(
-                        egui::Button::new(egui::RichText::new("\u{1F5A5}+").size(13.0).color(Color32::WHITE))
-                            .fill(Color32::from_rgb(10, 132, 255))
+                        egui::Button::new(egui::RichText::new("\u{1F5A5}+").size(13.0).color(theme::text_on_accent()))
+                            .fill(theme::accent_blue())
                             .corner_radius(egui::CornerRadius::same(6))
                             .min_size(egui::vec2(24.0, 24.0)),
                     ).on_hover_text("New VM").clicked() {
@@ -407,7 +437,7 @@ pub fn render_sidebar(
 
                 let header_text = egui::RichText::new(format!("\u{1F4C1} {}", folder_name))
                     .size(13.0)
-                    .color(Color32::from_rgb(210, 210, 215));
+                    .color(theme::folder_header_text());
 
                 let header = egui::CollapsingHeader::new(header_text)
                     .id_salt(format!("folder_{}", fi))
@@ -422,7 +452,7 @@ pub fn render_sidebar(
                         }
                         if vm_uuids.is_empty() {
                             ui.colored_label(
-                                Color32::from_rgb(72, 72, 74),
+                                theme::empty_folder_text(),
                                 egui::RichText::new("  No machines").size(12.0).italics(),
                             );
                         }
@@ -467,7 +497,7 @@ pub fn render_sidebar(
                 ui.add_space(4.0);
                 ui.separator();
                 ui.add_space(2.0);
-                ui.colored_label(Color32::from_rgb(99, 99, 102), egui::RichText::new("Unsorted").size(12.0));
+                ui.colored_label(theme::text_tertiary(), egui::RichText::new("Unsorted").size(12.0));
                 let root_uuids = layout.root_vms.clone();
                 for uuid in &root_uuids {
                     render_vm_entry(

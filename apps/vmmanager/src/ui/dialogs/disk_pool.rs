@@ -1,6 +1,6 @@
 use eframe::egui;
-use crate::theme;
-use crate::dialogs::BUTTON_SIZE;
+use crate::ui::theme;
+use crate::ui::dialogs::BUTTON_SIZE;
 
 pub struct DiskInfo {
     pub path: String,
@@ -26,7 +26,7 @@ impl DiskPoolDialog {
 
     fn scan(&mut self, vm_configs: &[crate::config::VmConfig]) {
         self.disks.clear();
-        let pool_dir = crate::platform::disk_pool_dir();
+        let pool_dir = crate::engine::platform::disk_pool_dir();
 
         // Collect all disk paths referenced by VMs
         let mut vm_disk_usage: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
@@ -102,10 +102,10 @@ impl DiskPoolDialog {
             .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Pool directory:").color(egui::Color32::from_rgb(130, 130, 135)));
+                    ui.label(egui::RichText::new("Pool directory:").color(theme::text_placeholder()));
                     ui.label(egui::RichText::new(
-                        crate::platform::disk_pool_dir().to_string_lossy().to_string()
-                    ).monospace().color(egui::Color32::from_rgb(180, 180, 180)));
+                        crate::engine::platform::disk_pool_dir().to_string_lossy().to_string()
+                    ).monospace().color(theme::text_mono()));
                 });
                 ui.separator();
 
@@ -113,18 +113,18 @@ impl DiskPoolDialog {
                     ui.add_space(20.0);
                     ui.vertical_centered(|ui| {
                         ui.label(egui::RichText::new("No disk images found.")
-                            .color(egui::Color32::from_rgb(130, 130, 135)));
+                            .color(theme::text_placeholder()));
                         ui.add_space(4.0);
                         ui.label(egui::RichText::new("Create a new disk or import one via File > Create Disk...")
                             .italics()
-                            .color(egui::Color32::from_rgb(100, 100, 105)));
+                            .color(theme::text_dim()));
                     });
                     ui.add_space(20.0);
                 } else {
                     let scroll_h = (ui.available_height() - 50.0).max(100.0);
                     egui::ScrollArea::vertical().max_height(scroll_h).show(ui, |ui| {
-                        let label_color = egui::Color32::from_rgb(142, 142, 147);
-                        let value_color = egui::Color32::from_rgb(210, 210, 215);
+                        let label_color = theme::text_secondary();
+                        let value_color = theme::text_value();
 
                         for (i, disk) in self.disks.iter().enumerate() {
                             if i > 0 {
@@ -144,7 +144,7 @@ impl DiskPoolDialog {
                                 ui.horizontal(|ui| {
                                     ui.add_space(16.0);
                                     ui.colored_label(
-                                        theme::SUCCESS_GREEN,
+                                        theme::success_green(),
                                         egui::RichText::new(format!("Used by: {}", disk.used_by.join(", "))).small(),
                                     );
                                 });
@@ -152,7 +152,7 @@ impl DiskPoolDialog {
                                 ui.horizontal(|ui| {
                                     ui.add_space(16.0);
                                     ui.colored_label(
-                                        egui::Color32::from_rgb(100, 100, 105),
+                                        theme::text_dim(),
                                         egui::RichText::new("Not attached to any VM").small().italics(),
                                     );
                                 });
@@ -169,7 +169,7 @@ impl DiskPoolDialog {
                             button_close = true;
                         }
                         if ui.add(egui::Button::new("Open Directory").min_size(BUTTON_SIZE)).clicked() {
-                            let dir = crate::platform::disk_pool_dir();
+                            let dir = crate::engine::platform::disk_pool_dir();
                             #[cfg(target_os = "linux")]
                             { let _ = std::process::Command::new("xdg-open").arg(&dir).spawn(); }
                             #[cfg(target_os = "windows")]

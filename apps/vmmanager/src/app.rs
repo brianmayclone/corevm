@@ -5,19 +5,19 @@ use std::thread::JoinHandle;
 use eframe::egui;
 
 use crate::config::VmConfig;
-use crate::dialogs::{AboutDialog, AddDiskDialog, AddDiskMode, CreateDiskDialog, CreateVmDialog, DiskPoolDialog, SnapshotsDialog};
-use crate::display::DisplayWidget;
-use crate::filebrowser::FileBrowserDialog;
-use crate::input;
-use crate::platform;
-use crate::diagnostics::{DiagLog, DiagnosticsWindow};
-use crate::settings::SettingsDialog;
-use crate::sidebar::{self, SidebarAction, SidebarLayout, SidebarState, VmState};
-use crate::statusbar::{self, VmMetrics};
-use crate::theme;
-use crate::toolbar::{self, ToolbarAction};
-use crate::vm;
-use crate::vm::VmControl;
+use crate::ui::dialogs::{AboutDialog, AddDiskDialog, AddDiskMode, CreateDiskDialog, CreateVmDialog, DiskPoolDialog, SnapshotsDialog};
+use crate::ui::components::display::DisplayWidget;
+use crate::ui::components::filebrowser::FileBrowserDialog;
+use crate::engine::input;
+use crate::engine::platform;
+use crate::engine::diagnostics::{DiagLog, DiagnosticsWindow};
+use crate::ui::dialogs::settings::SettingsDialog;
+use crate::ui::components::sidebar::{self, SidebarAction, SidebarLayout, SidebarState, VmState};
+use crate::ui::components::statusbar::{self, VmMetrics};
+use crate::ui::theme;
+use crate::ui::components::toolbar::{self, ToolbarAction};
+use crate::engine::vm;
+use crate::engine::vm::VmControl;
 use libcorevm::ffi::{corevm_ps2_key_press, corevm_ps2_key_release};
 
 /// Shared framebuffer data between VM thread and UI
@@ -92,6 +92,112 @@ pub enum FilePickTarget {
     ExportBiosLog,
 }
 
+// ─── Application preferences (persisted) ────────────────────────────────
+
+pub struct AppPreferences {
+    pub theme_mode: theme::ThemeMode,
+}
+
+impl Default for AppPreferences {
+    fn default() -> Self {
+        Self { theme_mode: theme::ThemeMode::Dark }
+    }
+}
+
+impl AppPreferences {
+    pub fn load() -> Self {
+        let path = platform::layout_dir().join("preferences.conf");
+        let mut prefs = Self::default();
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            for line in contents.lines() {
+                let line = line.trim();
+                if let Some((key, val)) = line.split_once('=') {
+                    match key.trim() {
+                        "theme" => {
+                            prefs.theme_mode = match val.trim() {
+                                "light" => theme::ThemeMode::Light,
+                                _ => theme::ThemeMode::Dark,
+                            };
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        prefs
+    }
+
+    pub fn save(&self) {
+        let path = platform::layout_dir().join("preferences.conf");
+        let content = format!("theme={}\n", match self.theme_mode {
+            theme::ThemeMode::Dark => "dark",
+            theme::ThemeMode::Light => "light",
+        });
+        let _ = std::fs::write(path, content);
+    }
+}
+
+// ─── Preferences dialog ─────────────────────────────────────────────────
+
+pub struct PreferencesDialog {
+    pub theme_mode: theme::ThemeMode,
+}
+
+impl PreferencesDialog {
+    pub fn new(prefs: &AppPreferences) -> Self {
+        Self { theme_mode: prefs.theme_mode }
+    }
+
+    /// Returns true if the dialog should remain open.
+    pub fn show(&mut self, ctx: &egui::Context, prefs: &mut AppPreferences) -> bool {
+        let mut open = true;
+        egui::Window::new("Preferences")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_width(320.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Appearance:");
+                    egui::ComboBox::from_id_salt("theme_mode")
+                        .selected_text(self.theme_mode.label())
+                        .show_ui(ui, |ui| {
+                            for &mode in theme::ThemeMode::all() {
+                                if ui.selectable_value(&mut self.theme_mode, mode, mode.label()).changed() {
+                                    prefs.theme_mode = self.theme_mode;
+                                    theme::set_theme_mode(self.theme_mode);
+                                    prefs.save();
+                                }
+                            }
+                        });
+                });
+            });
+        open
+    }
+}
+
+fn image_from_png(png_data: &[u8]) -> egui::ColorImage {
+    let decoder = png::Decoder::new(png_data);
+    let mut reader = decoder.read_info().expect("invalid PNG");
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).expect("PNG decode failed");
+    let width = info.width as usize;
+    let height = info.height as usize;
+    let pixels: Vec<egui::Color32> = match info.color_type {
+        png::ColorType::Rgba => buf[..width * height * 4]
+            .chunks_exact(4)
+            .map(|c| egui::Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]))
+            .collect(),
+        png::ColorType::Rgb => buf[..width * height * 3]
+            .chunks_exact(3)
+            .map(|c| egui::Color32::from_rgb(c[0], c[1], c[2]))
+            .collect(),
+        _ => panic!("unsupported PNG color type: {:?}", info.color_type),
+    };
+    egui::ColorImage { size: [width, height], pixels }
+}
+
 pub struct CoreVmApp {
     pub vms: Vec<VmEntry>,
     pub layout: SidebarLayout,
@@ -113,11 +219,19 @@ pub struct CoreVmApp {
     pub display_focused: bool,
     pub last_key_label: Option<String>,
     pub last_key_time: std::time::Instant,
+    /// Lazily loaded OS icon textures (keyed by "windows", "linux", "generic")
+    pub os_icons: HashMap<String, egui::TextureHandle>,
+    pub sidebar_visible: bool,
+    pub preferences: AppPreferences,
+    pub preferences_dialog: Option<PreferencesDialog>,
 }
 
 impl CoreVmApp {
     pub fn new() -> Self {
         platform::ensure_dirs();
+
+        let preferences = AppPreferences::load();
+        theme::set_theme_mode(preferences.theme_mode);
 
         let mut layout = SidebarLayout::load(&platform::layout_dir().join("layout.conf"));
 
@@ -158,6 +272,10 @@ impl CoreVmApp {
             display_focused: false,
             last_key_label: None,
             last_key_time: std::time::Instant::now(),
+            os_icons: HashMap::new(),
+            sidebar_visible: true,
+            preferences,
+            preferences_dialog: None,
         }
     }
 
@@ -173,16 +291,36 @@ impl CoreVmApp {
         self.vms.iter().map(|v| (v.config.uuid.clone(), v.errors.clone())).collect()
     }
 
-    fn vm_icons(&self) -> HashMap<String, &'static str> {
-        self.vms.iter().map(|v| {
-            let icon = if v.config.guest_os.is_windows() {
-                "\u{1FA9F}" // 🪟
+    fn load_os_icons(&mut self, ctx: &egui::Context) {
+        if !self.os_icons.is_empty() {
+            return;
+        }
+        let icons: &[(&str, &[u8])] = &[
+            ("windows", include_bytes!("../assets/icons/os/windows.png")),
+            ("linux", include_bytes!("../assets/icons/os/linux.png")),
+            ("other", include_bytes!("../assets/icons/os/other.png")),
+        ];
+        for (name, png_data) in icons {
+            let image = image_from_png(png_data);
+            let handle = ctx.load_texture(
+                format!("os_icon_{}", name),
+                image,
+                egui::TextureOptions::LINEAR,
+            );
+            self.os_icons.insert(name.to_string(), handle);
+        }
+    }
+
+    fn vm_icons(&self) -> HashMap<String, egui::TextureId> {
+        self.vms.iter().filter_map(|v| {
+            let key = if v.config.guest_os.is_windows() {
+                "windows"
             } else if v.config.guest_os.is_linux() {
-                "\u{1F427}" // 🐧
+                "linux"
             } else {
-                "\u{1F5A5}" // 🖥
+                "other"
             };
-            (v.config.uuid.clone(), icon)
+            self.os_icons.get(key).map(|h| (v.config.uuid.clone(), h.id()))
         }).collect()
     }
 
@@ -383,6 +521,7 @@ impl CoreVmApp {
 impl eframe::App for CoreVmApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         theme::apply_theme(ctx);
+        self.load_os_icons(ctx);
 
         // Restore cursor if mouse capture was cleared externally (e.g., VM stopped via toolbar).
         // The display's release_mouse() can't be called from toolbar handlers because they
@@ -454,7 +593,7 @@ impl eframe::App for CoreVmApp {
         egui::TopBottomPanel::top("menu_toolbar")
             .frame(
                 egui::Frame::new()
-                    .fill(egui::Color32::from_rgb(36, 36, 38))
+                    .fill(theme::toolbar_bg())
                     .inner_margin(egui::Margin::symmetric(6, 2)),
             )
             .show(ctx, |ui| {
@@ -489,8 +628,26 @@ impl eframe::App for CoreVmApp {
                                 ui.close_menu();
                             }
                             ui.separator();
+                            if ui.button("Preferences...").clicked() {
+                                self.preferences_dialog = Some(PreferencesDialog::new(&self.preferences));
+                                ui.close_menu();
+                            }
+                            ui.separator();
                             if ui.button("Quit").clicked() {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                        });
+
+                        ui.menu_button("View", |ui| {
+                            let sidebar_label = if self.sidebar_visible { "Collapse Sidebar" } else { "Expand Sidebar" };
+                            if ui.button(sidebar_label).clicked() {
+                                self.sidebar_visible = !self.sidebar_visible;
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            if ui.button("Fullscreen").clicked() {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!ctx.input(|i| i.viewport().fullscreen.unwrap_or(false))));
+                                ui.close_menu();
                             }
                         });
 
@@ -561,7 +718,7 @@ impl eframe::App for CoreVmApp {
 
                         // Divider between menus and toolbar
                         ui.add_space(8.0);
-                        ui.colored_label(theme::TEXT_TERTIARY, "|");
+                        ui.colored_label(theme::text_tertiary(), "|");
                         ui.add_space(8.0);
 
                         // Toolbar buttons
@@ -577,14 +734,18 @@ impl eframe::App for CoreVmApp {
         statusbar::render_statusbar(ctx, metrics.as_ref(), self.selected_vm.is_some(), self.last_key_label.as_deref());
 
         // Sidebar
-        let names = self.vm_names();
-        let states = self.vm_states();
-        let icons = self.vm_icons();
-        let errors = self.vm_errors();
-        let sidebar_actions = sidebar::render_sidebar(
-            ctx, &mut self.layout, &names, &states, &icons, &errors,
-            &mut self.selected_vm, &mut self.sidebar_state,
-        );
+        let sidebar_actions = if self.sidebar_visible {
+            let names = self.vm_names();
+            let states = self.vm_states();
+            let icons = self.vm_icons();
+            let errors = self.vm_errors();
+            sidebar::render_sidebar(
+                ctx, &mut self.layout, &names, &states, &icons, &errors,
+                &mut self.selected_vm, &mut self.sidebar_state,
+            )
+        } else {
+            Vec::new()
+        };
 
         // Handle sidebar actions
         for action in sidebar_actions {
@@ -667,13 +828,13 @@ impl eframe::App for CoreVmApp {
                         ui.label(
                             egui::RichText::new("No Machine Selected")
                                 .size(20.0)
-                                .color(theme::TEXT_SECONDARY),
+                                .color(theme::text_secondary()),
                         );
                         ui.add_space(6.0);
                         ui.label(
                             egui::RichText::new("Select a virtual machine from the sidebar or create a new one")
                                 .size(13.0)
-                                .color(theme::TEXT_TERTIARY),
+                                .color(theme::text_tertiary()),
                         );
                     });
                 });
@@ -856,6 +1017,13 @@ impl eframe::App for CoreVmApp {
             }
         }
 
+        // Preferences dialog
+        if let Some(ref mut dialog) = self.preferences_dialog {
+            if !dialog.show(ctx, &mut self.preferences) {
+                self.preferences_dialog = None;
+            }
+        }
+
         // Snapshots dialog
         if let Some(ref mut dialog) = self.snapshots_dialog {
             if !dialog.show(ctx) {
@@ -906,7 +1074,7 @@ impl eframe::App for CoreVmApp {
                 .show(ctx, |ui| {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("⚠").size(20.0).color(theme::ERROR_RED));
+                        ui.label(egui::RichText::new("⚠").size(20.0).color(theme::error_red()));
                         ui.add_space(4.0);
                         ui.label(&msg);
                     });
@@ -915,7 +1083,7 @@ impl eframe::App for CoreVmApp {
                     ui.add_space(2.0);
                     ui.horizontal(|ui| {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add(egui::Button::new("OK").fill(theme::ACCENT_BLUE).min_size(egui::vec2(80.0, 28.0))).clicked() {
+                            if ui.add(egui::Button::new("OK").fill(theme::accent_blue()).min_size(egui::vec2(80.0, 28.0))).clicked() {
                                 dismiss = true;
                             }
                         });
@@ -938,7 +1106,7 @@ impl eframe::App for CoreVmApp {
                 .show(ctx, |ui| {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("\u{2714}").size(20.0).color(theme::SUCCESS_GREEN));
+                        ui.label(egui::RichText::new("\u{2714}").size(20.0).color(theme::success_green()));
                         ui.add_space(4.0);
                         ui.label(&msg);
                     });
@@ -947,7 +1115,7 @@ impl eframe::App for CoreVmApp {
                     ui.add_space(2.0);
                     ui.horizontal(|ui| {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add(egui::Button::new("OK").fill(theme::SUCCESS_GREEN).min_size(egui::vec2(80.0, 28.0))).clicked() {
+                            if ui.add(egui::Button::new("OK").fill(theme::success_green()).min_size(egui::vec2(80.0, 28.0))).clicked() {
                                 dismiss = true;
                             }
                         });
@@ -1033,20 +1201,20 @@ fn render_summary(ui: &mut egui::Ui, vm: &VmEntry, deferred_action: &mut Option<
 
         // Shadow behind screen
         let shadow_rect = rect.expand(3.0).translate(egui::vec2(0.0, 2.0));
-        painter.rect_filled(shadow_rect, 12.0, egui::Color32::from_rgba_premultiplied(0, 0, 0, 40));
+        painter.rect_filled(shadow_rect, 12.0, theme::card_shadow());
 
         // Screen background
-        painter.rect_filled(rect, 10.0, egui::Color32::from_rgb(18, 18, 20));
+        painter.rect_filled(rect, 10.0, theme::card_bg());
 
         // Subtle border
-        painter.rect_stroke(rect, 10.0, egui::Stroke::new(0.5, egui::Color32::from_rgb(50, 50, 54)), egui::StrokeKind::Outside);
+        painter.rect_stroke(rect, 10.0, egui::Stroke::new(0.5, theme::card_border()), egui::StrokeKind::Outside);
 
         // Power icon (large circle)
         let icon_center = rect.center() - egui::vec2(0.0, 20.0);
-        painter.circle_stroke(icon_center, 28.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(72, 72, 76)));
+        painter.circle_stroke(icon_center, 28.0, egui::Stroke::new(2.0, theme::card_icon_stroke()));
         painter.line_segment(
             [icon_center - egui::vec2(0.0, 14.0), icon_center - egui::vec2(0.0, 30.0)],
-            egui::Stroke::new(2.0, egui::Color32::from_rgb(72, 72, 76)),
+            egui::Stroke::new(2.0, theme::card_icon_stroke()),
         );
 
         // VM name
@@ -1055,14 +1223,14 @@ fn render_summary(ui: &mut egui::Ui, vm: &VmEntry, deferred_action: &mut Option<
             egui::Align2::CENTER_CENTER,
             &vm.config.name,
             egui::FontId::proportional(18.0),
-            egui::Color32::from_rgb(142, 142, 147),
+            theme::text_secondary(),
         );
 
         // State label
         let (state_label, state_color) = match vm.state {
-            VmState::Running => ("Running", theme::SUCCESS_GREEN),
-            VmState::Paused => ("Paused", theme::WARNING_ORANGE),
-            VmState::Stopped => ("Powered Off", egui::Color32::from_rgb(99, 99, 102)),
+            VmState::Running => ("Running", theme::success_green()),
+            VmState::Paused => ("Paused", theme::warning_orange()),
+            VmState::Stopped => ("Powered Off", theme::text_tertiary()),
         };
         painter.text(
             rect.center() + egui::vec2(0.0, 48.0),
@@ -1075,10 +1243,10 @@ fn render_summary(ui: &mut egui::Ui, vm: &VmEntry, deferred_action: &mut Option<
         ui.add_space(16.0);
 
         // --- Info cards below screen ---
-        let card_bg = egui::Color32::from_rgb(44, 44, 46);
+        let card_bg = theme::card_bg_elevated();
         let card_radius = 10.0;
-        let label_color = egui::Color32::from_rgb(142, 142, 147);
-        let value_color = egui::Color32::from_rgb(220, 220, 225);
+        let label_color = theme::text_secondary();
+        let value_color = theme::text_value();
 
         // Collect info items
         let ram_str = if vm.config.ram_mb >= 1024 {
@@ -1143,7 +1311,7 @@ fn render_summary(ui: &mut egui::Ui, vm: &VmEntry, deferred_action: &mut Option<
                         .size(15.0)
                         .color(egui::Color32::WHITE),
                 )
-                .fill(theme::ACCENT_BLUE)
+                .fill(theme::accent_blue())
                 .corner_radius(egui::CornerRadius::same(10))
                 .min_size(egui::vec2(180.0, 42.0)),
             )

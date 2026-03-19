@@ -1,6 +1,6 @@
 use eframe::egui;
-use crate::theme;
-use crate::dialogs::BUTTON_SIZE;
+use crate::ui::theme;
+use crate::ui::dialogs::BUTTON_SIZE;
 
 pub struct AboutDialog {
     pub open: bool,
@@ -25,19 +25,19 @@ impl AboutDialog {
                 ui.add_space(8.0);
                 ui.vertical_centered(|ui| {
                     ui.heading("CoreVM Manager");
-                    ui.label(egui::RichText::new("Version 0.1.0").color(egui::Color32::from_rgb(160, 160, 160)));
+                    ui.label(egui::RichText::new("Version 0.1.0").color(theme::text_disabled()));
                     ui.add_space(8.0);
                     ui.label("Cross-platform x86 Virtual Machine Manager");
                     ui.label(egui::RichText::new("Powered by libcorevm").italics());
                     ui.add_space(4.0);
-                    ui.label(egui::RichText::new("\u{00a9} 2026 CoreVM").color(egui::Color32::from_rgb(120, 120, 120)));
+                    ui.label(egui::RichText::new("\u{00a9} 2026 CoreVM").color(theme::text_subtle()));
                 });
                 ui.add_space(4.0);
                 ui.separator();
                 ui.add_space(2.0);
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(egui::Button::new("OK").fill(theme::ACCENT_BLUE).min_size(BUTTON_SIZE)).clicked() {
+                        if ui.add(egui::Button::new("OK").fill(theme::accent_blue()).min_size(BUTTON_SIZE)).clicked() {
                             button_close = true;
                         }
                     });

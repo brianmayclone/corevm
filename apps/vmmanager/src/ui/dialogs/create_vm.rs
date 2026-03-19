@@ -1,8 +1,8 @@
 use eframe::egui;
 use crate::config::VmConfig;
-use crate::dialogs::{labeled_row, button_row, FIELD_MIN_WIDTH};
-use crate::platform;
-use crate::theme;
+use crate::ui::dialogs::{labeled_row, button_row, FIELD_MIN_WIDTH};
+use crate::engine::platform;
+use crate::ui::theme;
 
 pub struct CreateVmDialog {
     name: String,
@@ -59,11 +59,11 @@ impl CreateVmDialog {
                     ui.label("Directory:");
                     ui.label(egui::RichText::new(vm_dir.to_string_lossy().as_ref())
                         .monospace()
-                        .color(egui::Color32::from_rgb(130, 130, 135)));
+                        .color(theme::text_placeholder()));
                 });
 
                 if let Some(err) = &self.error {
-                    ui.colored_label(theme::ERROR_RED, err);
+                    ui.colored_label(theme::error_red(), err);
                 }
 
                 ui.separator();
