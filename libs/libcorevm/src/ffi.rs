@@ -1553,6 +1553,7 @@ pub extern "C" fn corevm_set_acpi_devices(_handle: u64, _has_e1000: i32, _has_ac
 }
 
 /// Set the number of CPU cores. Must be called BEFORE corevm_setup_acpi_tables().
+/// Re-loads host CPUID with topology adjusted for the new core count.
 #[unsafe(no_mangle)]
 pub extern "C" fn corevm_set_cpu_count(handle: u64, count: u32) -> i32 {
     match get_vm(handle) {
@@ -1560,7 +1561,12 @@ pub extern "C" fn corevm_set_cpu_count(handle: u64, count: u32) -> i32 {
             let c = count.max(1).min(32);
             vm.cpu_count = c;
             #[cfg(feature = "linux")]
-            { vm.backend.cpu_count = c; }
+            {
+                vm.backend.cpu_count = c;
+                // Re-load host CPUID so topology leaves (1, 4, 0xB,
+                // 0x80000008) are filtered with the correct cpu_count.
+                let _ = vm.backend.load_host_cpuid();
+            }
             0
         }
         None => -1,
