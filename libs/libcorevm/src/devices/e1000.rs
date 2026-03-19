@@ -422,6 +422,9 @@ pub struct E1000 {
     /// driver's next instruction (critical for the interrupt test).
     #[cfg(feature = "std")]
     pub irq_callback: Option<alloc::boxed::Box<dyn FnMut(bool) + Send>>,
+    /// Flag set by fire_irq_assert when the callback fires.
+    /// poll_irqs should check this and synchronize e1000_irq_asserted.
+    pub irq_pending_assert: bool,
 }
 
 impl E1000 {
@@ -545,6 +548,7 @@ impl E1000 {
             msi_data: 0,
             #[cfg(feature = "std")]
             irq_callback: None,
+            irq_pending_assert: false,
         }
     }
 
@@ -634,6 +638,7 @@ impl E1000 {
         let icr = self.regs[REG_ICR / 4];
         let ims = self.regs[REG_IMS / 4];
         if (icr & ims) != 0 {
+            self.irq_pending_assert = true;
             #[cfg(feature = "std")]
             if let Some(ref mut cb) = self.irq_callback {
                 cb(true);
@@ -1688,7 +1693,10 @@ impl MmioHandler for E1000 {
 
             REG_IMS => {
                 self.regs[dword_offset] |= new_val;
-                // Assertion handled by poll_irqs on next iteration.
+                // Assert immediately if pending ICR bits now match the
+                // newly enabled mask (important for interrupt test which
+                // writes IMS before ICS in some driver versions).
+                self.fire_irq_assert();
             }
 
             REG_IMC => {

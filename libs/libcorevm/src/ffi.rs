@@ -727,6 +727,15 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                 if !e1000.rx_buffer.is_empty() {
                     e1000.process_rx_ring();
                 }
+                // Synchronize: if fire_irq_assert already asserted the line
+                // via the callback, update e1000_irq_asserted to match.
+                if e1000.irq_pending_assert {
+                    e1000.irq_pending_assert = false;
+                    if !vm.e1000_irq_asserted {
+                        vm.e1000_irq_asserted = true;
+                    }
+                }
+
                 let icr = e1000.regs[0x00C0 / 4];
                 let ims = e1000.regs[0x00D0 / 4];
                 let want_asserted = (icr & ims) != 0;
