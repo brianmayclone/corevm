@@ -783,20 +783,23 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                             injected += 1;
                         }
                     } else {
+                        let e1000_irq = vm.chipset.irqs.e1000 as u32;
                         if want_asserted && !vm.e1000_irq_asserted {
                             vm.e1000_irq_asserted = true;
-                            let _ = vm.backend.set_irq_line(11, true);
+                            let _ = vm.backend.set_irq_line(e1000_irq, true);
                             injected += 1;
                         } else if !want_asserted && vm.e1000_irq_asserted {
                             vm.e1000_irq_asserted = false;
-                            if !vm.ahci_irq_asserted {
-                                let _ = vm.backend.set_irq_line(11, false);
+                            // Only de-assert if AHCI isn't sharing the same IRQ line.
+                            if e1000_irq != vm.chipset.irqs.ahci as u32 || !vm.ahci_irq_asserted {
+                                let _ = vm.backend.set_irq_line(e1000_irq, false);
                             }
                         }
                     }
                 }
                 #[cfg(feature = "windows")]
                 {
+                    let e1000_irq = vm.chipset.irqs.e1000;
                     if e1000.msi_enabled {
                         if want_asserted {
                             let _ = vm.backend.signal_msi(e1000.msi_address, e1000.msi_data);
@@ -808,24 +811,25 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                             vm.e1000_irq_asserted = true;
                             if !vm.pic_ptr.is_null() {
                                 let pic = unsafe { &mut *vm.pic_ptr };
-                                pic.raise_irq(11);
+                                pic.raise_irq(e1000_irq);
                             }
-                            vm.backend.ioapic_set_irq(11, true);
+                            vm.backend.ioapic_set_irq(e1000_irq, true);
                             injected += 1;
                         } else if !want_asserted && vm.e1000_irq_asserted {
                             vm.e1000_irq_asserted = false;
-                            if !vm.ahci_irq_asserted {
-                                vm.backend.ioapic_set_irq(11, false);
+                            if e1000_irq != vm.chipset.irqs.ahci || !vm.ahci_irq_asserted {
+                                vm.backend.ioapic_set_irq(e1000_irq, false);
                             }
                         }
                     }
                 }
                 #[cfg(not(any(feature = "linux", feature = "windows")))]
                 {
+                    let e1000_irq = vm.chipset.irqs.e1000;
                     if want_asserted {
                         if !vm.pic_ptr.is_null() {
                             let pic = unsafe { &mut *vm.pic_ptr };
-                            pic.raise_irq(11);
+                            pic.raise_irq(e1000_irq);
                         }
                     }
                 }
