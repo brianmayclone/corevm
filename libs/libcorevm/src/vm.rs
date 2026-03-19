@@ -100,7 +100,7 @@ pub struct Vm {
     /// data races on the PS/2 controller.  The VM loop drains this queue in
     /// `corevm_poll_irqs` (single-threaded context).
     #[cfg(feature = "std")]
-    pub pending_mouse: std::sync::Mutex<alloc::vec::Vec<(i16, i16, u8)>>,
+    pub pending_mouse: std::sync::Mutex<alloc::vec::Vec<(i16, i16, u8, i8)>>,
 }
 
 impl Vm {

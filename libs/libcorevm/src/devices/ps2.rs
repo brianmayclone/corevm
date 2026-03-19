@@ -61,9 +61,16 @@ pub struct Ps2Controller {
     pub irq_needed: bool,
     /// Alternation flag for fair scheduling between keyboard and mouse buffers.
     mouse_priority: bool,
-    /// Remaining bytes in the current 3-byte mouse movement packet.
+    /// Remaining bytes in the current mouse movement packet (3 or 4 depending on mouse_id).
     /// When > 0, update_output_buffer will ALWAYS serve from mouse_buffer.
     mouse_packet_remaining: u8,
+    /// Mouse device ID: 0x00 = standard 3-byte, 0x03 = IntelliMouse (4-byte with scroll).
+    /// Upgraded via the magic sample-rate sequence 200, 100, 80.
+    mouse_id: u8,
+    /// Mouse expecting a parameter for Set Sample Rate (0xF3).
+    mouse_expecting_sample_rate: bool,
+    /// Last 3 sample rates set, for IntelliMouse detection sequence.
+    sample_rate_history: [u8; 3],
 }
 
 /// Status register bit masks.
@@ -91,6 +98,9 @@ impl Ps2Controller {
             irq_needed: false,
             mouse_priority: false,
             mouse_packet_remaining: 0,
+            mouse_id: 0,
+            mouse_expecting_sample_rate: false,
+            sample_rate_history: [0; 3],
         }
     }
 
@@ -110,16 +120,25 @@ impl Ps2Controller {
         }
     }
 
-    /// Enqueue mouse movement as one or more 3-byte PS/2 packets.
+    /// Enqueue mouse movement as one or more PS/2 packets.
+    ///
+    /// Sends 3-byte packets for standard mouse (ID 0x00) or 4-byte packets
+    /// with scroll wheel for IntelliMouse (ID 0x03).
     ///
     /// Large deltas are split into multiple packets clamped to the 9-bit
     /// signed range (-255..=255) to avoid overflow bits, which cause Linux's
     /// psmouse driver to discard the entire packet.
     pub fn mouse_move(&mut self, dx: i16, dy: i16, buttons: u8) {
+        self.mouse_move_wheel(dx, dy, buttons, 0);
+    }
+
+    /// Enqueue mouse movement with scroll wheel data.
+    pub fn mouse_move_wheel(&mut self, dx: i16, dy: i16, buttons: u8, wheel: i8) {
         if !self.mouse_enabled {
             return;
         }
 
+        let packet_size: u8 = if self.mouse_id >= 3 { 4 } else { 3 };
         let mut rem_dx = dx as i32;
         let mut rem_dy = dy as i32;
 
@@ -132,14 +151,18 @@ impl Ps2Controller {
             status_byte |= 0x08; // bit 3 always set
             if chunk_dx < 0 { status_byte |= 0x10; }
             if chunk_dy < 0 { status_byte |= 0x20; }
-            // No overflow bits — we clamped to valid range.
 
             self.mouse_buffer.push_back(status_byte);
             self.mouse_buffer.push_back(chunk_dx as u8);
             self.mouse_buffer.push_back(chunk_dy as u8);
 
+            // IntelliMouse 4th byte: scroll wheel (signed, clamped to -8..7)
+            if self.mouse_id >= 3 {
+                self.mouse_buffer.push_back(wheel.clamp(-8, 7) as u8);
+            }
+
             if self.mouse_packet_remaining == 0 {
-                self.mouse_packet_remaining = 3;
+                self.mouse_packet_remaining = packet_size;
             }
 
             rem_dx -= chunk_dx as i32;
@@ -279,6 +302,21 @@ impl Ps2Controller {
 
     /// Handle a device command written to port 0x60 targeting the mouse.
     fn handle_mouse_data(&mut self, byte: u8) {
+        // Handle parameter byte for Set Sample Rate (0xF3)
+        if self.mouse_expecting_sample_rate {
+            self.mouse_expecting_sample_rate = false;
+            self.push_mouse_response(0xFA);
+            // Shift history and record new rate
+            self.sample_rate_history[0] = self.sample_rate_history[1];
+            self.sample_rate_history[1] = self.sample_rate_history[2];
+            self.sample_rate_history[2] = byte;
+            // Magic sequence: 200, 100, 80 → upgrade to IntelliMouse (ID 3)
+            if self.sample_rate_history == [200, 100, 80] && self.mouse_id < 3 {
+                self.mouse_id = 3;
+            }
+            return;
+        }
+
         match byte {
             0xE6 => { self.push_mouse_response(0xFA); }
             0xE7 => { self.push_mouse_response(0xFA); }
@@ -293,10 +331,15 @@ impl Ps2Controller {
             0xEA => { self.push_mouse_response(0xFA); }
             0xF0 => { self.push_mouse_response(0xFA); }
             0xF2 => {
+                // Get Device ID — return current mouse_id
                 self.push_mouse_response(0xFA);
-                self.push_mouse_response(0x00);
+                self.push_mouse_response(self.mouse_id);
             }
-            0xF3 => { self.push_mouse_response(0xFA); }
+            0xF3 => {
+                // Set Sample Rate — expect parameter byte next
+                self.push_mouse_response(0xFA);
+                self.mouse_expecting_sample_rate = true;
+            }
             0xF4 => {
                 self.mouse_enabled = true;
                 self.push_mouse_response(0xFA);
@@ -306,10 +349,13 @@ impl Ps2Controller {
                 self.push_mouse_response(0xFA);
             }
             0xFF => {
+                // Reset — return ACK + BAT OK + device ID, reset to standard mouse
                 self.push_mouse_response(0xFA);
                 self.push_mouse_response(0xAA);
                 self.push_mouse_response(0x00);
                 self.mouse_enabled = false;
+                self.mouse_id = 0;
+                self.sample_rate_history = [0; 3];
             }
             _ => {
                 self.push_mouse_response(0xFA);

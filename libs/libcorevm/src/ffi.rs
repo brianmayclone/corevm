@@ -597,7 +597,7 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
             // between pending_mouse (immutable borrow of vm) and ps2() (mutable).
             #[cfg(feature = "std")]
             {
-                let events: alloc::vec::Vec<(i16, i16, u8)> = {
+                let events: alloc::vec::Vec<(i16, i16, u8, i8)> = {
                     if let Ok(mut queue) = vm.pending_mouse.lock() {
                         queue.drain(..).collect()
                     } else {
@@ -606,8 +606,8 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                 };
                 if !events.is_empty() {
                     if let Some(ps2) = vm.ps2() {
-                        for (dx, dy, buttons) in events {
-                            ps2.mouse_move(dx, dy, buttons);
+                        for (dx, dy, buttons, wheel) in events {
+                            ps2.mouse_move_wheel(dx, dy, buttons, wheel);
                         }
                     }
                 }
@@ -2316,11 +2316,18 @@ pub extern "C" fn corevm_ps2_key_release(handle: u64, scancode: u8) -> i32 {
 /// The VM loop drains it in `corevm_poll_irqs` (single-threaded).
 #[no_mangle]
 pub extern "C" fn corevm_ps2_mouse_move(handle: u64, dx: i16, dy: i16, buttons: u8) -> i32 {
+    corevm_ps2_mouse_move_wheel(handle, dx, dy, buttons, 0)
+}
+
+/// Send PS/2 relative mouse move with scroll wheel.
+/// `wheel`: positive = scroll up, negative = scroll down (clamped to -8..7).
+#[no_mangle]
+pub extern "C" fn corevm_ps2_mouse_move_wheel(handle: u64, dx: i16, dy: i16, buttons: u8, wheel: i8) -> i32 {
     let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
     #[cfg(feature = "std")]
     {
         if let Ok(mut queue) = vm.pending_mouse.lock() {
-            queue.push((dx, dy, buttons));
+            queue.push((dx, dy, buttons, wheel));
             return 0;
         }
         return -1;
@@ -2328,7 +2335,7 @@ pub extern "C" fn corevm_ps2_mouse_move(handle: u64, dx: i16, dy: i16, buttons: 
     #[cfg(not(feature = "std"))]
     {
         match vm.ps2() {
-            Some(ps2) => { ps2.mouse_move(dx, dy, buttons); 0 }
+            Some(ps2) => { ps2.mouse_move_wheel(dx, dy, buttons, wheel); 0 }
             None => -1,
         }
     }

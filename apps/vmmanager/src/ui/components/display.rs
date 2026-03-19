@@ -763,13 +763,13 @@ impl DisplayWidget {
             wheel
         };
 
-        // Send PS/2 relative mouse events
-        if ps2_dx != 0 || ps2_dy != 0 {
+        // Send PS/2 relative mouse events (with scroll wheel)
+        if ps2_dx != 0 || ps2_dy != 0 || final_wheel != 0 {
             if self.mouse_debug_counter % 60 == 0 {
-                eprintln!("[mouse-evdev] dx={} dy={} abs=({},{})",
-                    ps2_dx, ps2_dy, self.abs_cursor_x, self.abs_cursor_y);
+                eprintln!("[mouse-evdev] dx={} dy={} wheel={} abs=({},{})",
+                    ps2_dx, ps2_dy, final_wheel, self.abs_cursor_x, self.abs_cursor_y);
             }
-            libcorevm::ffi::corevm_ps2_mouse_move(vm_handle, ps2_dx, ps2_dy, buttons);
+            libcorevm::ffi::corevm_ps2_mouse_move_wheel(vm_handle, ps2_dx, ps2_dy, buttons, final_wheel);
         } else if buttons != self.last_mouse_buttons {
             libcorevm::ffi::corevm_ps2_mouse_move(vm_handle, 0, 0, buttons);
         }
