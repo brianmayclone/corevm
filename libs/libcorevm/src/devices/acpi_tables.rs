@@ -143,6 +143,49 @@ fn build_facs() -> Vec<u8> {
 
 /// Build AML for a simple ISA device: Name(_HID, EisaId(id))
 /// Plus _CRS resource template with I/O range and IRQ.
+/// ISA device with two I/O port ranges (e.g., PS/2 controller: data=0x60, cmd=0x64).
+fn aml_isa_device_2io(name: &[u8; 4], eisa_id: [u8; 4],
+    io1_min: u16, io1_len: u8, io2_min: u16, io2_len: u8, irq: Option<u8>) -> Vec<u8>
+{
+    let mut dev = Vec::new();
+    dev.extend_from_slice(&[0x08]); // NameOp
+    dev.extend_from_slice(b"_HID");
+    dev.extend_from_slice(&[0x0C]); // DWordPrefix
+    dev.extend_from_slice(&eisa_id);
+    let mut crs_body = Vec::new();
+    // First I/O port range
+    crs_body.extend_from_slice(&[0x47, 0x01]);
+    crs_body.extend_from_slice(&io1_min.to_le_bytes());
+    crs_body.extend_from_slice(&io1_min.to_le_bytes());
+    crs_body.push(0x01); crs_body.push(io1_len);
+    // Second I/O port range
+    crs_body.extend_from_slice(&[0x47, 0x01]);
+    crs_body.extend_from_slice(&io2_min.to_le_bytes());
+    crs_body.extend_from_slice(&io2_min.to_le_bytes());
+    crs_body.push(0x01); crs_body.push(io2_len);
+    if let Some(irq_num) = irq {
+        let irq_mask: u16 = 1 << irq_num;
+        crs_body.push(0x22);
+        crs_body.extend_from_slice(&irq_mask.to_le_bytes());
+    }
+    crs_body.extend_from_slice(&[0x79, 0x00]);
+    dev.extend_from_slice(&[0x08]);
+    dev.extend_from_slice(b"_CRS");
+    let buf_body_len = 2 + crs_body.len();
+    dev.push(0x11);
+    aml_push_pkg_len(&mut dev, buf_body_len);
+    dev.push(0x0A);
+    dev.push(crs_body.len() as u8);
+    dev.extend_from_slice(&crs_body);
+    let mut out = Vec::new();
+    out.extend_from_slice(&[0x5B, 0x82]);
+    let inner_len = 4 + dev.len();
+    aml_push_pkg_len(&mut out, inner_len);
+    out.extend_from_slice(name);
+    out.extend_from_slice(&dev);
+    out
+}
+
 fn aml_isa_device(name: &[u8; 4], eisa_id: [u8; 4], io_min: u16, io_len: u8, irq: Option<u8>) -> Vec<u8> {
     let mut dev = Vec::new();
     // Name(_HID, EisaId(...))
@@ -245,7 +288,7 @@ fn eisa_id(s: &str) -> [u8; 4] {
     ]
 }
 
-fn build_dsdt_with_cpus(num_cpus: u32, devices: &AcpiDeviceConfig) -> Vec<u8> {
+fn build_dsdt_with_cpus(num_cpus: u32, devices: &AcpiDeviceConfig, pci_mmio_start: u64, pci_mmio_end: u64) -> Vec<u8> {
     let num_cpus = num_cpus.max(1).min(32);
     // Build comprehensive DSDT with ISA devices and PCI interrupt routing.
     // Devices:
@@ -309,8 +352,10 @@ fn build_dsdt_with_cpus(num_cpus: u32, devices: &AcpiDeviceConfig) -> Vec<u8> {
     // ── Build \_SB_ scope contents ──
 
     // Build ISA device children
-    let kbd  = aml_isa_device(b"KBD_", eisa_id("PNP0303"), 0x0060, 1, Some(1));
-    let mou  = aml_isa_device(b"MOU_", eisa_id("PNP0F13"), 0x0060, 1, Some(12));
+    // PS/2 keyboard needs two I/O ranges: 0x60 (data) and 0x64 (command).
+    // Use aml_isa_device_2io for the two-port layout.
+    let kbd  = aml_isa_device_2io(b"KBD_", eisa_id("PNP0303"), 0x0060, 1, 0x0064, 1, Some(1));
+    let mou  = aml_isa_device_2io(b"MOU_", eisa_id("PNP0F13"), 0x0060, 1, 0x0064, 1, Some(12));
     let com1 = aml_isa_device(b"COM1", eisa_id("PNP0501"), 0x03F8, 8, Some(4));
     let rtc  = aml_isa_device(b"RTC0", eisa_id("PNP0B00"), 0x0070, 2, Some(8));
     let timr = aml_isa_device(b"TIMR", eisa_id("PNP0100"), 0x0040, 4, Some(0));
@@ -367,53 +412,53 @@ fn build_dsdt_with_cpus(num_cpus: u32, devices: &AcpiDeviceConfig) -> Vec<u8> {
     // PCI interrupt routing — must match PIIX3 PIRQ register values.
     // ACPI _PRT pin is 0-based (0=INTA,1=INTB,2=INTC,3=INTD).
     // PIIX3 swizzle: PIRQ index = (device_slot + pin - 1) % 4
-    //   PIRQA(0x60)=10, PIRQB(0x61)=5, PIRQC(0x62)=11, PIRQD(0x63)=11
+    let s = &devices.slots;
+    let irq = &devices.irqs;
     let mut num_prt_entries = 0u8;
 
-    // Dev 2 (VGA): always present, INTA → PIRQC → GSI 11
-    prt_entry(&mut prt, 2, 0, 11);
+    // VGA: always present, INTA
+    prt_entry(&mut prt, s.vga as u32, 0, irq.vga);
     num_prt_entries += 1;
 
-    // Dev 3 (AHCI): always present, INTA → PIRQD → GSI 11
-    prt_entry(&mut prt, 3, 0, 11);
+    // AHCI: always present, INTA
+    prt_entry(&mut prt, s.ahci as u32, 0, irq.ahci);
     num_prt_entries += 1;
 
-    // Dev 4 (E1000): INTA → GSI 11 (shared with AHCI)
+    // E1000: INTA
     if devices.has_e1000 {
-        prt_entry(&mut prt, 4, 0, 11);
+        prt_entry(&mut prt, s.e1000 as u32, 0, irq.e1000);
         num_prt_entries += 1;
     }
 
-    // Dev 5 (AC97): INTA → PIRQB → GSI 5
+    // AC97: INTA
     if devices.has_ac97 {
-        prt_entry(&mut prt, 5, 0, 5);
+        prt_entry(&mut prt, s.ac97 as u32, 0, irq.ac97);
         num_prt_entries += 1;
     }
 
-    // Dev 6 (UHCI): INTD → PIRQB → GSI 5
+    // UHCI: INTD (pin 3)
     if devices.has_uhci {
-        prt_entry(&mut prt, 6, 3, 5);
+        prt_entry(&mut prt, s.uhci as u32, 3, irq.uhci);
         num_prt_entries += 1;
     }
 
-    // Dev 7 (VirtIO GPU): INTA → PIRQ = (7+0)%4=3 → PIRQD → GSI 11
+    // VirtIO GPU: INTA
     if devices.has_virtio_gpu {
-        prt_entry(&mut prt, 7, 0, 11);
+        prt_entry(&mut prt, s.virtio_gpu as u32, 0, irq.virtio_gpu);
         num_prt_entries += 1;
     }
 
-    // Dev 8 (VirtIO-Net): INTA → PIRQ = (8+0)%4=0 → PIRQA → GSI 11
+    // VirtIO-Net: INTA
     if devices.has_virtio_net {
-        prt_entry(&mut prt, 8, 0, 11);
+        prt_entry(&mut prt, s.virtio_net as u32, 0, irq.virtio_net);
         num_prt_entries += 1;
     }
 
-    // Dev 9 (VirtIO Keyboard): INTA → GSI 10
-    // Dev 10 (VirtIO Tablet): INTB → GSI 10
+    // VirtIO Input: Keyboard INTA, Tablet INTB
     if devices.has_virtio_input {
-        prt_entry(&mut prt, 9, 0, 10);
+        prt_entry(&mut prt, s.virtio_kbd as u32, 0, irq.virtio_input);
         num_prt_entries += 1;
-        prt_entry(&mut prt, 10, 1, 10);
+        prt_entry(&mut prt, s.virtio_tablet as u32, 1, irq.virtio_input);
         num_prt_entries += 1;
     }
 
@@ -487,22 +532,17 @@ fn build_dsdt_with_cpus(num_cpus: u32, devices: &AcpiDeviceConfig) -> Vec<u8> {
         crs_body.extend_from_slice(&0u32.to_le_bytes());
         crs_body.extend_from_slice(&0xF300u32.to_le_bytes());
 
-        // DWord Memory range: 0xC0000000 - 0xFEBFFFFF (PCI MMIO)
-        // Starts at 0xC0000000 to include the VGA BAR0 framebuffer region.
-        // The VBE LFB at 0xE0000000 is mapped as a KVM memory region but
-        // is still within the PCI MMIO window — PCI BARs can be placed
-        // anywhere in this range by the firmware (SeaBIOS) or OS.
-        // DWordMemory(ResourceProducer, PosDecode, MinFixed, MaxFixed, NonCacheable, ReadWrite,
-        //   0, 0xC0000000, 0xFEBFFFFF, 0, 0x3EC00000)
+        // DWord Memory range: PCI MMIO window
+        // Range is determined by chipset config — passed in from caller.
         crs_body.extend_from_slice(&[0x87, 0x17, 0x00]); // tag + length(23) LE
         crs_body.push(0x00); // ResourceType=0 (Memory)
         crs_body.push(0x0C); // MinFixed | MaxFixed
         crs_body.push(0x01); // ReadWrite
         crs_body.extend_from_slice(&0u32.to_le_bytes()); // _GRA
-        crs_body.extend_from_slice(&0xC000_0000u32.to_le_bytes()); // _MIN
-        crs_body.extend_from_slice(&0xFEBF_FFFFu32.to_le_bytes()); // _MAX
+        crs_body.extend_from_slice(&(pci_mmio_start as u32).to_le_bytes()); // _MIN
+        crs_body.extend_from_slice(&(pci_mmio_end as u32).to_le_bytes()); // _MAX
         crs_body.extend_from_slice(&0u32.to_le_bytes()); // _TRA
-        crs_body.extend_from_slice(&0x3EC0_0000u32.to_le_bytes()); // _LEN
+        crs_body.extend_from_slice(&((pci_mmio_end - pci_mmio_start + 1) as u32).to_le_bytes()); // _LEN
 
         // End tag
         crs_body.extend_from_slice(&[0x79, 0x00]);
@@ -728,8 +768,8 @@ fn loader_add_checksum(file: &[u8; FILESZ], offset: u32, start: u32, length: u32
     cmd
 }
 
-/// Device presence flags for dynamic ACPI table generation.
-#[derive(Clone, Debug, Default)]
+/// Device presence flags and chipset parameters for ACPI table generation.
+#[derive(Clone, Debug)]
 pub struct AcpiDeviceConfig {
     pub has_e1000: bool,
     pub has_ac97: bool,
@@ -737,6 +777,32 @@ pub struct AcpiDeviceConfig {
     pub has_virtio_gpu: bool,
     pub has_virtio_net: bool,
     pub has_virtio_input: bool,
+    /// PCI MMIO window start address (for _CRS DWordMemory descriptor).
+    pub pci_mmio_start: u64,
+    /// PCI MMIO window end address (inclusive, for _CRS).
+    pub pci_mmio_end: u64,
+    /// PCI slot assignments (from ChipsetConfig).
+    pub slots: crate::devices::chipset::PciSlotMap,
+    /// IRQ assignments (from ChipsetConfig).
+    pub irqs: crate::devices::chipset::IrqMap,
+}
+
+impl Default for AcpiDeviceConfig {
+    fn default() -> Self {
+        let cs = &crate::devices::chipset::Q35_CONFIG;
+        Self {
+            has_e1000: false,
+            has_ac97: false,
+            has_uhci: false,
+            has_virtio_gpu: false,
+            has_virtio_net: false,
+            has_virtio_input: false,
+            pci_mmio_start: cs.mmio.pci_mmio_start,
+            pci_mmio_end: cs.mmio.pci_mmio_end,
+            slots: cs.slots,
+            irqs: cs.irqs,
+        }
+    }
 }
 
 /// Generate ACPI 2.0 tables for SeaBIOS fw_cfg.
@@ -774,7 +840,7 @@ fn generate_acpi_tables_full(enable_hpet: bool, num_cpus: u32, devices: &AcpiDev
     let xsdt = build_xsdt(num_tables);
     let fadt = build_fadt();
     let facs = build_facs();
-    let dsdt = build_dsdt_with_cpus(num_cpus, devices);
+    let dsdt = build_dsdt_with_cpus(num_cpus, devices, devices.pci_mmio_start, devices.pci_mmio_end);
     let madt = build_madt_with_cpus(num_cpus);
 
     // Layout: RSDT | XSDT | FADT | FACS | DSDT | MADT [| HPET]

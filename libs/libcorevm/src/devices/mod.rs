@@ -39,6 +39,8 @@ pub mod ahci;
 pub mod hpet;
 pub mod ac97;
 pub mod uhci;
+pub mod chipset;
+pub mod q35_mch;
 pub mod gpu;
 pub mod nic;
 pub mod virtio_gpu;

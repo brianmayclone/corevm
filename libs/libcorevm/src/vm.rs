@@ -1,11 +1,5 @@
 //! Top-level VM struct that ties backend, memory, I/O dispatch, and devices together.
 
-/// VGA PCI BAR0 base address (linear framebuffer).
-/// Placed within the PCI MMIO window declared in ACPI _CRS (0xC0000000-0xFEBFFFFF).
-/// Must not collide with VBE LFB (0xE0000000), E1000 (0xF0000000), or VirtIO devices.
-/// SeaBIOS may remap this — the PCI MMIO router handles dynamic routing.
-pub const VGA_BAR0_BASE: u64 = 0xD000_0000;
-
 use alloc::boxed::Box;
 use crate::backend::{VmBackend, VmExitReason, VmError};
 use crate::backend::types::*;
@@ -40,6 +34,10 @@ pub struct Vm {
 
     pub memory: GuestMemory,
     pub io: IoDispatch,
+
+    /// Chipset configuration (Q35 or i440FX). Determines PCI layout,
+    /// IRQ routing, MMIO addresses, and device slot assignments.
+    pub chipset: &'static crate::devices::chipset::ChipsetConfig,
 
     // Typed device pointers (set during setup_standard_devices / setup_ahci).
     // These point into the Box<dyn IoHandler/MmioHandler> owned by IoDispatch
@@ -107,7 +105,13 @@ pub struct Vm {
 
 impl Vm {
     /// Create a new VM with `ram_size_mb` megabytes of guest RAM.
+    /// Uses Q35 chipset by default. Call `new_with_chipset` for a specific chipset.
     pub fn new(ram_size_mb: u32) -> Result<Self, VmError> {
+        Self::new_with_chipset(ram_size_mb, &crate::devices::chipset::Q35_CONFIG)
+    }
+
+    /// Create a new VM with a specific chipset configuration.
+    pub fn new_with_chipset(ram_size_mb: u32, chipset: &'static crate::devices::chipset::ChipsetConfig) -> Result<Self, VmError> {
         let ram_bytes = (ram_size_mb as usize) * 1024 * 1024;
 
         #[cfg(feature = "linux")]
@@ -121,22 +125,57 @@ impl Vm {
         let io = IoDispatch::new();
 
         // Register guest RAM with the backend.
-        // PCI devices (VGA LFB, BIOS ROM, AHCI BAR, etc.) occupy the region
-        // 0xE0000000–0xFFFFFFFF ("PCI hole"). Guest RAM that would fall into
-        // this range must be relocated above 4 GB, just like real hardware
-        // and QEMU do.
-        const PCI_HOLE_START: u64 = 0xE000_0000; // 3.5 GB
-        const PCI_HOLE_END: u64   = 0x1_0000_0000; // 4 GB
+        //
+        // Two reserved regions must be excluded from guest RAM:
+        //
+        // 1. PCI MMCONFIG hole (Q35 only): 0xB0000000–0xBFFFFFFF (256MB)
+        //    Used for PCIe extended config space. SeaBIOS discovers this
+        //    via the MCH PCIEXBAR register.
+        //
+        // 2. PCI device hole: 0xE0000000–0xFFFFFFFF (512MB)
+        //    VGA LFB, PCI BARs, IOAPIC, LAPIC, BIOS ROM.
+        //    Guest RAM that would fall here is relocated above 4 GB.
+        //
+        // Memory layout for Q35 with >2.75GB RAM:
+        //   Slot 0: 0x00000000 – 0xAFFFFFFF (below MMCONFIG)
+        //   Slot 5: 0xC0000000 – 0xDFFFFFFF (between MMCONFIG and PCI hole)
+        //   Slot 3: 0x100000000+ (above 4GB)
+        //
+        const PCI_HOLE_START: u64 = 0xE000_0000;
+        const PCI_HOLE_END: u64   = 0x1_0000_0000;
+        let mmcfg_base = chipset.mmio.pci_mmconfig_base;
+        let mmcfg_size: u64 = 0x1000_0000; // 256MB
+        let mmcfg_end = mmcfg_base + mmcfg_size;
 
         let (ptr, total_size) = memory.ram_mut_ptr();
         let total = total_size as u64;
 
-        if total <= PCI_HOLE_START {
-            // RAM fits entirely below the PCI hole — single slot.
+        if total <= mmcfg_base {
+            // RAM fits entirely below MMCONFIG — single slot.
             backend.set_memory_region(0, 0, total, ptr)?;
+        } else if total <= PCI_HOLE_START {
+            // RAM spans MMCONFIG but not PCI hole.
+            // Slot 0: below MMCONFIG
+            backend.set_memory_region(0, 0, mmcfg_base, ptr)?;
+            // Slot 5: between MMCONFIG end and RAM end (or PCI hole)
+            let above_mmcfg = total - mmcfg_base;
+            let gap_in_ram = mmcfg_size.min(above_mmcfg);
+            let after_mmcfg_ram = above_mmcfg.saturating_sub(mmcfg_size);
+            if after_mmcfg_ram > 0 {
+                let after_ptr = unsafe { ptr.add((mmcfg_base + gap_in_ram) as usize) };
+                backend.set_memory_region(5, mmcfg_end, after_mmcfg_ram, after_ptr)?;
+            }
         } else {
-            // Split: slot 0 = below PCI hole, slot 3 = above 4 GB.
-            backend.set_memory_region(0, 0, PCI_HOLE_START, ptr)?;
+            // RAM spans both MMCONFIG and PCI hole.
+            // Slot 0: below MMCONFIG
+            backend.set_memory_region(0, 0, mmcfg_base, ptr)?;
+            // Slot 5: between MMCONFIG end and PCI hole
+            let between = PCI_HOLE_START - mmcfg_end;
+            if between > 0 {
+                let between_ptr = unsafe { ptr.add(mmcfg_end as usize) };
+                backend.set_memory_region(5, mmcfg_end, between, between_ptr)?;
+            }
+            // Slot 3: above 4GB
             let above_4g = total - PCI_HOLE_START;
             let above_ptr = unsafe { ptr.add(PCI_HOLE_START as usize) };
             backend.set_memory_region(3, PCI_HOLE_END, above_4g, above_ptr)?;
@@ -146,6 +185,7 @@ impl Vm {
             backend,
             memory,
             io,
+            chipset,
             serial_ptr: core::ptr::null_mut(),
             ps2_ptr: core::ptr::null_mut(),
             svga_ptr: core::ptr::null_mut(),
@@ -243,21 +283,17 @@ impl Vm {
         self.io.register(0x1CE, 2, Box::new(SvgaVbePortProxy(self.svga_ptr)));
         // VGA legacy framebuffer MMIO at 0xA0000 (128KB)
         self.memory.add_mmio(0xA0000, 0x20000, Box::new(SvgaMmioProxy(self.svga_ptr)));
-        // VGA linear framebuffer MMIO at Bochs VBE default (0xE0000000)
-        // and PCI BAR0 (VGA_BAR0_BASE). SeaVGABIOS uses 0xE0000000 for the LFB.
-        // For software emulation, these catch guest LFB writes directly.
-        // For hardware-virt (WHP/KVM), these are shadowed by RAM mappings.
+        // VGA linear framebuffer MMIO at VBE default and PCI BAR0.
         let lfb_size = unsafe { &*self.svga_ptr }.vram_size() as u64;
-        self.memory.add_mmio(0xE000_0000, lfb_size, Box::new(SvgaLfbProxy(self.svga_ptr)));
-        // BAR0 proxy at VGA_BAR0_BASE: cap at 16 MB to avoid colliding with
-        // PCI Expansion ROMs that start at 0xFE000000.
+        self.memory.add_mmio(self.chipset.mmio.vbe_lfb, lfb_size, Box::new(SvgaLfbProxy(self.svga_ptr)));
+        // BAR0 proxy: cap at 16 MB to avoid colliding with other PCI regions.
         let bar0_proxy_size = lfb_size.min(0x0100_0000);
-        self.memory.add_mmio(VGA_BAR0_BASE, bar0_proxy_size, Box::new(SvgaLfbProxy(self.svga_ptr)));
+        self.memory.add_mmio(self.chipset.mmio.vga_bar0, bar0_proxy_size, Box::new(SvgaLfbProxy(self.svga_ptr)));
         // Bochs dispi register MMIO at the PCI BAR2 default (0xFEBE0000).
         // SeaBIOS may remap BAR2 — the PCI MMIO router handles that dynamically.
         // Do NOT register 0xFE002000 here — it collides with E1000 BAR0 offsets
         // when SeaBIOS places the E1000 at 0xFE000000.
-        self.memory.add_mmio(0xFEBE_0000, 0x1000, Box::new(SvgaDispiMmioProxy(self.svga_ptr)));
+        self.memory.add_mmio(self.chipset.mmio.vga_bar2, 0x1000, Box::new(SvgaDispiMmioProxy(self.svga_ptr)));
 
         // Port 0x92: Fast A20 Gate + System Reset
         // Required by Windows 10 bootmgr to enable A20 and check system state.
@@ -285,52 +321,63 @@ impl Vm {
         // PCI bus (0xCF8-0xCFF)
         // Add standard PCI devices before registering the bus with I/O dispatcher.
         let mut pci_bus = Box::new(PciBus::new());
+        let cs = self.chipset;
 
-        // PCI Host Bridge (i440FX) at 00:00.0 — required by SeaBIOS
+        // Host Bridge — chipset-dependent
         {
-            let mut host = PciDevice::new(0x8086, 0x1237, 0x06, 0x00, 0x00);
-            host.device = 0;
-            pci_bus.add_device(host);
+            use crate::devices::chipset::ChipsetType;
+            match cs.chipset_type {
+                ChipsetType::Q35 => {
+                    // Q35 MCH with PCIEXBAR pointing to MMCONFIG
+                    let mch = crate::devices::q35_mch::create_q35_mch(cs.mmio.pci_mmconfig_base);
+                    pci_bus.add_device(mch);
+                }
+                ChipsetType::I440FX => {
+                    let mut host = PciDevice::new(cs.host_bridge_vendor, cs.host_bridge_device, 0x06, 0x00, 0x00);
+                    host.device = cs.slots.host_bridge;
+                    pci_bus.add_device(host);
+                }
+            }
         }
 
-        // ISA Bridge (PIIX3) at 00:01.0 — SeaBIOS uses this for PCI IRQ routing
+        // ISA/LPC Bridge — provides PCI IRQ routing via PIRQ registers
         {
-            let mut isa = PciDevice::new(0x8086, 0x7000, 0x06, 0x01, 0x00);
-            isa.device = 1;
-            // Header type 0x80 = multi-function device (SeaBIOS expects this)
-            isa.config_space[0x0E] = 0x80;
+            let mut bridge = PciDevice::new(cs.isa_bridge_vendor, cs.isa_bridge_device, 0x06, 0x01, 0x00);
+            bridge.device = cs.slots.isa_lpc_bridge;
+            bridge.function = 0;
+            // Header type 0x80 = multi-function device (required by SeaBIOS)
+            bridge.config_space[0x0E] = 0x80;
             // PIRQ routing registers (offsets 0x60-0x63): map PIRQA-D to IRQs.
-            // PCI IRQ swizzle: PIRQ = (device_slot + pin - 1) % 4
-            //   Dev 2 VGA:   INTA → (2+0)%4=2 → PIRQC → IRQ 11
-            //   Dev 3 AHCI:  INTA → (3+0)%4=3 → PIRQD → IRQ 11
-            //   Dev 4 E1000: INTA → (4+0)%4=0 → PIRQA → IRQ 10
-            //   Dev 5 AC97:  INTA → (5+0)%4=1 → PIRQB → IRQ 5
-            //   Dev 6 UHCI:  INTD → (6+3)%4=1 → PIRQB → IRQ 5
-            isa.config_space[0x60] = 11;  // PIRQA → IRQ 11 (E1000, shared with AHCI)
-            isa.config_space[0x61] = 5;   // PIRQB → IRQ 5  (AC97, UHCI)
-            isa.config_space[0x62] = 11;  // PIRQC → IRQ 11 (VGA)
-            isa.config_space[0x63] = 11;  // PIRQD → IRQ 11 (AHCI)
-            pci_bus.add_device(isa);
+            // Both PIIX3 and ICH9 LPC use the same register offsets for PIRQA-D.
+            bridge.config_space[0x60] = cs.pirq_route[0]; // PIRQA
+            bridge.config_space[0x61] = cs.pirq_route[1]; // PIRQB
+            bridge.config_space[0x62] = cs.pirq_route[2]; // PIRQC
+            bridge.config_space[0x63] = cs.pirq_route[3]; // PIRQD
+            // ICH9 has 4 additional PIRQ routes (E-H) at 0x68-0x6B — disable them
+            if cs.chipset_type == crate::devices::chipset::ChipsetType::Q35 {
+                bridge.config_space[0x68] = 0x80; // PIRQE disabled
+                bridge.config_space[0x69] = 0x80; // PIRQF disabled
+                bridge.config_space[0x6A] = 0x80; // PIRQG disabled
+                bridge.config_space[0x6B] = 0x80; // PIRQH disabled
+            }
+            pci_bus.add_device(bridge);
         }
 
-        // VGA (QEMU stdvga) at 00:02.0 — SeaBIOS needs a PCI VGA for option ROM
+        // VGA (QEMU stdvga) — SeaBIOS needs a PCI VGA for option ROM
         {
             let mut vga = PciDevice::new(0x1234, 0x1111, 0x03, 0x00, 0x00);
-            vga.device = 2;
-            // BAR0: linear framebuffer (size matches VRAM, prefetchable).
-            // Prefetchable is required by Windows for framebuffer memory mapping.
+            vga.device = cs.slots.vga;
+            // BAR0: linear framebuffer (prefetchable, required by Windows).
             let bar0_size = unsafe { &*self.svga_ptr }.vram_size() as u32;
-            vga.set_bar_prefetchable(0, VGA_BAR0_BASE as u32, bar0_size);
-            // BAR2: Bochs dispi MMIO registers (4KB, non-prefetchable)
-            vga.set_bar(2, 0xFEBE_0000, 0x1000, true);
+            vga.set_bar_prefetchable(0, cs.mmio.vga_bar0 as u32, bar0_size);
+            // BAR2: Bochs dispi MMIO registers (4KB)
+            vga.set_bar(2, cs.mmio.vga_bar2 as u32, 0x1000, true);
             // Interrupt: declare INTA so Windows PnP can allocate resources.
-            // Our VGA never actually fires IRQs, but Windows needs a valid
-            // interrupt pin declaration to avoid Code 12 resource errors.
-            vga.set_interrupt(11, 1);
+            vga.set_interrupt(cs.irqs.vga, 1);
             // Power Management capability — required by Windows Basic Display Adapter.
             vga.add_pm_capability(0x40, 0x00);
-            // Expansion ROM BAR (0xC0000 VGA BIOS area)
-            vga.config_space[0x30] = 0x00; // ROM base (will be set by SeaBIOS)
+            // Expansion ROM BAR
+            vga.config_space[0x30] = 0x00;
             vga.config_space[0x31] = 0x00;
             vga.config_space[0x32] = 0x00;
             vga.config_space[0x33] = 0x00;
@@ -407,11 +454,10 @@ impl Vm {
         // (Slot 0 = RAM below PCI hole, slot 1 = reserved for BIOS ROM, slot 3 = RAM above 4GB)
         self.backend.set_memory_region(2, 0xE000_0000, fb_size, fb_ptr)?;
 
-        // Slot 4: VGA LFB at PCI BAR0 address (VGA_BAR0_BASE).
-        // Linux bochs-drm uses the PCI BAR0 address, not 0xE0000000.
-        // Cap at 16 MB to avoid colliding with other PCI device regions.
+        // Slot 4: VGA LFB at PCI BAR0 address.
+        // Linux bochs-drm uses the PCI BAR0 address, not the VBE default.
         let bar0_size = fb_size.min(0x0100_0000); // max 16 MB
-        self.backend.set_memory_region(4, VGA_BAR0_BASE, bar0_size, fb_ptr)
+        self.backend.set_memory_region(4, self.chipset.mmio.vga_bar0, bar0_size, fb_ptr)
     }
 
     // ── VmBackend delegations ──
@@ -862,7 +908,7 @@ impl Vm {
 
         // Register BAR0 MMIO (VirtIO config space) at a default address.
         // SeaBIOS may remap this — the PCI MMIO router handles dynamic routing.
-        let bar0_addr: u64 = 0xFEB0_0000;
+        let bar0_addr: u64 = self.chipset.mmio.virtio_gpu_bar0;
         self.memory.add_mmio(bar0_addr, VIRTIO_GPU_BAR0_SIZE as u64, gpu);
 
         // Register PCI device at slot 7 (00:07.0).
@@ -875,7 +921,7 @@ impl Vm {
                 0x00,   // VGA compatible controller
                 0x00,   // prog-if
             );
-            pci_dev.device = 7;
+            pci_dev.device = self.chipset.slots.virtio_gpu;
 
             // Subsystem IDs.
             pci_dev.config_space[0x2C] = 0xF4; // Subsystem vendor ID low (0x1AF4)
@@ -1018,7 +1064,7 @@ impl Vm {
         }
 
         // Register BAR0 MMIO at a default address.
-        let bar0_addr: u64 = 0xFEA0_0000;
+        let bar0_addr: u64 = self.chipset.mmio.virtio_net_bar0;
         self.memory.add_mmio(bar0_addr, VIRTIO_NET_BAR0_SIZE as u64, net);
 
         // Register PCI device at slot 8 (00:08.0).
@@ -1031,7 +1077,7 @@ impl Vm {
                 0x00,   // Ethernet controller
                 0x00,   // prog-if
             );
-            pci_dev.device = 8;
+            pci_dev.device = self.chipset.slots.virtio_net;
 
             // Subsystem IDs.
             pci_dev.config_space[0x2C] = 0xF4;
@@ -1152,13 +1198,13 @@ impl Vm {
         let kbd_ptr = &*kbd as *const VirtioInput as *mut VirtioInput;
         self.virtio_kbd_ptr = kbd_ptr;
         unsafe { (*kbd_ptr).guest_mem_ptr = ram_ptr; (*kbd_ptr).guest_mem_len = ram_len; }
-        let kbd_bar0: u64 = 0xFE90_0000;
+        let kbd_bar0: u64 = self.chipset.mmio.virtio_kbd_bar0;
         self.memory.add_mmio(kbd_bar0, VIRTIO_INPUT_BAR0_SIZE as u64, kbd);
 
         if !self.pci_bus_ptr.is_null() {
             let pci_bus = unsafe { &mut *self.pci_bus_ptr };
             let mut pci_dev = PciDevice::new(0x1AF4, 0x1052, 0x09, 0x00, 0x00);
-            pci_dev.device = 9;
+            pci_dev.device = self.chipset.slots.virtio_kbd;
             pci_dev.config_space[0x2C] = 0xF4; pci_dev.config_space[0x2D] = 0x1A;
             pci_dev.config_space[0x2E] = 0x01; pci_dev.config_space[0x2F] = 0x00;
             pci_dev.set_bar(0, kbd_bar0 as u32, VIRTIO_INPUT_BAR0_SIZE, true);
@@ -1173,13 +1219,13 @@ impl Vm {
         let tablet_ptr = &*tablet as *const VirtioInput as *mut VirtioInput;
         self.virtio_tablet_ptr = tablet_ptr;
         unsafe { (*tablet_ptr).guest_mem_ptr = ram_ptr; (*tablet_ptr).guest_mem_len = ram_len; }
-        let tablet_bar0: u64 = 0xFE80_0000;
+        let tablet_bar0: u64 = self.chipset.mmio.virtio_tablet_bar0;
         self.memory.add_mmio(tablet_bar0, VIRTIO_INPUT_BAR0_SIZE as u64, tablet);
 
         if !self.pci_bus_ptr.is_null() {
             let pci_bus = unsafe { &mut *self.pci_bus_ptr };
             let mut pci_dev = PciDevice::new(0x1AF4, 0x1052, 0x09, 0x00, 0x00);
-            pci_dev.device = 10;
+            pci_dev.device = self.chipset.slots.virtio_tablet;
             pci_dev.config_space[0x2C] = 0xF4; pci_dev.config_space[0x2D] = 0x1A;
             pci_dev.config_space[0x2E] = 0x02; pci_dev.config_space[0x2F] = 0x00;
             pci_dev.set_bar(0, tablet_bar0 as u32, VIRTIO_INPUT_BAR0_SIZE, true);

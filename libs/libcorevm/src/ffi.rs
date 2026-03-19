@@ -712,11 +712,12 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                 // Check if guest enabled MSI (read MSI control from PCI config)
                 if !vm.pci_bus_ptr.is_null() {
                     let bus = unsafe { &mut *vm.pci_bus_ptr };
-                    let mcr = bus.mmcfg_read(0, 4, 0, 0xD0 + 2, 2) as u16;
+                    let e1000_slot = vm.chipset.slots.e1000;
+                    let mcr = bus.mmcfg_read(0, e1000_slot, 0, 0xD0 + 2, 2) as u16;
                     e1000.msi_enabled = (mcr & 0x01) != 0;
                     if e1000.msi_enabled {
-                        let addr = bus.mmcfg_read(0, 4, 0, 0xD0 + 4, 4) as u64;
-                        let data = bus.mmcfg_read(0, 4, 0, 0xD0 + 8, 2) as u32;
+                        let addr = bus.mmcfg_read(0, e1000_slot, 0, 0xD0 + 4, 4) as u64;
+                        let data = bus.mmcfg_read(0, e1000_slot, 0, 0xD0 + 8, 2) as u32;
                         e1000.msi_address = addr;
                         e1000.msi_data = data;
                     }
@@ -1048,12 +1049,13 @@ pub extern "C" fn corevm_ahci_poll_irq(handle: u64) {
     if !vm.pci_bus_ptr.is_null() {
         let bus = unsafe { &mut *vm.pci_bus_ptr };
         let msi_cap = crate::devices::ahci::AHCI_MSI_CAP_OFFSET;
-        let mcr = bus.mmcfg_read(0, 3, 0, msi_cap + 2, 2) as u16;
+        let ahci_slot = vm.chipset.slots.ahci;
+        let mcr = bus.mmcfg_read(0, ahci_slot, 0, msi_cap + 2, 2) as u16;
         let ahci = unsafe { &mut *vm.ahci_ptr };
         ahci.msi_enabled = (mcr & 0x01) != 0;
         if ahci.msi_enabled {
-            let addr_lo = bus.mmcfg_read(0, 3, 0, msi_cap + 4, 4) as u32;
-            let data = bus.mmcfg_read(0, 3, 0, msi_cap + 8, 2) as u32;
+            let addr_lo = bus.mmcfg_read(0, ahci_slot, 0, msi_cap + 4, 4) as u32;
+            let data = bus.mmcfg_read(0, ahci_slot, 0, msi_cap + 8, 2) as u32;
             ahci.msi_address = addr_lo as u64;
             ahci.msi_data = data;
         }
@@ -1695,9 +1697,12 @@ pub extern "C" fn corevm_setup_acpi_tables(handle: u64) -> i32 {
         has_virtio_gpu: !vm.virtio_gpu_ptr.is_null(),
         has_virtio_net: !vm.virtio_net_ptr.is_null(),
         has_virtio_input: !vm.virtio_kbd_ptr.is_null(),
+        pci_mmio_start: vm.chipset.mmio.pci_mmio_start,
+        pci_mmio_end: vm.chipset.mmio.pci_mmio_end,
+        slots: vm.chipset.slots,
+        irqs: vm.chipset.irqs,
     };
     let (rsdp, tables, loader) = crate::devices::acpi_tables::generate_acpi_tables_configured(false, num_cpus, &devices);
-    dbg(&alloc::format!("Generated ACPI: {} CPUs, e1000={} ac97={} uhci={} virtio_gpu={}", num_cpus, devices.has_e1000, devices.has_ac97, devices.has_uhci, devices.has_virtio_gpu));
 
     fw_cfg.add_file("etc/acpi/rsdp", rsdp);
     fw_cfg.add_file("etc/acpi/tables", tables);
@@ -1736,6 +1741,10 @@ pub extern "C" fn corevm_setup_acpi_tables_with_hpet(handle: u64) -> i32 {
         has_virtio_gpu: !vm.virtio_gpu_ptr.is_null(),
         has_virtio_net: !vm.virtio_net_ptr.is_null(),
         has_virtio_input: !vm.virtio_kbd_ptr.is_null(),
+        pci_mmio_start: vm.chipset.mmio.pci_mmio_start,
+        pci_mmio_end: vm.chipset.mmio.pci_mmio_end,
+        slots: vm.chipset.slots,
+        irqs: vm.chipset.irqs,
     };
     let (rsdp, tables, loader) = crate::devices::acpi_tables::generate_acpi_tables_configured(true, num_cpus, &devices);
     fw_cfg.add_file("etc/acpi/rsdp", rsdp);
@@ -1763,11 +1772,11 @@ pub extern "C" fn corevm_setup_acpi_tables_with_hpet(handle: u64) -> i32 {
 /// **Must be called after `corevm_setup_ahci()`** so the PCI MMIO router exists.
 #[no_mangle]
 pub extern "C" fn corevm_setup_e1000(handle: u64, mac: *const u8) -> i32 {
-    const E1000_MMIO_BASE: u64 = 0xF000_0000;
     const E1000_MMIO_SIZE: u64 = 0x2_0000; // 128 KB
     const E1000_IO_BASE: u16 = 0xC000; // I/O BAR for indirect register access
 
     let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
+    let e1000_mmio_base = vm.chipset.mmio.e1000_bar0;
     if mac.is_null() { return -1; }
     let m: [u8; 6] = unsafe { [*mac, *mac.add(1), *mac.add(2), *mac.add(3), *mac.add(4), *mac.add(5)] };
     let mut e1000 = Box::new(crate::devices::e1000::E1000::new(m));
@@ -1816,6 +1825,7 @@ pub extern "C" fn corevm_setup_e1000(handle: u64, mac: *const u8) -> i32 {
             ac97: vm.ac97_ptr,
             e1000: e1000_ptr,
             pci_bus: vm.pci_bus_ptr,
+            chipset: vm.chipset,
         });
         let router_ptr = &*router as *const PciIoRouter as *mut PciIoRouter;
         vm.pci_io_router_ptr = router_ptr;
@@ -1833,18 +1843,15 @@ pub extern "C" fn corevm_setup_e1000(handle: u64, mac: *const u8) -> i32 {
         let pci_bus = unsafe { &mut *vm.pci_bus_ptr };
         // Intel 82540EM: vendor 8086, device 100E, class 02 (Network), subclass 00 (Ethernet)
         let mut pci_dev = crate::devices::bus::PciDevice::new(0x8086, 0x100E, 0x02, 0x00, 0x00);
-        pci_dev.device = 4; // PCI slot 00:04.0
+        pci_dev.device = vm.chipset.slots.e1000;
         // BAR0: MMIO at 0xF0000000, size 128 KB
-        pci_dev.set_bar(0, E1000_MMIO_BASE as u32, E1000_MMIO_SIZE as u32, true);
+        pci_dev.set_bar(0, e1000_mmio_base as u32, E1000_MMIO_SIZE as u32, true);
         // BAR2: I/O ports for indirect register access (8 bytes: IOADDR+IODATA)
         pci_dev.set_bar(2, E1000_IO_BASE as u32, 8, false);
         // Interrupt: IRQ 11, pin INTA (fallback for legacy mode)
         pci_dev.set_interrupt(11, 1);
         // Subsystem ID (common for 82540EM)
         pci_dev.set_subsystem(0x8086, 0x001E);
-        // Power Management capability at offset 0xC8, chained to MSI at 0xD0.
-        // Windows e1000 driver requires PM capability to complete initialization.
-        pci_dev.add_pm_capability(0xC8, 0xD0);
         // MSI capability at offset 0xD0 (standard for Intel NICs)
         pci_dev.add_msi_capability(0xD0);
         pci_bus.add_device(pci_dev);
@@ -1871,65 +1878,47 @@ pub struct PciMmioRouter {
     pub virtio_kbd: *mut crate::devices::virtio_input::VirtioInput,
     pub virtio_tablet: *mut crate::devices::virtio_input::VirtioInput,
     pci_bus: *mut crate::devices::bus::PciBus,
+    /// Chipset config for PCI slot lookups.
+    pub chipset: &'static crate::devices::chipset::ChipsetConfig,
 }
 
 unsafe impl Send for PciMmioRouter {}
 
 impl PciMmioRouter {
-    /// Read AHCI BAR5 (device 00:03.0, offset 0x24) from PCI config space.
+    /// Read a BAR value from PCI config space for a device at the given slot.
+    fn read_bar(&self, slot: u8, bar_offset: usize, align_mask: u64) -> u64 {
+        if self.pci_bus.is_null() { return 0; }
+        let bus = unsafe { &mut *self.pci_bus };
+        bus.mmcfg_read(0, slot, 0, bar_offset, 4) & align_mask
+    }
+
     fn ahci_bar5(&self) -> u64 {
-        if self.pci_bus.is_null() || self.ahci.is_null() { return 0; }
-        let bus = unsafe { &mut *self.pci_bus };
-        let val = bus.mmcfg_read(0, 3, 0, 0x24, 4);
-        val & 0xFFFFFFF0
+        if self.ahci.is_null() { return 0; }
+        self.read_bar(self.chipset.slots.ahci, 0x24, 0xFFFFFFF0)
     }
-
-    /// Read E1000 BAR0 (device 00:04.0, offset 0x10) from PCI config space.
     fn e1000_bar0(&self) -> u64 {
-        if self.pci_bus.is_null() || self.e1000.is_null() { return 0; }
-        let bus = unsafe { &mut *self.pci_bus };
-        let val = bus.mmcfg_read(0, 4, 0, 0x10, 4);
-        val & 0xFFFFFFF0
+        if self.e1000.is_null() { return 0; }
+        self.read_bar(self.chipset.slots.e1000, 0x10, 0xFFFFFFF0)
     }
-
-    /// Read VGA BAR2 (device 00:02.0, offset 0x18) from PCI config space.
-    /// BAR2 holds the Bochs VBE DISPI MMIO registers (4KB).
     fn vga_bar2(&self) -> u64 {
-        if self.pci_bus.is_null() || self.svga.is_null() { return 0; }
-        let bus = unsafe { &mut *self.pci_bus };
-        let val = bus.mmcfg_read(0, 2, 0, 0x18, 4);
-        val & 0xFFFFF000
+        if self.svga.is_null() { return 0; }
+        self.read_bar(self.chipset.slots.vga, 0x18, 0xFFFFF000)
     }
-
-    /// Read VirtIO GPU BAR0 (device 00:07.0, offset 0x10) from PCI config space.
-    /// BAR0 holds the VirtIO MMIO config space (16KB).
     fn virtio_gpu_bar0(&self) -> u64 {
-        if self.pci_bus.is_null() || self.virtio_gpu.is_null() { return 0; }
-        let bus = unsafe { &mut *self.pci_bus };
-        let val = bus.mmcfg_read(0, 7, 0, 0x10, 4);
-        val & 0xFFFFC000 // 16KB aligned
+        if self.virtio_gpu.is_null() { return 0; }
+        self.read_bar(self.chipset.slots.virtio_gpu, 0x10, 0xFFFFC000)
     }
-
-    /// Read VirtIO-Net BAR0 (device 00:08.0, offset 0x10) from PCI config space.
     fn virtio_net_bar0(&self) -> u64 {
-        if self.pci_bus.is_null() || self.virtio_net.is_null() { return 0; }
-        let bus = unsafe { &mut *self.pci_bus };
-        let val = bus.mmcfg_read(0, 8, 0, 0x10, 4);
-        val & 0xFFFFC000
+        if self.virtio_net.is_null() { return 0; }
+        self.read_bar(self.chipset.slots.virtio_net, 0x10, 0xFFFFC000)
     }
-
     fn virtio_kbd_bar0(&self) -> u64 {
-        if self.pci_bus.is_null() || self.virtio_kbd.is_null() { return 0; }
-        let bus = unsafe { &mut *self.pci_bus };
-        let val = bus.mmcfg_read(0, 9, 0, 0x10, 4);
-        val & 0xFFFFC000
+        if self.virtio_kbd.is_null() { return 0; }
+        self.read_bar(self.chipset.slots.virtio_kbd, 0x10, 0xFFFFC000)
     }
-
     fn virtio_tablet_bar0(&self) -> u64 {
-        if self.pci_bus.is_null() || self.virtio_tablet.is_null() { return 0; }
-        let bus = unsafe { &mut *self.pci_bus };
-        let val = bus.mmcfg_read(0, 10, 0, 0x10, 4);
-        val & 0xFFFFC000
+        if self.virtio_tablet.is_null() { return 0; }
+        self.read_bar(self.chipset.slots.virtio_tablet, 0x10, 0xFFFFC000)
     }
 }
 
@@ -2135,13 +2124,14 @@ pub extern "C" fn corevm_setup_ahci(handle: u64, num_ports: u8) -> i32 {
     // to the correct device (AHCI, E1000, etc.).
     let router = Box::new(PciMmioRouter {
         ahci: vm.ahci_ptr,
-        e1000: core::ptr::null_mut(), // added later by corevm_setup_e1000()
+        e1000: core::ptr::null_mut(),
         svga: vm.svga_ptr,
-        virtio_gpu: vm.virtio_gpu_ptr, // may be null if not set up yet
-        virtio_net: vm.virtio_net_ptr, // may be null if not set up yet
+        virtio_gpu: vm.virtio_gpu_ptr,
+        virtio_net: vm.virtio_net_ptr,
         virtio_kbd: vm.virtio_kbd_ptr,
         virtio_tablet: vm.virtio_tablet_ptr,
         pci_bus: vm.pci_bus_ptr,
+        chipset: vm.chipset,
     });
     let router_ptr = &*router as *const PciMmioRouter as *mut PciMmioRouter;
     vm.pci_mmio_router_ptr = router_ptr;
@@ -2158,7 +2148,7 @@ pub extern "C" fn corevm_setup_ahci(handle: u64, num_ports: u8) -> i32 {
     if !vm.pci_bus_ptr.is_null() {
         let pci_bus = unsafe { &mut *vm.pci_bus_ptr };
         let mut pci_dev = crate::devices::ahci::create_ahci_pci_device(PCI_MMIO_CATCHALL_BASE as u32);
-        pci_dev.device = 3; // PCI device 00:03.0 (00:01.0 is ISA bridge)
+        pci_dev.device = vm.chipset.slots.ahci;
         pci_bus.add_device(pci_dev);
     }
     0
@@ -2680,7 +2670,7 @@ pub extern "C" fn corevm_setup_ac97(handle: u64) -> i32 {
         let pci_bus = unsafe { &mut *vm.pci_bus_ptr };
         // Intel 82801AA AC97 Audio: vendor 8086, device 2415, class 04 (Multimedia), subclass 01 (Audio)
         let mut pci_dev = crate::devices::bus::PciDevice::new(0x8086, 0x2415, 0x04, 0x01, 0x00);
-        pci_dev.device = 5; // PCI slot 00:05.0
+        pci_dev.device = vm.chipset.slots.ac97;
         // BAR0: NAM I/O at 0x1C00, 256 bytes
         pci_dev.set_bar(0, AC97_NAM_BASE as u32, 256, false); // false = I/O space
         // BAR1: NABM I/O at 0x1D00, 64 bytes
@@ -2739,42 +2729,34 @@ pub struct PciIoRouter {
     pub ac97: *mut crate::devices::ac97::Ac97,
     pub e1000: *mut crate::devices::e1000::E1000,
     pci_bus: *mut crate::devices::bus::PciBus,
+    pub chipset: &'static crate::devices::chipset::ChipsetConfig,
 }
 
 unsafe impl Send for PciIoRouter {}
 
 impl PciIoRouter {
     /// Read UHCI BAR4 (device 00:06.0, config offset 0x20) from PCI config.
+    fn read_io_bar(&self, slot: u8, bar_offset: usize, align_mask: u16) -> u16 {
+        if self.pci_bus.is_null() { return 0; }
+        let bus = unsafe { &mut *self.pci_bus };
+        (bus.mmcfg_read(0, slot, 0, bar_offset, 4) as u16) & align_mask
+    }
+
     fn uhci_bar4(&self) -> u16 {
-        if self.pci_bus.is_null() || self.uhci.is_null() { return 0; }
-        let bus = unsafe { &mut *self.pci_bus };
-        let val = bus.mmcfg_read(0, 6, 0, 0x20, 4); // BAR4 at offset 0x20
-        (val & 0xFFE0) as u16 // I/O BAR, mask lower 5 bits (32-byte aligned)
+        if self.uhci.is_null() { return 0; }
+        self.read_io_bar(self.chipset.slots.uhci, 0x20, 0xFFE0)
     }
-
-    /// Read AC97 NAM BAR0 (device 00:05.0, config offset 0x10).
     fn ac97_bar0(&self) -> u16 {
-        if self.pci_bus.is_null() || self.ac97.is_null() { return 0; }
-        let bus = unsafe { &mut *self.pci_bus };
-        let val = bus.mmcfg_read(0, 5, 0, 0x10, 4);
-        (val & 0xFF00) as u16 // I/O BAR, 256-byte aligned
+        if self.ac97.is_null() { return 0; }
+        self.read_io_bar(self.chipset.slots.ac97, 0x10, 0xFF00)
     }
-
-    /// Read E1000 BAR2 (device 00:04.0, config offset 0x18) — I/O BAR for
-    /// indirect register access (IOADDR at +0, IODATA at +4).
     fn e1000_bar2(&self) -> u16 {
-        if self.pci_bus.is_null() || self.e1000.is_null() { return 0; }
-        let bus = unsafe { &mut *self.pci_bus };
-        let val = bus.mmcfg_read(0, 4, 0, 0x18, 4); // BAR2 at config offset 0x18
-        (val & 0xFFF8) as u16 // I/O BAR, 8-byte aligned
+        if self.e1000.is_null() { return 0; }
+        self.read_io_bar(self.chipset.slots.e1000, 0x18, 0xFFF8)
     }
-
-    /// Read AC97 NABM BAR1 (device 00:05.0, config offset 0x14).
     fn ac97_bar1(&self) -> u16 {
-        if self.pci_bus.is_null() || self.ac97.is_null() { return 0; }
-        let bus = unsafe { &mut *self.pci_bus };
-        let val = bus.mmcfg_read(0, 5, 0, 0x14, 4);
-        (val & 0xFFC0) as u16 // I/O BAR, 64-byte aligned
+        if self.ac97.is_null() { return 0; }
+        self.read_io_bar(self.chipset.slots.ac97, 0x14, 0xFFC0)
     }
 }
 
@@ -2929,6 +2911,7 @@ pub extern "C" fn corevm_setup_uhci(handle: u64) -> i32 {
             ac97: vm.ac97_ptr,
             e1000: vm.e1000_ptr,
             pci_bus: vm.pci_bus_ptr,
+            chipset: vm.chipset,
         });
         let router_ptr = &*router as *const PciIoRouter as *mut PciIoRouter;
         vm.pci_io_router_ptr = router_ptr;
@@ -2943,7 +2926,7 @@ pub extern "C" fn corevm_setup_uhci(handle: u64) -> i32 {
     if !vm.pci_bus_ptr.is_null() {
         let pci_bus = unsafe { &mut *vm.pci_bus_ptr };
         let mut pci_dev = crate::devices::bus::PciDevice::new(0x8086, 0x7020, 0x0C, 0x03, 0x00);
-        pci_dev.device = 6;
+        pci_dev.device = vm.chipset.slots.uhci;
         pci_dev.set_bar(4, UHCI_IO_BASE as u32, 32, false);
         // Interrupt: INTD → PIRQB → IRQ 5 (via PIIX3 swizzle: (6+3)%4=1)
         pci_dev.set_interrupt(5, 4);

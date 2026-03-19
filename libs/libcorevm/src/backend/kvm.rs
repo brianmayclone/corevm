@@ -855,14 +855,11 @@ impl KvmBackend {
                 let mut ecx = e.ecx;
                 let mut edx = e.edx;
 
-                // Filter CPUID: hide features that conflict with our
-                // PIIX3/i440FX platform emulation.
+                // Filter CPUID: hide features not supported in our VM.
                 if e.function == 1 {
                     ecx &= !(1 << 5);   // VMX — not useful inside guest
-                    ecx &= !(1 << 21);  // x2APIC — our platform uses xAPIC only.
-                                         // Windows 10 tries to switch to x2APIC
-                                         // mode if exposed, which conflicts with
-                                         // our PIIX3/i440FX chipset emulation.
+                    // x2APIC (bit 21): keep enabled — Q35/ICH9 chipset supports it.
+                    // If using i440FX, the caller can re-filter via set_cpuid().
                     // Keep TSC-Deadline (bit 24) — Windows 10 needs it for
                     // the LAPIC timer with SMP. KVM handles TSC-Deadline
                     // in the in-kernel LAPIC automatically.

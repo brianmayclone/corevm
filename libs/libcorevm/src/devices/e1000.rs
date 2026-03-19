@@ -519,6 +519,11 @@ impl E1000 {
         phy_regs[M88_PHY_SPEC_STATUS as usize] = 0xAC04;
         phy_regs[M88_PHY_SPEC_CTRL as usize] = 0x0068;
         phy_regs[M88_EXT_PHY_SPEC_CTRL as usize] = 0x0D60;
+        // Extended PHY Specific Status (reg 0x15):
+        //   Bit 15:14=10 (1000 Mbps), Bit 13=1 (Full Duplex),
+        //   Bit 11=1 (Page received), Bit 10=1 (Speed/Duplex resolved)
+        //   Bit 8=1 (HW Config Done)
+        phy_regs[M88_EXT_PHY_SPEC_STATUS as usize] = 0xAD00;
 
         E1000 {
             regs,
@@ -593,6 +598,7 @@ impl E1000 {
         self.phy_regs[M88_PHY_SPEC_STATUS as usize] = 0xAC04;
         self.phy_regs[M88_PHY_SPEC_CTRL as usize] = 0x0068;
         self.phy_regs[M88_EXT_PHY_SPEC_CTRL as usize] = 0x0D60;
+        self.phy_regs[M88_EXT_PHY_SPEC_STATUS as usize] = 0xAD00;
 
         self.ee_state = EepromState::Idle;
         self.ee_sk_prev = false;
@@ -1598,6 +1604,7 @@ impl MmioHandler for E1000 {
                     self.phy_regs[M88_PHY_SPEC_STATUS as usize] = 0xAC04;
                     self.phy_regs[M88_PHY_SPEC_CTRL as usize] = 0x0068;
                     self.phy_regs[M88_EXT_PHY_SPEC_CTRL as usize] = 0x0D60;
+                    self.phy_regs[M88_EXT_PHY_SPEC_STATUS as usize] = 0xAD00;
                     self.regs[dword_offset] &= !CTRL_PHY_RST;
                 }
             }
@@ -1649,6 +1656,7 @@ impl MmioHandler for E1000 {
                         self.phy_regs[M88_PHY_SPEC_STATUS as usize] = 0xAC04;
                         self.phy_regs[M88_PHY_SPEC_CTRL as usize] = 0x0068;
                         self.phy_regs[M88_EXT_PHY_SPEC_CTRL as usize] = 0x0D60;
+                        self.phy_regs[M88_EXT_PHY_SPEC_STATUS as usize] = 0xAD00;
                         phy_data = self.phy_regs[PHY_CTRL as usize];
                     }
                     if phy_reg < self.phy_regs.len() {
