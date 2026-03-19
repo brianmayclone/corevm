@@ -487,18 +487,22 @@ fn build_dsdt_with_cpus(num_cpus: u32, devices: &AcpiDeviceConfig) -> Vec<u8> {
         crs_body.extend_from_slice(&0u32.to_le_bytes());
         crs_body.extend_from_slice(&0xF300u32.to_le_bytes());
 
-        // DWord Memory range: 0xE0000000 - 0xFEBFFFFF (PCI MMIO)
+        // DWord Memory range: 0xC0000000 - 0xFEBFFFFF (PCI MMIO)
+        // Starts at 0xC0000000 to include the VGA BAR0 framebuffer region.
+        // The VBE LFB at 0xE0000000 is mapped as a KVM memory region but
+        // is still within the PCI MMIO window — PCI BARs can be placed
+        // anywhere in this range by the firmware (SeaBIOS) or OS.
         // DWordMemory(ResourceProducer, PosDecode, MinFixed, MaxFixed, NonCacheable, ReadWrite,
-        //   0, 0xE0000000, 0xFEBFFFFF, 0, 0x0EC00000)
+        //   0, 0xC0000000, 0xFEBFFFFF, 0, 0x3EC00000)
         crs_body.extend_from_slice(&[0x87, 0x17, 0x00]); // tag + length(23) LE
         crs_body.push(0x00); // ResourceType=0 (Memory)
         crs_body.push(0x0C); // MinFixed | MaxFixed
         crs_body.push(0x01); // ReadWrite
         crs_body.extend_from_slice(&0u32.to_le_bytes()); // _GRA
-        crs_body.extend_from_slice(&0xE000_0000u32.to_le_bytes()); // _MIN
+        crs_body.extend_from_slice(&0xC000_0000u32.to_le_bytes()); // _MIN
         crs_body.extend_from_slice(&0xFEBF_FFFFu32.to_le_bytes()); // _MAX
         crs_body.extend_from_slice(&0u32.to_le_bytes()); // _TRA
-        crs_body.extend_from_slice(&0x0EC0_0000u32.to_le_bytes()); // _LEN
+        crs_body.extend_from_slice(&0x3EC0_0000u32.to_le_bytes()); // _LEN
 
         // End tag
         crs_body.extend_from_slice(&[0x79, 0x00]);

@@ -121,13 +121,24 @@ impl PciDevice {
     /// - `size`: the size of the address region (must be a power of 2)
     /// - `is_mmio`: `true` for memory-mapped BAR, `false` for I/O BAR
     pub fn set_bar(&mut self, bar_index: usize, address: u32, size: u32, is_mmio: bool) {
+        self.set_bar_ex(bar_index, address, size, is_mmio, false);
+    }
+
+    /// Set a BAR with prefetchable flag support.
+    pub fn set_bar_prefetchable(&mut self, bar_index: usize, address: u32, size: u32) {
+        self.set_bar_ex(bar_index, address, size, true, true);
+    }
+
+    fn set_bar_ex(&mut self, bar_index: usize, address: u32, size: u32, is_mmio: bool, prefetchable: bool) {
         if bar_index >= 6 {
             return;
         }
 
         let offset = 0x10 + bar_index * 4;
         let bar_value = if is_mmio {
-            address & 0xFFFFFFF0 // bit 0 = 0 for MMIO
+            let mut v = address & 0xFFFFFFF0; // bit 0 = 0 for MMIO
+            if prefetchable { v |= 0x08; }    // bit 3 = prefetchable
+            v
         } else {
             (address & 0xFFFFFFFC) | 0x01 // bit 0 = 1 for I/O
         };
@@ -135,11 +146,11 @@ impl PciDevice {
         config_write_u32(&mut self.config_space, offset, bar_value);
 
         // Store the size mask: a BAR of size N returns ~(N-1) when
-        // written with all-ones (preserving the type bits).
+        // written with all-ones (preserving the type/prefetchable bits).
         if size > 0 {
             let mask = !(size - 1);
             self.bar_sizes[bar_index] = if is_mmio {
-                mask & 0xFFFFFFF0
+                (mask & 0xFFFFFFF0) | (bar_value & 0x0F)
             } else {
                 (mask & 0xFFFFFFFC) | 0x01
             };
@@ -194,6 +205,35 @@ impl PciDevice {
         // Message Data (16-bit): initially 0
         self.config_space[offset + 8] = 0x00;
         self.config_space[offset + 9] = 0x00;
+    }
+
+    /// Add a PCI Power Management capability (Cap ID 0x01) at the given offset.
+    ///
+    /// Structure (8 bytes):
+    ///   offset+0: Cap ID (0x01) | Next Cap pointer
+    ///   offset+2: PMC — Power Management Capabilities
+    ///   offset+4: PMCSR — Power Management Control/Status
+    ///   offset+6: Bridge extensions (reserved, 0x00)
+    ///
+    /// The `next_cap` parameter chains to the next capability (e.g., MSI).
+    pub fn add_pm_capability(&mut self, offset: usize, next_cap: u8) {
+        // Set Capabilities List bit in Status register (offset 0x06, bit 4)
+        self.config_space[0x06] |= 0x10;
+        // Capabilities pointer (offset 0x34) → points to PM cap (head of chain)
+        self.config_space[0x34] = offset as u8;
+        // PM Capability ID = 0x01
+        self.config_space[offset] = 0x01;
+        // Next capability pointer
+        self.config_space[offset + 1] = next_cap;
+        // PMC: version 2, D0/D3hot supported, no PME
+        self.config_space[offset + 2] = 0x02; // version 2 (bits 2:0 = 010)
+        self.config_space[offset + 3] = 0x00;
+        // PMCSR: power state D0 (bits 1:0 = 00)
+        self.config_space[offset + 4] = 0x00;
+        self.config_space[offset + 5] = 0x00;
+        // Bridge extensions + Data: reserved
+        self.config_space[offset + 6] = 0x00;
+        self.config_space[offset + 7] = 0x00;
     }
 }
 

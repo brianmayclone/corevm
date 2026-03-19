@@ -326,6 +326,7 @@ const PHY_1000T_STATUS: u32   = 0x0A;
 const M88_PHY_SPEC_CTRL: u32  = 0x10;
 const M88_PHY_SPEC_STATUS: u32 = 0x11;
 const M88_EXT_PHY_SPEC_CTRL: u32 = 0x14;
+const M88_EXT_PHY_SPEC_STATUS: u32 = 0x15;
 
 // Microwire EEPROM
 const MW_OPCODE_READ: u8 = 0b110;
@@ -467,14 +468,35 @@ impl E1000 {
         regs[REG_RAH0 / 4] = rah;
 
         // Populate EEPROM with MAC address and metadata.
+        // Matches Intel 82540EM defaults (QEMU reference values).
         let mut eeprom = [0u16; 64];
         eeprom[EEPROM_MAC0] = (mac[1] as u16) << 8 | (mac[0] as u16);
         eeprom[EEPROM_MAC1] = (mac[3] as u16) << 8 | (mac[2] as u16);
         eeprom[EEPROM_MAC2] = (mac[5] as u16) << 8 | (mac[4] as u16);
+        // Word 0x03: Init Control Word 1 — signature, load subsys IDs
+        //   Bit 14: Reserved (1), Bit 6: Load Subsystem ID (1),
+        //   Bit 4: Load Device ID (1), Bits 1:0 = 01 (valid signature)
+        eeprom[0x03] = 0x4051;
+        // Word 0x05: Image Version Info / compatibility
+        eeprom[0x05] = 0x0200;
+        // Word 0x08: PBA Low (printed board assembly — cosmetic)
+        eeprom[0x08] = 0x0000;
+        // Word 0x09: PBA High
+        eeprom[0x09] = 0x0000;
+        // Word 0x0A: Init Control Word 2 (ICW2)
+        //   Bit 13: PHY/Media type valid (1)
+        //   Bit 10: Reserved/ASM (1)
+        //   Bit 9:  CSR speed indication (1) — 1000 Mbps
+        //   Bit 8:  CSR speed indication (0)
+        //   Bit 6:  Signature valid (1)
+        eeprom[0x0A] = 0x2E40;
         eeprom[EEPROM_SUBSYS_VID] = 0x8086;
         eeprom[EEPROM_SUBSYS_ID] = 0x100E;
         eeprom[EEPROM_DEVICE_ID] = 0x100E;
-        eeprom[0x0A] = 0x0000;
+        // Word 0x0E: Software Defined Pins Control (SWDPIN)
+        eeprom[0x0E] = 0x0040;
+        // Word 0x0F: LED Control defaults
+        eeprom[0x0F] = 0x0602;
 
         let mut sum: u16 = 0;
         for i in 0..EEPROM_CHECKSUM {
@@ -557,6 +579,20 @@ impl E1000 {
         self.rx_buffer.clear();
         self.tx_buffer.clear();
         self.tx_ctx = TxContext::default();
+
+        // Restore PHY registers to power-on defaults (M88E1011).
+        self.phy_regs = [0u16; 32];
+        self.phy_regs[PHY_CTRL as usize] = 0x1140;
+        self.phy_regs[PHY_STATUS as usize] = 0x796D;
+        self.phy_regs[PHY_ID1 as usize] = 0x0141;
+        self.phy_regs[PHY_ID2 as usize] = 0x0C20;
+        self.phy_regs[PHY_AUTONEG_ADV as usize] = 0x01E1;
+        self.phy_regs[PHY_LP_ABILITY as usize] = 0x45E1;
+        self.phy_regs[PHY_1000T_CTRL as usize] = 0x0300;
+        self.phy_regs[PHY_1000T_STATUS as usize] = 0x3C00;
+        self.phy_regs[M88_PHY_SPEC_STATUS as usize] = 0xAC04;
+        self.phy_regs[M88_PHY_SPEC_CTRL as usize] = 0x0068;
+        self.phy_regs[M88_EXT_PHY_SPEC_CTRL as usize] = 0x0D60;
 
         self.ee_state = EepromState::Idle;
         self.ee_sk_prev = false;
@@ -1544,6 +1580,19 @@ impl MmioHandler for E1000 {
                     self.reset();
                 }
                 if new_val & CTRL_PHY_RST != 0 {
+                    // PHY reset via CTRL register: restore PHY defaults
+                    self.phy_regs = [0u16; 32];
+                    self.phy_regs[PHY_CTRL as usize] = 0x1140;
+                    self.phy_regs[PHY_STATUS as usize] = 0x796D;
+                    self.phy_regs[PHY_ID1 as usize] = 0x0141;
+                    self.phy_regs[PHY_ID2 as usize] = 0x0C20;
+                    self.phy_regs[PHY_AUTONEG_ADV as usize] = 0x01E1;
+                    self.phy_regs[PHY_LP_ABILITY as usize] = 0x45E1;
+                    self.phy_regs[PHY_1000T_CTRL as usize] = 0x0300;
+                    self.phy_regs[PHY_1000T_STATUS as usize] = 0x3C00;
+                    self.phy_regs[M88_PHY_SPEC_STATUS as usize] = 0xAC04;
+                    self.phy_regs[M88_PHY_SPEC_CTRL as usize] = 0x0068;
+                    self.phy_regs[M88_EXT_PHY_SPEC_CTRL as usize] = 0x0D60;
                     self.regs[dword_offset] &= !CTRL_PHY_RST;
                 }
             }
@@ -1579,7 +1628,23 @@ impl MmioHandler for E1000 {
                 } else if new_val & MDIC_OP_WRITE != 0 {
                     let mut phy_data = (new_val & MDIC_DATA_MASK) as u16;
                     if phy_reg == PHY_CTRL as usize && phy_data & 0x8000 != 0 {
-                        phy_data &= !0x8000;
+                        // PHY software reset: restore all PHY registers to
+                        // power-on defaults (M88E1011). The Windows driver
+                        // reads PHY_STATUS after reset and expects autoneg
+                        // complete + link up bits to be set.
+                        self.phy_regs = [0u16; 32];
+                        self.phy_regs[PHY_CTRL as usize] = 0x1140;
+                        self.phy_regs[PHY_STATUS as usize] = 0x796D;
+                        self.phy_regs[PHY_ID1 as usize] = 0x0141;
+                        self.phy_regs[PHY_ID2 as usize] = 0x0C20;
+                        self.phy_regs[PHY_AUTONEG_ADV as usize] = 0x01E1;
+                        self.phy_regs[PHY_LP_ABILITY as usize] = 0x45E1;
+                        self.phy_regs[PHY_1000T_CTRL as usize] = 0x0300;
+                        self.phy_regs[PHY_1000T_STATUS as usize] = 0x3C00;
+                        self.phy_regs[M88_PHY_SPEC_STATUS as usize] = 0xAC04;
+                        self.phy_regs[M88_PHY_SPEC_CTRL as usize] = 0x0068;
+                        self.phy_regs[M88_EXT_PHY_SPEC_CTRL as usize] = 0x0D60;
+                        phy_data = self.phy_regs[PHY_CTRL as usize];
                     }
                     if phy_reg < self.phy_regs.len() {
                         self.phy_regs[phy_reg] = phy_data;

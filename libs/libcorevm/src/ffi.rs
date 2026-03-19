@@ -1842,6 +1842,9 @@ pub extern "C" fn corevm_setup_e1000(handle: u64, mac: *const u8) -> i32 {
         pci_dev.set_interrupt(11, 1);
         // Subsystem ID (common for 82540EM)
         pci_dev.set_subsystem(0x8086, 0x001E);
+        // Power Management capability at offset 0xC8, chained to MSI at 0xD0.
+        // Windows e1000 driver requires PM capability to complete initialization.
+        pci_dev.add_pm_capability(0xC8, 0xD0);
         // MSI capability at offset 0xD0 (standard for Intel NICs)
         pci_dev.add_msi_capability(0xD0);
         pci_bus.add_device(pci_dev);
@@ -1939,7 +1942,12 @@ impl crate::memory::mmio::MmioHandler for PciMmioRouter {
             let e1000_base = self.e1000_bar0();
             if e1000_base != 0 && abs_addr >= e1000_base && abs_addr < e1000_base + 0x2_0000 {
                 let e1000 = unsafe { &mut *self.e1000 };
-                return e1000.read(abs_addr - e1000_base, size);
+                let reg = abs_addr - e1000_base;
+                let result = e1000.read(reg, size);
+                if reg < 0x100 || reg == 0x400 || reg == 0x5800 || reg == 0x5808 {
+                    eprintln!("[e1000] MMIO R 0x{:04X} = 0x{:08X} (sz={})", reg, result.as_ref().map(|v| *v as u32).unwrap_or(0), size);
+                }
+                return result;
             }
         }
 
@@ -2008,7 +2016,11 @@ impl crate::memory::mmio::MmioHandler for PciMmioRouter {
             let e1000_base = self.e1000_bar0();
             if e1000_base != 0 && abs_addr >= e1000_base && abs_addr < e1000_base + 0x2_0000 {
                 let e1000 = unsafe { &mut *self.e1000 };
-                return e1000.write(abs_addr - e1000_base, size, val);
+                let reg = abs_addr - e1000_base;
+                if reg < 0x100 || reg == 0x400 || reg == 0x5800 || reg == 0x5808 {
+                    eprintln!("[e1000] MMIO W 0x{:04X} = 0x{:08X} (sz={})", reg, val as u32, size);
+                }
+                return e1000.write(reg, size, val);
             }
         }
 
@@ -2831,14 +2843,41 @@ impl crate::io::IoHandler for PciIoRouter {
                     use crate::memory::mmio::MmioHandler;
                     let reg = e1000.io_addr;
                     let _ = e1000.write(reg as u64, 4, val as u64);
-                    // Log interesting register writes
-                    match reg {
-                        0x0000 => eprintln!("[e1000] I/O CTRL = 0x{:08X}{}", val, if val & (1<<26) != 0 { " RST" } else { "" }),
-                        0x00C0 => eprintln!("[e1000] I/O ICR write = 0x{:08X}", val),
-                        0x00C8 => eprintln!("[e1000] I/O ICS = 0x{:08X}", val),
-                        0x00D0 => eprintln!("[e1000] I/O IMS = 0x{:08X}", val),
-                        0x00D8 => eprintln!("[e1000] I/O IMC = 0x{:08X}", val),
-                        _ => {}
+                    // Log ALL register writes for Windows driver debugging
+                    let reg_name = match reg {
+                        0x0000 => "CTRL",
+                        0x0008 => "STATUS",
+                        0x0010 => "EECD",
+                        0x0014 => "EERD",
+                        0x0018 => "CTRL_EXT",
+                        0x0020 => "MDIC",
+                        0x00C0 => "ICR",
+                        0x00C4 => "ITR",
+                        0x00C8 => "ICS",
+                        0x00D0 => "IMS",
+                        0x00D8 => "IMC",
+                        0x0100 => "RCTL",
+                        0x0400 => "TCTL",
+                        0x0410 => "TIPG",
+                        0x2800 => "RDBAL",
+                        0x2804 => "RDBAH",
+                        0x2808 => "RDLEN",
+                        0x2810 => "RDH",
+                        0x2818 => "RDT",
+                        0x3800 => "TDBAL",
+                        0x3804 => "TDBAH",
+                        0x3808 => "TDLEN",
+                        0x3810 => "TDH",
+                        0x3818 => "TDT",
+                        0x5800 => "WUC",
+                        0x5808 => "WUFC",
+                        _ => "",
+                    };
+                    if !reg_name.is_empty() {
+                        eprintln!("[e1000] I/O W {} (0x{:04X}) = 0x{:08X}{}", reg_name, reg, val,
+                            if reg == 0x0000 && val & (1<<26) != 0 { " RST" } else { "" });
+                    } else {
+                        eprintln!("[e1000] I/O W 0x{:04X} = 0x{:08X}", reg, val);
                     }
                 }
                 return Ok(());

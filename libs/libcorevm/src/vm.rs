@@ -1,5 +1,11 @@
 //! Top-level VM struct that ties backend, memory, I/O dispatch, and devices together.
 
+/// VGA PCI BAR0 base address (linear framebuffer).
+/// Placed within the PCI MMIO window declared in ACPI _CRS (0xC0000000-0xFEBFFFFF).
+/// Must not collide with VBE LFB (0xE0000000), E1000 (0xF0000000), or VirtIO devices.
+/// SeaBIOS may remap this — the PCI MMIO router handles dynamic routing.
+pub const VGA_BAR0_BASE: u64 = 0xD000_0000;
+
 use alloc::boxed::Box;
 use crate::backend::{VmBackend, VmExitReason, VmError};
 use crate::backend::types::*;
@@ -238,15 +244,15 @@ impl Vm {
         // VGA legacy framebuffer MMIO at 0xA0000 (128KB)
         self.memory.add_mmio(0xA0000, 0x20000, Box::new(SvgaMmioProxy(self.svga_ptr)));
         // VGA linear framebuffer MMIO at Bochs VBE default (0xE0000000)
-        // and PCI BAR0 (0xFD000000). SeaVGABIOS uses 0xE0000000 for the LFB.
+        // and PCI BAR0 (VGA_BAR0_BASE). SeaVGABIOS uses 0xE0000000 for the LFB.
         // For software emulation, these catch guest LFB writes directly.
         // For hardware-virt (WHP/KVM), these are shadowed by RAM mappings.
         let lfb_size = unsafe { &*self.svga_ptr }.vram_size() as u64;
         self.memory.add_mmio(0xE000_0000, lfb_size, Box::new(SvgaLfbProxy(self.svga_ptr)));
-        // BAR0 proxy at 0xFD000000: cap at 16 MB to avoid colliding with
+        // BAR0 proxy at VGA_BAR0_BASE: cap at 16 MB to avoid colliding with
         // PCI Expansion ROMs that start at 0xFE000000.
         let bar0_proxy_size = lfb_size.min(0x0100_0000);
-        self.memory.add_mmio(0xFD00_0000, bar0_proxy_size, Box::new(SvgaLfbProxy(self.svga_ptr)));
+        self.memory.add_mmio(VGA_BAR0_BASE, bar0_proxy_size, Box::new(SvgaLfbProxy(self.svga_ptr)));
         // Bochs dispi register MMIO at the PCI BAR2 default (0xFEBE0000).
         // SeaBIOS may remap BAR2 — the PCI MMIO router handles that dynamically.
         // Do NOT register 0xFE002000 here — it collides with E1000 BAR0 offsets
@@ -311,17 +317,18 @@ impl Vm {
         {
             let mut vga = PciDevice::new(0x1234, 0x1111, 0x03, 0x00, 0x00);
             vga.device = 2;
-            // BAR0: linear framebuffer (size matches VRAM)
+            // BAR0: linear framebuffer (size matches VRAM, prefetchable).
+            // Prefetchable is required by Windows for framebuffer memory mapping.
             let bar0_size = unsafe { &*self.svga_ptr }.vram_size() as u32;
-            vga.set_bar(0, 0xFD00_0000, bar0_size, true);
-            // BAR2: Bochs dispi MMIO registers (4KB)
+            vga.set_bar_prefetchable(0, VGA_BAR0_BASE as u32, bar0_size);
+            // BAR2: Bochs dispi MMIO registers (4KB, non-prefetchable)
             vga.set_bar(2, 0xFEBE_0000, 0x1000, true);
-            // No interrupt — our VGA emulation never generates IRQs.
-            // Sharing IRQ 11 with AHCI causes "irq 11: nobody cared" when
-            // the bochs-drm driver receives AHCI interrupts it can't handle,
-            // leading Linux to disable IRQ 11 entirely (killing AHCI).
-            vga.config_space[0x3C] = 0; // interrupt line = none
-            vga.config_space[0x3D] = 0; // interrupt pin = none
+            // Interrupt: declare INTA so Windows PnP can allocate resources.
+            // Our VGA never actually fires IRQs, but Windows needs a valid
+            // interrupt pin declaration to avoid Code 12 resource errors.
+            vga.set_interrupt(11, 1);
+            // Power Management capability — required by Windows Basic Display Adapter.
+            vga.add_pm_capability(0x40, 0x00);
             // Expansion ROM BAR (0xC0000 VGA BIOS area)
             vga.config_space[0x30] = 0x00; // ROM base (will be set by SeaBIOS)
             vga.config_space[0x31] = 0x00;
@@ -392,7 +399,7 @@ impl Vm {
         let fb_size = svga.vram_size() as u64;
         // Slot 2: VGA LFB at 0xE0000000 — VBE dispi default address.
         // SeaVGABIOS always uses 0xE0000000 for the LFB, so this is the
-        // primary mapping. The PCI BAR0 region (0xFD000000) is NOT mapped
+        // primary mapping. The PCI BAR0 region (0xC0000000) is NOT mapped
         // as a separate KVM slot because for VRAM > 8 MB it would collide
         // with other PCI device regions above 0xFE000000. The PCI BAR0
         // address is handled by the MMIO fallback proxy if any guest
@@ -400,11 +407,11 @@ impl Vm {
         // (Slot 0 = RAM below PCI hole, slot 1 = reserved for BIOS ROM, slot 3 = RAM above 4GB)
         self.backend.set_memory_region(2, 0xE000_0000, fb_size, fb_ptr)?;
 
-        // Slot 4: VGA LFB at PCI BAR0 address (0xFD000000).
+        // Slot 4: VGA LFB at PCI BAR0 address (VGA_BAR0_BASE).
         // Linux bochs-drm uses the PCI BAR0 address, not 0xE0000000.
-        // Cap at 16 MB to avoid colliding with PCI Expansion ROMs at 0xFE000000.
+        // Cap at 16 MB to avoid colliding with other PCI device regions.
         let bar0_size = fb_size.min(0x0100_0000); // max 16 MB
-        self.backend.set_memory_region(4, 0xFD00_0000, bar0_size, fb_ptr)
+        self.backend.set_memory_region(4, VGA_BAR0_BASE, bar0_size, fb_ptr)
     }
 
     // ── VmBackend delegations ──
@@ -1339,7 +1346,7 @@ impl crate::io::IoHandler for Port92 {
     }
 }
 
-/// Proxy for VGA linear framebuffer MMIO at PCI BAR0 (0xFD000000, 16MB).
+/// Proxy for VGA linear framebuffer MMIO at PCI BAR0 (0xC0000000, 16MB).
 /// Guest LFB writes go directly to the Svga framebuffer.
 struct SvgaLfbProxy(*mut Svga);
 unsafe impl Send for SvgaLfbProxy {}
