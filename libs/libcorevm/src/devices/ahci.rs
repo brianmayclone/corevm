@@ -445,6 +445,9 @@ pub struct Ahci {
     pub msi_data: u32,
     guest_mem_ptr: *mut u8,
     guest_mem_len: usize,
+    /// Optional I/O activity callback: called with port index on every read/write.
+    pub io_activity_cb: Option<fn(ctx: *mut (), port: u8)>,
+    pub io_activity_ctx: *mut (),
 }
 
 unsafe impl Send for Ahci {}
@@ -473,6 +476,8 @@ impl Ahci {
             msi_data: 0,
             guest_mem_ptr: core::ptr::null_mut(),
             guest_mem_len: 0,
+            io_activity_cb: None,
+            io_activity_ctx: core::ptr::null_mut(),
         }
     }
 
@@ -493,6 +498,7 @@ impl Ahci {
 
     pub fn irq_raised(&self) -> bool { self.irq_pending }
     pub fn clear_irq(&mut self) { self.irq_pending = false; }
+
 
     pub fn set_guest_memory(&mut self, ptr: *mut u8, len: usize) {
         self.guest_mem_ptr = ptr;
@@ -645,6 +651,7 @@ impl Ahci {
                     dma.write_u32(cmd_hdr_addr + 4, total as u32);
                     port.tfd = TFD_STS_DRDY | TFD_STS_DSC;
                     port.is |= PORT_IS_DHRS;
+                    if let Some(cb) = self.io_activity_cb { cb(self.io_activity_ctx, port_idx as u8); }
                 }
                 ATA_CMD_WRITE_DMA | ATA_CMD_WRITE_DMA_EXT
                 | ATA_CMD_WRITE_SECTORS | ATA_CMD_WRITE_SECTORS_EXT => {
@@ -656,6 +663,7 @@ impl Ahci {
                     dma.write_u32(cmd_hdr_addr + 4, total as u32);
                     port.tfd = TFD_STS_DRDY | TFD_STS_DSC;
                     port.is |= PORT_IS_DHRS;
+                    if let Some(cb) = self.io_activity_cb { cb(self.io_activity_ctx, port_idx as u8); }
                 }
                 ATA_CMD_FLUSH | ATA_CMD_FLUSH_EXT => {
                     // Flush write cache — call fsync on the host fd
@@ -704,6 +712,7 @@ impl Ahci {
                         port.is |= PORT_IS_DHRS;
                     } else if let Some(acmd) = dma.read_bytes(ctba + 0x40, 16) {
                         process_atapi(port, &dma, &acmd, prdt_base, prdtl, cmd_hdr_addr);
+                        if let Some(cb) = self.io_activity_cb { cb(self.io_activity_ctx, port_idx as u8); }
                     } else {
                         port.tfd = TFD_STS_DRDY | TFD_STS_DSC | 1;
                         port.is |= PORT_IS_DHRS;

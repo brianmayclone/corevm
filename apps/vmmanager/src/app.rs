@@ -43,6 +43,37 @@ impl Default for FrameBufferData {
     }
 }
 
+/// Device categories for I/O activity tracking.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DeviceKind {
+    Disk(usize),  // index into disk_images
+    CdRom,
+    Network,
+}
+
+/// Tracks last-activity timestamps per device. Shared between VM thread and UI.
+pub struct DeviceActivity {
+    timestamps: std::collections::HashMap<DeviceKind, std::time::Instant>,
+}
+
+impl DeviceActivity {
+    pub fn new() -> Self {
+        Self { timestamps: std::collections::HashMap::new() }
+    }
+
+    /// Called from the VM thread when a device does I/O.
+    pub fn notify(&mut self, kind: DeviceKind) {
+        self.timestamps.insert(kind, std::time::Instant::now());
+    }
+
+    /// Returns true if the device had activity within the last `duration`.
+    pub fn is_active(&self, kind: DeviceKind, duration: std::time::Duration) -> bool {
+        self.timestamps.get(&kind)
+            .map(|t| t.elapsed() < duration)
+            .unwrap_or(false)
+    }
+}
+
 /// Runtime entry for a VM
 pub struct VmEntry {
     pub config: VmConfig,
@@ -55,6 +86,8 @@ pub struct VmEntry {
     pub diag_log: DiagLog,
     /// Validation errors (missing disks, etc.). Non-empty = VM cannot start.
     pub errors: Vec<String>,
+    /// Shared device I/O activity tracker.
+    pub device_activity: Arc<Mutex<DeviceActivity>>,
 }
 
 impl VmEntry {
@@ -70,6 +103,7 @@ impl VmEntry {
             cpu_mode: 0,
             diag_log: DiagLog::new(),
             errors,
+            device_activity: Arc::new(Mutex::new(DeviceActivity::new())),
         }
     }
 
@@ -508,12 +542,74 @@ impl CoreVmApp {
     }
 
     fn selected_metrics(&self) -> Option<VmMetrics> {
+        use crate::ui::components::statusbar::DeviceInfo;
+
         let uuid = self.selected_vm.as_ref()?;
         let vm = self.find_vm(uuid)?;
-        if vm.state != VmState::Running { return None; }
+        let state_label = match vm.state {
+            VmState::Running => "Running",
+            VmState::Paused => "Paused",
+            VmState::Stopped => return None,
+        };
+
+        let activity = vm.device_activity.lock().ok();
+        let activity_window = std::time::Duration::from_millis(100);
+
+        let mut devices = Vec::new();
+
+        // Disk drives
+        for (i, disk) in vm.config.disk_images.iter().enumerate() {
+            if !disk.is_empty() {
+                let name = std::path::Path::new(disk)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| disk.clone());
+                let active = activity.as_ref()
+                    .map(|a| a.is_active(DeviceKind::Disk(i), activity_window))
+                    .unwrap_or(false);
+                devices.push(DeviceInfo {
+                    icon: "\u{2395}", // ⎕ (HDD)
+                    label: format!("HDD {}: {}", i, name),
+                    active,
+                });
+            }
+        }
+
+        // CD/DVD
+        if !vm.config.iso_image.is_empty() {
+            let name = std::path::Path::new(&vm.config.iso_image)
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_else(|| vm.config.iso_image.clone());
+            let active = activity.as_ref()
+                .map(|a| a.is_active(DeviceKind::CdRom, activity_window))
+                .unwrap_or(false);
+            devices.push(DeviceInfo {
+                icon: "\u{1F4BF}", // 💿
+                label: format!("CD/DVD: {}", name),
+                active,
+            });
+        }
+
+        // Network
+        if vm.config.net_enabled {
+            let nic_label = match vm.config.nic_model {
+                crate::config::NicModel::E1000 => "Intel E1000",
+                crate::config::NicModel::VirtioNet => "VirtIO Net",
+            };
+            let active = activity.as_ref()
+                .map(|a| a.is_active(DeviceKind::Network, activity_window))
+                .unwrap_or(false);
+            devices.push(DeviceInfo {
+                icon: "\u{1F5A7}", // 🖧
+                label: format!("NIC: {}", nic_label),
+                active,
+            });
+        }
 
         Some(VmMetrics {
-            state_label: "Running",
+            state_label,
+            devices,
         })
     }
 }

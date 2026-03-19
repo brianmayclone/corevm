@@ -150,6 +150,9 @@ pub struct VirtioNet {
 
     /// Set when the device has pending data that requires an interrupt.
     pub irq_pending: bool,
+    /// Optional I/O activity callback: called on TX/RX activity.
+    pub io_activity_cb: Option<fn(ctx: *mut ())>,
+    pub io_activity_ctx: *mut (),
 }
 
 unsafe impl Send for VirtioNet {}
@@ -182,6 +185,14 @@ impl VirtioNet {
             msi_address: 0,
             msi_data: 0,
             irq_pending: false,
+            io_activity_cb: None,
+            io_activity_ctx: core::ptr::null_mut(),
+        }
+    }
+
+    fn notify_io(&self) {
+        if let Some(cb) = self.io_activity_cb {
+            cb(self.io_activity_ctx);
         }
     }
 
@@ -337,6 +348,7 @@ impl VirtioNet {
         if used_count > 0 {
             self.isr_status |= 1;
             self.irq_pending = true;
+            self.notify_io();
         }
     }
 
@@ -445,6 +457,7 @@ impl VirtioNet {
         if delivered > 0 {
             self.isr_status |= 1;
             self.irq_pending = true;
+            self.notify_io();
         }
     }
 

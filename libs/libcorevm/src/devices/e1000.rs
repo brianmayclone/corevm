@@ -425,6 +425,9 @@ pub struct E1000 {
     /// Flag set by fire_irq_assert when the callback fires.
     /// poll_irqs should check this and synchronize e1000_irq_asserted.
     pub irq_pending_assert: bool,
+    /// Optional I/O activity callback: called on TX/RX activity.
+    pub io_activity_cb: Option<fn(ctx: *mut ())>,
+    pub io_activity_ctx: *mut (),
 }
 
 impl E1000 {
@@ -549,6 +552,14 @@ impl E1000 {
             #[cfg(feature = "std")]
             irq_callback: None,
             irq_pending_assert: false,
+            io_activity_cb: None,
+            io_activity_ctx: core::ptr::null_mut(),
+        }
+    }
+
+    fn notify_io(&self) {
+        if let Some(cb) = self.io_activity_cb {
+            cb(self.io_activity_ctx);
         }
     }
 
@@ -1226,6 +1237,7 @@ impl E1000 {
             if head == tail {
                 self.raise_interrupt(ICR_TXQE);
             }
+            self.notify_io();
         }
     }
 
@@ -1434,6 +1446,9 @@ impl E1000 {
 
         if delivered || !self.rx_buffer.is_empty() {
             self.raise_interrupt(ICR_RXT0);
+        }
+        if delivered {
+            self.notify_io();
         }
     }
 
