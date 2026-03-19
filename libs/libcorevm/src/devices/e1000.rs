@@ -635,24 +635,15 @@ impl E1000 {
     /// NEVER de-asserts — that is handled by poll_irqs which properly
     /// checks the shared IRQ 11 line (E1000 + AHCI).
     fn fire_irq_assert(&mut self) {
-        let icr = self.regs[REG_ICR / 4];
-        let ims = self.regs[REG_IMS / 4];
-        if (icr & ims) != 0 {
-            self.irq_pending_assert = true;
-            #[cfg(feature = "std")]
-            if let Some(ref mut cb) = self.irq_callback {
-                cb(true);
-            }
-        }
+        // Interrupt delivery is handled entirely by poll_irqs in the
+        // VM loop.  The callback is NOT used because it creates state
+        // synchronization issues with e1000_irq_asserted in the VM struct.
+        // poll_irqs checks (ICR & IMS) on every iteration and asserts/
+        // de-asserts the IRQ line reliably.
     }
 
     fn raise_interrupt(&mut self, cause: u32) {
         self.regs[REG_ICR / 4] |= cause;
-        // Assert immediately so the guest doesn't have to wait for
-        // the next poll_irqs iteration.  This is safe because
-        // fire_irq_assert only calls set_irq_line(11, true) via ioctl
-        // and never de-asserts.
-        self.fire_irq_assert();
     }
 
     // ═══════════════════════════════════════════════════════════════════════
