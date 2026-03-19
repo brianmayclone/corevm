@@ -649,7 +649,11 @@ impl E1000 {
 
     fn raise_interrupt(&mut self, cause: u32) {
         self.regs[REG_ICR / 4] |= cause;
-        self.fire_irq_assert();
+        // Do NOT call fire_irq_assert here — the callback must only fire
+        // from explicit ICS/IMS writes.  If TX/RX interrupts fire the
+        // callback during the driver's interrupt test, the extra ICR bits
+        // (TXDW, TXQE) can corrupt the test result and cause a reset loop.
+        // poll_irqs delivers these interrupts on the next iteration.
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1622,6 +1626,12 @@ impl MmioHandler for E1000 {
             REG_CTRL => {
                 self.regs[dword_offset] = new_val;
                 if new_val & CTRL_RST != 0 {
+                    #[cfg(feature = "std")]
+                    {
+                        static mut RST_COUNT: u32 = 0;
+                        unsafe { RST_COUNT += 1; }
+                        eprintln!("[e1000] RST #{} (CTRL=0x{:08X})", unsafe { RST_COUNT }, new_val);
+                    }
                     self.reset();
                 }
                 if new_val & CTRL_PHY_RST != 0 {
