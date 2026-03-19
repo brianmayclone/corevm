@@ -636,6 +636,11 @@ impl E1000 {
 
     fn raise_interrupt(&mut self, cause: u32) {
         self.regs[REG_ICR / 4] |= cause;
+        // Assert immediately so the guest doesn't have to wait for
+        // the next poll_irqs iteration.  This is safe because
+        // fire_irq_assert only calls set_irq_line(11, true) via ioctl
+        // and never de-asserts.
+        self.fire_irq_assert();
     }
 
     // ═══════════════════════════════════════════════════════════════════════
