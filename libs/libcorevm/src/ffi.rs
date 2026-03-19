@@ -2789,7 +2789,6 @@ impl crate::io::IoHandler for PciIoRouter {
                 } else {
                     use crate::memory::mmio::MmioHandler;
                     let val = e1000.read(e1000.io_addr as u64, 4)?;
-                    eprintln!("[e1000] I/O read reg=0x{:04X} val=0x{:08X}", e1000.io_addr, val as u32);
                     return Ok(val as u32);
                 }
             }
@@ -2832,42 +2831,6 @@ impl crate::io::IoHandler for PciIoRouter {
                     use crate::memory::mmio::MmioHandler;
                     let reg = e1000.io_addr;
                     let _ = e1000.write(reg as u64, 4, val as u64);
-                    // Log ALL register writes for Windows driver debugging
-                    let reg_name = match reg {
-                        0x0000 => "CTRL",
-                        0x0008 => "STATUS",
-                        0x0010 => "EECD",
-                        0x0014 => "EERD",
-                        0x0018 => "CTRL_EXT",
-                        0x0020 => "MDIC",
-                        0x00C0 => "ICR",
-                        0x00C4 => "ITR",
-                        0x00C8 => "ICS",
-                        0x00D0 => "IMS",
-                        0x00D8 => "IMC",
-                        0x0100 => "RCTL",
-                        0x0400 => "TCTL",
-                        0x0410 => "TIPG",
-                        0x2800 => "RDBAL",
-                        0x2804 => "RDBAH",
-                        0x2808 => "RDLEN",
-                        0x2810 => "RDH",
-                        0x2818 => "RDT",
-                        0x3800 => "TDBAL",
-                        0x3804 => "TDBAH",
-                        0x3808 => "TDLEN",
-                        0x3810 => "TDH",
-                        0x3818 => "TDT",
-                        0x5800 => "WUC",
-                        0x5808 => "WUFC",
-                        _ => "",
-                    };
-                    if !reg_name.is_empty() {
-                        eprintln!("[e1000] I/O W {} (0x{:04X}) = 0x{:08X}{}", reg_name, reg, val,
-                            if reg == 0x0000 && val & (1<<26) != 0 { " RST" } else { "" });
-                    } else {
-                        eprintln!("[e1000] I/O W 0x{:04X} = 0x{:08X}", reg, val);
-                    }
                 }
                 return Ok(());
             }
