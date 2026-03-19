@@ -3,7 +3,7 @@ use eframe::egui;
 use crate::app::FrameBufferData;
 
 #[cfg(target_os = "linux")]
-use crate::engine::evdev_mouse::EvdevMouseReader;
+use crate::engine::evdev_input::EvdevInputReader;
 
 // Standard VGA 16-color palette as RGBA
 const VGA_PALETTE: [[u8; 4]; 16] = [
@@ -414,10 +414,10 @@ pub struct DisplayWidget {
     /// Virtual absolute cursor position (0..32767) for USB tablet/VirtIO in capture mode.
     abs_cursor_x: u16,
     abs_cursor_y: u16,
-    /// Low-level evdev mouse reader (Linux only). Provides reliable raw deltas
-    /// independent of the windowing system.
+    /// Low-level evdev input reader (Linux only). Provides reliable raw mouse
+    /// deltas and keyboard events independent of the windowing system.
     #[cfg(target_os = "linux")]
-    evdev_mouse: Option<EvdevMouseReader>,
+    pub evdev_input: Option<EvdevInputReader>,
 }
 
 impl DisplayWidget {
@@ -441,7 +441,7 @@ impl DisplayWidget {
             abs_cursor_x: 16383, // center
             abs_cursor_y: 16383, // center
             #[cfg(target_os = "linux")]
-            evdev_mouse: EvdevMouseReader::open(),
+            evdev_input: EvdevInputReader::open(),
         }
     }
 
@@ -582,11 +582,12 @@ impl DisplayWidget {
         self.warp_skip_frames = 0;
         self.warp_counter = 0;
 
-        // Start evdev raw mouse reader (Linux) for reliable deltas
+        // Start evdev raw input reader (Linux) for reliable mouse deltas + keyboard
         #[cfg(target_os = "linux")]
-        if let Some(ref mut evdev) = self.evdev_mouse {
+        if let Some(ref mut evdev) = self.evdev_input {
             evdev.start();
-            eprintln!("[mouse] evdev reader started");
+            eprintln!("[evdev] input reader started (mouse={}, kbd={})",
+                evdev.has_mouse(), evdev.has_keyboard());
         }
 
         // Lock cursor — prevents it from leaving the window.
@@ -598,7 +599,21 @@ impl DisplayWidget {
 
     /// Check all release mechanisms. Returns true if the mouse should be released.
     fn check_mouse_release(&mut self, ui: &egui::Ui, ctx: &egui::Context) -> bool {
-        // 1. Ctrl+Alt+G/F/Escape (via events — standard mechanism)
+        // 1. Check evdev modifier state for Ctrl+Alt+G/F/Escape (Linux)
+        //    The evdev reader tracks modifier state atomically — no need to consume events.
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(ref evdev) = self.evdev_input {
+                if evdev.is_running() && evdev.has_keyboard() {
+                    if evdev.check_release_combo() {
+                        eprintln!("[mouse] Release via Ctrl+Alt+G/F/Esc (evdev)");
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // 2. Ctrl+Alt+G/F/Escape (via egui events — fallback when evdev not active)
         let key_release = ui.input(|i| {
             i.events.iter().any(|e| match e {
                 egui::Event::Key { key: egui::Key::G, pressed: true, modifiers, .. }
@@ -615,7 +630,7 @@ impl DisplayWidget {
             return true;
         }
 
-        // 2. Ctrl+Alt held + G/F pressed (via modifier state — works even if events are broken)
+        // 3. Ctrl+Alt held + G/F pressed (via modifier state — works even if events are broken)
         let mod_release = ctx.input(|i| {
             i.modifiers.ctrl && i.modifiers.alt
                 && (i.key_pressed(egui::Key::G) || i.key_pressed(egui::Key::F) || i.key_pressed(egui::Key::Escape))
@@ -663,11 +678,11 @@ impl DisplayWidget {
         self.right_click_start = None;
         self.escape_presses.clear();
 
-        // Stop evdev raw mouse reader
+        // Stop evdev raw input reader
         #[cfg(target_os = "linux")]
-        if let Some(ref mut evdev) = self.evdev_mouse {
+        if let Some(ref mut evdev) = self.evdev_input {
             evdev.stop();
-            eprintln!("[mouse] evdev reader stopped");
+            eprintln!("[evdev] input reader stopped");
         }
 
         ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
@@ -725,9 +740,9 @@ impl DisplayWidget {
 
         #[cfg(target_os = "linux")]
         {
-            if let Some(ref evdev) = self.evdev_mouse {
+            if let Some(ref evdev) = self.evdev_input {
                 if evdev.is_running() {
-                    let (dx, dy, w) = evdev.take_deltas();
+                    let (dx, dy, w) = evdev.take_mouse_deltas();
                     evdev_dx = dx;
                     evdev_dy = dy;
                     evdev_wheel = w;
@@ -800,5 +815,58 @@ impl DisplayWidget {
 
         self.last_mouse_buttons = buttons;
         ctx.request_repaint();
+    }
+
+    /// Process keyboard events from evdev and send to VM.
+    /// Returns a label for the last key pressed (for status bar), if any.
+    /// Only active when mouse is captured (= input locked to VM).
+    #[cfg(target_os = "linux")]
+    pub fn handle_evdev_keyboard(&mut self, vm_handle: u64) -> Option<String> {
+        if !self.mouse_captured {
+            return None;
+        }
+
+        let evdev = match self.evdev_input {
+            Some(ref evdev) if evdev.is_running() && evdev.has_keyboard() => evdev,
+            _ => return None,
+        };
+
+        let key_events = evdev.take_key_events();
+        if key_events.is_empty() {
+            return None;
+        }
+
+        let has_virtio_input = libcorevm::ffi::corevm_has_virtio_input(vm_handle) != 0;
+        let mut last_label = None;
+
+        for ev in &key_events {
+            if ev.pressed {
+                if ev.extended {
+                    libcorevm::ffi::corevm_ps2_key_press(vm_handle, 0xE0);
+                }
+                libcorevm::ffi::corevm_ps2_key_press(vm_handle, ev.scancode);
+                if has_virtio_input {
+                    if ev.extended {
+                        libcorevm::ffi::corevm_virtio_kbd_ps2(vm_handle, 0xE0);
+                    }
+                    libcorevm::ffi::corevm_virtio_kbd_ps2(vm_handle, ev.scancode);
+                }
+                last_label = Some(format!("0x{:02X}{}", ev.scancode,
+                    if ev.extended { " (E0)" } else { "" }));
+            } else {
+                if ev.extended {
+                    libcorevm::ffi::corevm_ps2_key_press(vm_handle, 0xE0);
+                }
+                libcorevm::ffi::corevm_ps2_key_release(vm_handle, ev.scancode);
+                if has_virtio_input {
+                    if ev.extended {
+                        libcorevm::ffi::corevm_virtio_kbd_ps2(vm_handle, 0xE0);
+                    }
+                    libcorevm::ffi::corevm_virtio_kbd_ps2(vm_handle, ev.scancode | 0x80);
+                }
+            }
+        }
+
+        last_label
     }
 }

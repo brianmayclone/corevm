@@ -642,9 +642,9 @@ impl eframe::App for CoreVmApp {
         // ── Linux evdev permission check (runs once on first frame) ──
         #[cfg(target_os = "linux")]
         {
-            use crate::engine::evdev_mouse;
+            use crate::engine::evdev_input;
             if matches!(self.evdev_perm_state, EvdevPermState::Unchecked) {
-                if evdev_mouse::check_access() {
+                if evdev_input::check_access() {
                     self.evdev_perm_state = EvdevPermState::Ok;
                 } else {
                     self.evdev_perm_state = EvdevPermState::NeedPermission;
@@ -682,7 +682,7 @@ impl eframe::App for CoreVmApp {
                         });
                     match action {
                         Some("grant") => {
-                            match evdev_mouse::grant_access() {
+                            match evdev_input::grant_access() {
                                 Ok(true) => {
                                     self.evdev_perm_state = EvdevPermState::GrantedNeedRelogin;
                                 }
@@ -740,49 +740,80 @@ impl eframe::App for CoreVmApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
         }
 
-        // Check for mouse release shortcuts BEFORE keyboard handling consumes events.
-        // handle_keyboard_events removes all Key events, so Ctrl+Alt+G would never
-        // reach display.show() otherwise.
-        if self.display.mouse_captured {
-            // Check via events (before handle_keyboard_events consumes them)
-            let release = ctx.input(|i| {
-                i.events.iter().any(|e| matches!(e,
-                    egui::Event::Key { key: egui::Key::G, pressed: true, modifiers, .. }
-                        if modifiers.ctrl && modifiers.alt
-                ) || matches!(e,
-                    egui::Event::Key { key: egui::Key::F, pressed: true, modifiers, .. }
-                        if modifiers.ctrl && modifiers.alt
-                ) || matches!(e,
-                    egui::Event::Key { key: egui::Key::Escape, pressed: true, modifiers, .. }
-                        if modifiers.ctrl && modifiers.alt
-                ))
+        // ── Capture mode: evdev handles all input, consume egui events early ──
+        // When captured on Linux with evdev, strip ALL egui key/text events immediately
+        // so they never reach any handler (prevents double key sends since evdev and
+        // X11/Wayland both deliver the same physical keystrokes).
+        #[cfg(target_os = "linux")]
+        let evdev_kbd_active = self.display.mouse_captured
+            && self.display.evdev_input.as_ref().map_or(false, |e| e.is_running() && e.has_keyboard());
+        #[cfg(not(target_os = "linux"))]
+        let evdev_kbd_active = false;
+
+        if evdev_kbd_active {
+            // Consume all egui key/text events — evdev is the sole keyboard source
+            ctx.input_mut(|i| {
+                i.events.retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
             });
-            // Also check via modifier state (works even if events are broken)
+        }
+
+        // Check for mouse release shortcuts BEFORE keyboard handling consumes events.
+        // Note: when evdev_kbd_active, egui key events are already stripped above,
+        // but release detection also works via check_mouse_release in display.show()
+        // which checks evdev key events directly. We keep the modifier-state check
+        // as a fallback (modifiers.ctrl/alt still work even without events).
+        if self.display.mouse_captured {
             let mod_release = ctx.input(|i| {
                 i.modifiers.ctrl && i.modifiers.alt
                     && (i.key_pressed(egui::Key::G) || i.key_pressed(egui::Key::F) || i.key_pressed(egui::Key::Escape))
             });
-            if release || mod_release {
-                self.display.release_mouse(ctx);
-                // Strip release shortcut key events so they don't get forwarded to the VM
-                ctx.input_mut(|i| {
-                    i.events.retain(|e| !matches!(e,
-                        egui::Event::Key { key: egui::Key::G | egui::Key::F | egui::Key::Escape, pressed: true, modifiers, .. }
+            let event_release = if !evdev_kbd_active {
+                ctx.input(|i| {
+                    i.events.iter().any(|e| matches!(e,
+                        egui::Event::Key { key: egui::Key::G, pressed: true, modifiers, .. }
                             if modifiers.ctrl && modifiers.alt
-                    ));
-                });
+                    ) || matches!(e,
+                        egui::Event::Key { key: egui::Key::F, pressed: true, modifiers, .. }
+                            if modifiers.ctrl && modifiers.alt
+                    ) || matches!(e,
+                        egui::Event::Key { key: egui::Key::Escape, pressed: true, modifiers, .. }
+                            if modifiers.ctrl && modifiers.alt
+                    ))
+                })
+            } else {
+                false
+            };
+            if mod_release || event_release {
+                self.display.release_mouse(ctx);
+                if !evdev_kbd_active {
+                    ctx.input_mut(|i| {
+                        i.events.retain(|e| !matches!(e,
+                            egui::Event::Key { key: egui::Key::G | egui::Key::F | egui::Key::Escape, pressed: true, modifiers, .. }
+                                if modifiers.ctrl && modifiers.alt
+                        ));
+                    });
+                }
             }
         }
 
         // Intercept keyboard events BEFORE egui widgets consume Enter/Tab/etc.
-        // Forward keys when display is focused OR mouse is captured (capture = full input grab).
         if self.display_focused || self.display.mouse_captured {
             if let Some(uuid) = &self.selected_vm {
                 if let Some(vm) = self.vms.iter().find(|v| &v.config.uuid == uuid) {
                     if let Some(handle) = vm.vm_handle {
-                        if let Some(label) = input::handle_keyboard_events(ctx, handle, true) {
-                            self.last_key_label = Some(label);
-                            self.last_key_time = std::time::Instant::now();
+                        if evdev_kbd_active {
+                            // evdev keyboard: send raw key events with proper repeat
+                            #[cfg(target_os = "linux")]
+                            if let Some(label) = self.display.handle_evdev_keyboard(handle) {
+                                self.last_key_label = Some(label);
+                                self.last_key_time = std::time::Instant::now();
+                            }
+                        } else {
+                            // Fallback: egui-based keyboard input
+                            if let Some(label) = input::handle_keyboard_events(ctx, handle, true) {
+                                self.last_key_label = Some(label);
+                                self.last_key_time = std::time::Instant::now();
+                            }
                         }
                     }
                 }
