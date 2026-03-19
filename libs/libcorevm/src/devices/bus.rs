@@ -404,16 +404,6 @@ impl PciBus {
         if self.config_address & 0x80000000 == 0 {
             return;
         }
-        #[cfg(feature = "std")]
-        {
-            let register = (self.config_address & 0xFC) as usize;
-            let device_num = ((self.config_address >> 11) & 0x1F) as u8;
-            static mut CW_DBG: u32 = 0;
-            unsafe { CW_DBG += 1; if CW_DBG <= 100 && register >= 0x10 && register <= 0x24 {
-                eprintln!("[cf8-cw] dev={} reg=0x{:02X} val=0x{:08X}", device_num, register, val);
-            }}
-        }
-
         let bus = ((self.config_address >> 16) & 0xFF) as u8;
         let device_num = ((self.config_address >> 11) & 0x1F) as u8;
         let function = ((self.config_address >> 8) & 0x07) as u8;
