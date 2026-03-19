@@ -594,7 +594,7 @@ impl eframe::App for CoreVmApp {
             .frame(
                 egui::Frame::new()
                     .fill(theme::toolbar_bg())
-                    .inner_margin(egui::Margin::symmetric(6, 2)),
+                    .inner_margin(egui::Margin { left: 6, right: 6, top: 7, bottom: 2 }),
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
