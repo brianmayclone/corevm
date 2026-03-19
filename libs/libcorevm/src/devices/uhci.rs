@@ -468,9 +468,17 @@ impl Uhci {
         }
 
         if old & PORT_PR != 0 && val & PORT_PR == 0 {
+            // Port reset complete: enable the port, signal change bits.
             let mut new_val = PORT_PE | PORT_CSC | PORT_PEC | PORT_ALWAYS1;
             if port_idx == 0 {
                 new_val |= PORT_CCS;
+                // Reset the device to address 0 (USB spec: device must
+                // respond at address 0 after port reset). Without this,
+                // Windows' SET_ADDRESS after reset fails with Code 43.
+                self.device_address = 0;
+                self.configured = false;
+                self.ctrl_response.clear();
+                self.ctrl_response_offset = 0;
             }
             self.portsc[port_idx] = new_val;
             return;
@@ -510,6 +518,8 @@ impl IoHandler for Uhci {
             },
             4 => match port {
                 REG_FLBASEADD => self.flbaseadd,
+                // 32-bit read on PORTSC1 returns PORTSC1 (low) | PORTSC2 (high)
+                REG_PORTSC1 => (self.portsc[0] as u32) | ((self.portsc[1] as u32) << 16),
                 _ => 0xFFFFFFFF,
             },
             1 => match port {
@@ -553,7 +563,15 @@ impl IoHandler for Uhci {
                 }
             }
             4 => {
-                if port == REG_FLBASEADD { self.flbaseadd = val & 0xFFFFF000; }
+                match port {
+                    REG_FLBASEADD => { self.flbaseadd = val & 0xFFFFF000; }
+                    // 32-bit write on PORTSC1: split into two 16-bit port writes
+                    REG_PORTSC1 => {
+                        self.handle_portsc_write_16(0, val as u16);
+                        self.handle_portsc_write_16(1, (val >> 16) as u16);
+                    }
+                    _ => {}
+                }
             }
             1 => {
                 if port == REG_SOFMOD { self.sofmod = val as u8; }

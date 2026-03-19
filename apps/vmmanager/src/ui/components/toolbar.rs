@@ -31,10 +31,10 @@ fn icon_button(ui: &mut egui::Ui, icon: &str, tooltip: &str, enabled: bool, acce
 
     let resp = ui.add_enabled(
         enabled,
-        egui::Button::new(egui::RichText::new(icon).size(15.0).color(color))
+        egui::Button::new(egui::RichText::new(icon).size(17.0).color(color))
             .fill(fill)
-            .corner_radius(egui::CornerRadius::same(4))
-            .min_size(egui::vec2(24.0, 20.0)),
+            .corner_radius(egui::CornerRadius::same(5))
+            .min_size(egui::vec2(28.0, 24.0)),
     );
     let clicked = resp.clicked();
     resp.on_hover_text(tooltip);

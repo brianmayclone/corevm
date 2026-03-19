@@ -816,7 +816,8 @@ impl eframe::App for CoreVmApp {
                     } else {
                         self.display_focused = false;
                         if let Some(vm) = self.find_vm(uuid) {
-                            render_summary(ui, vm, &mut deferred_action);
+                            let os_icon = self.vm_icons().get(uuid).copied();
+                            render_summary(ui, vm, os_icon, &mut deferred_action);
                         }
                     }
                 }
@@ -1176,7 +1177,7 @@ impl eframe::App for CoreVmApp {
     }
 }
 
-fn render_summary(ui: &mut egui::Ui, vm: &VmEntry, deferred_action: &mut Option<ToolbarAction>) {
+fn render_summary(ui: &mut egui::Ui, vm: &VmEntry, os_icon: Option<egui::TextureId>, deferred_action: &mut Option<ToolbarAction>) {
     let available = ui.available_size();
 
     let screen_aspect = 16.0 / 10.0;
@@ -1209,13 +1210,26 @@ fn render_summary(ui: &mut egui::Ui, vm: &VmEntry, deferred_action: &mut Option<
         // Subtle border
         painter.rect_stroke(rect, 10.0, egui::Stroke::new(0.5, theme::card_border()), egui::StrokeKind::Outside);
 
-        // Power icon (large circle)
+        // OS icon (or fallback power symbol)
         let icon_center = rect.center() - egui::vec2(0.0, 20.0);
-        painter.circle_stroke(icon_center, 28.0, egui::Stroke::new(2.0, theme::card_icon_stroke()));
-        painter.line_segment(
-            [icon_center - egui::vec2(0.0, 14.0), icon_center - egui::vec2(0.0, 30.0)],
-            egui::Stroke::new(2.0, theme::card_icon_stroke()),
-        );
+        if let Some(tex_id) = os_icon {
+            let os_icon_size = 56.0;
+            let os_icon_rect = egui::Rect::from_center_size(icon_center, egui::vec2(os_icon_size, os_icon_size));
+            let tint = if vm.state == VmState::Running {
+                egui::Color32::WHITE
+            } else {
+                theme::card_icon_stroke()
+            };
+            egui::Image::new(egui::load::SizedTexture::new(tex_id, egui::vec2(os_icon_size, os_icon_size)))
+                .tint(tint)
+                .paint_at(ui, os_icon_rect);
+        } else {
+            painter.circle_stroke(icon_center, 28.0, egui::Stroke::new(2.0, theme::card_icon_stroke()));
+            painter.line_segment(
+                [icon_center - egui::vec2(0.0, 14.0), icon_center - egui::vec2(0.0, 30.0)],
+                egui::Stroke::new(2.0, theme::card_icon_stroke()),
+            );
+        }
 
         // VM name
         painter.text(
@@ -1307,13 +1321,13 @@ fn render_summary(ui: &mut egui::Ui, vm: &VmEntry, deferred_action: &mut Option<
         if vm.state == VmState::Stopped {
             if ui.add(
                 egui::Button::new(
-                    egui::RichText::new("Power On")
+                    egui::RichText::new("\u{23FB}  Power On")
                         .size(15.0)
                         .color(egui::Color32::WHITE),
                 )
                 .fill(theme::accent_blue())
                 .corner_radius(egui::CornerRadius::same(10))
-                .min_size(egui::vec2(180.0, 42.0)),
+                .min_size(egui::vec2(200.0, 44.0)),
             )
             .clicked()
             {

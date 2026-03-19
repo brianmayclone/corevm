@@ -238,10 +238,10 @@ fn render_vm_entry(
         *selected = Some(uuid.to_string());
     }
 
-    // Paint background
+    // Paint background with rounded corners
     let visuals = ui.style().interact_selectable(&resp, is_selected);
     if is_selected || resp.hovered() {
-        ui.painter().rect_filled(rect, visuals.corner_radius, visuals.bg_fill);
+        ui.painter().rect_filled(rect, egui::CornerRadius::same(6), visuals.bg_fill);
     }
 
     let content_rect = rect.shrink2(padding);
@@ -260,6 +260,18 @@ fn render_vm_entry(
         let img = egui::Image::new(egui::load::SizedTexture::new(tex_id, egui::vec2(icon_size, icon_size)))
             .tint(tint);
         img.paint_at(ui, icon_rect);
+
+        // Status dot overlay (bottom-right of icon)
+        if state != VmState::Stopped {
+            let dot_color = match state {
+                VmState::Running => theme::success_green(),
+                VmState::Paused => theme::warning_orange(),
+                VmState::Stopped => unreachable!(),
+            };
+            let dot_center = icon_rect.right_bottom() - egui::vec2(3.0, 3.0);
+            ui.painter().circle_filled(dot_center, 4.0, dot_color);
+            ui.painter().circle_stroke(dot_center, 4.0, egui::Stroke::new(1.0, theme::sidebar_bg()));
+        }
     }
 
     // Paint text
