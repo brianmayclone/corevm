@@ -1943,11 +1943,7 @@ impl crate::memory::mmio::MmioHandler for PciMmioRouter {
             if e1000_base != 0 && abs_addr >= e1000_base && abs_addr < e1000_base + 0x2_0000 {
                 let e1000 = unsafe { &mut *self.e1000 };
                 let reg = abs_addr - e1000_base;
-                let result = e1000.read(reg, size);
-                if reg < 0x100 || reg == 0x400 || reg == 0x5800 || reg == 0x5808 {
-                    eprintln!("[e1000] MMIO R 0x{:04X} = 0x{:08X} (sz={})", reg, result.as_ref().map(|v| *v as u32).unwrap_or(0), size);
-                }
-                return result;
+                return e1000.read(reg, size);
             }
         }
 
@@ -2017,9 +2013,6 @@ impl crate::memory::mmio::MmioHandler for PciMmioRouter {
             if e1000_base != 0 && abs_addr >= e1000_base && abs_addr < e1000_base + 0x2_0000 {
                 let e1000 = unsafe { &mut *self.e1000 };
                 let reg = abs_addr - e1000_base;
-                if reg < 0x100 || reg == 0x400 || reg == 0x5800 || reg == 0x5808 {
-                    eprintln!("[e1000] MMIO W 0x{:04X} = 0x{:08X} (sz={})", reg, val as u32, size);
-                }
                 return e1000.write(reg, size, val);
             }
         }

@@ -1059,11 +1059,9 @@ impl SlirpNet {
         }
 
         const TCP_MSS: usize = 1460;
-        // Use the guest's advertised window to limit in-flight data,
-        // capped to a reasonable maximum to avoid runaway buffering.
-        const MAX_UNACKED_CAP: u32 = 65535; // max we allow even if guest advertises more
-        const RETRANSMIT_TIMEOUT_MS: u128 = 200; // retransmit after 200ms
-        const MAX_SEGMENTS_PER_POLL: usize = 16; // read multiple segments per connection
+        const MAX_UNACKED_CAP: u32 = 65535;
+        const RETRANSMIT_TIMEOUT_MS: u128 = 200;
+        const MAX_SEGMENTS_PER_POLL: usize = 64; // was 16 — read more per poll for throughput
 
         let mut data_to_send: Vec<(TcpFlowKey, u32, Vec<u8>)> = Vec::new(); // (key, seq, data)
         let mut closed: Vec<TcpFlowKey> = Vec::new();
@@ -1075,7 +1073,7 @@ impl SlirpNet {
             if conn.state != TcpState::Established { continue; }
 
             // Respect rx_queue backpressure — don't flood the E1000 ring
-            if self.rx_queue.len() > 64 { break; }
+            if self.rx_queue.len() > 512 { break; }
 
             // Non-blocking read: temporarily switch to non-blocking mode
             let _ = conn.stream.set_nonblocking(true);
@@ -1084,7 +1082,7 @@ impl SlirpNet {
             let mut segments_this_conn = 0;
             loop {
                 if segments_this_conn >= MAX_SEGMENTS_PER_POLL { break; }
-                if self.rx_queue.len() + data_to_send.len() > 128 { break; }
+                if self.rx_queue.len() + data_to_send.len() > 512 { break; }
 
                 // Flow control: respect guest's advertised window, with fallback
                 let guest_win = if conn.guest_window > 0 { conn.guest_window as u32 } else { 32768 };
@@ -1214,25 +1212,6 @@ impl SlirpNet {
         pseudo[12..].copy_from_slice(&tcp);
         let cksum = ip_checksum(&pseudo);
         put_u16be(&mut tcp, 16, cksum);
-
-        // Verify checksum before sending
-        #[cfg(feature = "std")]
-        if data.len() > 0 {
-            // Recompute checksum to verify
-            let mut verify_tcp = tcp.clone();
-            put_u16be(&mut verify_tcp, 16, 0); // clear checksum
-            let mut vpseudo = vec![0u8; 12 + verify_tcp.len()];
-            vpseudo[0..4].copy_from_slice(&src);
-            vpseudo[4..8].copy_from_slice(&dst);
-            vpseudo[9] = IP_PROTO_TCP;
-            put_u16be(&mut vpseudo, 10, verify_tcp.len() as u16);
-            vpseudo[12..].copy_from_slice(&verify_tcp);
-            let vcksum = ip_checksum(&vpseudo);
-            let vcksum = if vcksum == 0 { 0xFFFF } else { vcksum };
-            if vcksum != cksum {
-                eprintln!("[tcp] CHECKSUM MISMATCH! computed=0x{:04X} stored=0x{:04X} len={}", vcksum, cksum, tcp.len());
-            }
-        }
 
         self.send_ip_packet(IP_PROTO_TCP, key.remote_ip, GUEST_IP, &tcp);
     }
