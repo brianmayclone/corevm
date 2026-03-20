@@ -9,7 +9,7 @@ pub use libcorevm::devices::nic::NicModel;
 pub enum BootOrder { DiskFirst, CdFirst, FloppyFirst }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum BiosType { CoreVm, SeaBios }
+pub enum BiosType { CoreVm, SeaBios, Uefi }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum RamAlloc { Preallocate, OnDemand }
@@ -136,6 +136,7 @@ impl VmConfig {
         let bios = match self.bios_type {
             BiosType::CoreVm => "corevm",
             BiosType::SeaBios => "seabios",
+            BiosType::Uefi => "uefi",
         };
         let alloc = match self.ram_alloc {
             RamAlloc::Preallocate => "preallocate",
@@ -242,6 +243,7 @@ impl VmConfig {
                 },
                 "bios" => cfg.bios_type = match val {
                     "corevm" => BiosType::CoreVm,
+                    "uefi" => BiosType::Uefi,
                     _ => BiosType::SeaBios,
                 },
                 "jit" => { /* ignored, legacy field */ },

@@ -951,8 +951,9 @@ impl SettingsDialog {
         ui.add_space(8.0);
         section_heading(ui, "Firmware");
 
-        labeled_row(ui, "BIOS:", |ui| {
-            ui.radio_value(&mut self.config.bios_type, BiosType::SeaBios, "SeaBIOS");
+        labeled_row(ui, "Firmware:", |ui| {
+            ui.radio_value(&mut self.config.bios_type, BiosType::SeaBios, "SeaBIOS (Legacy)");
+            ui.radio_value(&mut self.config.bios_type, BiosType::Uefi, "UEFI (OVMF)");
             ui.radio_value(&mut self.config.bios_type, BiosType::CoreVm, "CoreVM");
         });
 
@@ -962,7 +963,8 @@ impl SettingsDialog {
             ui.colored_label(
                 theme::text_dim(),
                 match self.config.bios_type {
-                    BiosType::SeaBios => "Industry-standard BIOS. Recommended for most guests.",
+                    BiosType::SeaBios => "Legacy BIOS boot. Compatible with most operating systems.",
+                    BiosType::Uefi    => "UEFI boot via OVMF. Required for Windows 11 and modern Linux.",
                     BiosType::CoreVm  => "Experimental CoreVM BIOS. For development use only.",
                 },
             );

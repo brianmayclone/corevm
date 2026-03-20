@@ -118,6 +118,7 @@ impl VmEntry {
 pub enum FilePickTarget {
     SettingsIso,
     CreateDiskPath,
+    CreateVmIso,
     AddDisk,
     AddDiskBrowseExisting,
     AddDiskBrowseVmdk,
@@ -1538,6 +1539,11 @@ impl eframe::App for CoreVmApp {
                         }
                     }
                 }
+                Some(FilePickTarget::CreateVmIso) => {
+                    if let Some(ref mut dlg) = self.create_vm_dialog {
+                        dlg.set_iso(path);
+                    }
+                }
                 Some(FilePickTarget::AddDisk) | None => {}
             }
             self.file_pick_target = None;
@@ -1592,6 +1598,11 @@ impl eframe::App for CoreVmApp {
 
         // Create VM dialog
         if let Some(ref mut dialog) = self.create_vm_dialog {
+            if dialog.wants_browse_iso {
+                dialog.wants_browse_iso = false;
+                self.file_pick_target = Some(FilePickTarget::CreateVmIso);
+                self.file_browser = Some(FileBrowserDialog::new_open("Select ISO Image", &["iso"]));
+            }
             if !dialog.show(ctx) {
                 if let Some(config) = dialog.created.take() {
                     let uuid = config.uuid.clone();

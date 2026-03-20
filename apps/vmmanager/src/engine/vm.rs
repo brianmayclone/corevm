@@ -245,11 +245,17 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
     };
     entry.diag_log.log(DiagCategory::Info, format!("ACPI tables setup: rc={} (hpet={})", acpi_rc, config.guest_os.is_windows()));
 
-    // Load BIOS
+    // Load firmware (BIOS or UEFI)
     let extra_bios_paths = platform::bios_search_paths();
     match config.bios_type {
         BiosType::SeaBios => setup::load_seabios(handle, &extra_bios_paths)?,
         BiosType::CoreVm => setup::load_corevm_bios(handle, &extra_bios_paths)?,
+        BiosType::Uefi => {
+            // Per-VM OVMF_VARS copy (EFI variables are written during boot)
+            let vars_path = platform::config_dir()
+                .join(format!("{}_ovmf_vars.fd", config.uuid));
+            setup::load_ovmf(handle, &extra_bios_paths, &vars_path)?;
+        }
     }
 
     // Attach ISO — always on AHCI (port 1) for SeaBIOS boot.

@@ -311,6 +311,136 @@ pub fn load_seabios(handle: u64, extra_bios_paths: &[PathBuf]) -> Result<(), Str
     Ok(())
 }
 
+/// Load OVMF UEFI firmware into the VM.
+///
+/// OVMF_CODE is mapped as ROM at the top of 4GB (read-only firmware code).
+/// OVMF_VARS is copied per-VM and mapped as RAM at the address just below
+/// OVMF_CODE (read-write EFI variable store).
+///
+/// `vars_path`: path to the per-VM OVMF_VARS copy. If it doesn't exist,
+/// the template is copied there first.
+pub fn load_ovmf(
+    handle: u64,
+    extra_bios_paths: &[PathBuf],
+    vars_path: &std::path::Path,
+) -> Result<(), String> {
+    // Find OVMF_CODE firmware
+    let code_path = find_ovmf_code(extra_bios_paths)
+        .ok_or("OVMF UEFI firmware not found. Install the 'ovmf' package.")?;
+
+    let code = std::fs::read(&code_path)
+        .map_err(|e| format!("Failed to read OVMF_CODE: {}", e))?;
+
+    if code.len() < 0x10000 {
+        return Err(format!("OVMF_CODE too small: {} bytes", code.len()));
+    }
+
+    // Ensure per-VM VARS copy exists
+    if !vars_path.exists() {
+        let vars_template = find_ovmf_vars(extra_bios_paths)
+            .ok_or("OVMF_VARS template not found. Install the 'ovmf' package.")?;
+        std::fs::copy(&vars_template, vars_path)
+            .map_err(|e| format!("Failed to copy OVMF_VARS to {:?}: {}", vars_path, e))?;
+    }
+
+    let vars = std::fs::read(vars_path)
+        .map_err(|e| format!("Failed to read OVMF_VARS: {}", e))?;
+
+    // OVMF_CODE: ROM at top of 4GB, aligned to 4KB
+    let code_size = code.len();
+    let code_alloc = (code_size + 0xFFF) & !0xFFF;
+    let code_base = 0x1_0000_0000u64 - code_alloc as u64;
+
+    let layout = std::alloc::Layout::from_size_align(code_alloc, 4096)
+        .map_err(|e| format!("OVMF CODE layout error: {}", e))?;
+    let code_ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+    if code_ptr.is_null() {
+        return Err("Failed to allocate OVMF CODE memory".into());
+    }
+    unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), code_ptr, code_size); }
+
+    let ret = corevm_set_memory_region(handle, 1, code_base, code_alloc as u64, code_ptr);
+    if ret != 0 {
+        return Err(format!("Failed to map OVMF CODE at 0x{:X}", code_base));
+    }
+    // code_ptr intentionally leaked — must remain valid for VM lifetime
+
+    // OVMF_VARS: writable RAM region just below OVMF_CODE
+    let vars_size = vars.len();
+    let vars_alloc = (vars_size + 0xFFF) & !0xFFF;
+    let vars_base = code_base - vars_alloc as u64;
+
+    let vlayout = std::alloc::Layout::from_size_align(vars_alloc, 4096)
+        .map_err(|e| format!("OVMF VARS layout error: {}", e))?;
+    let vars_ptr = unsafe { std::alloc::alloc_zeroed(vlayout) };
+    if vars_ptr.is_null() {
+        return Err("Failed to allocate OVMF VARS memory".into());
+    }
+    unsafe { std::ptr::copy_nonoverlapping(vars.as_ptr(), vars_ptr, vars_size); }
+
+    // Use slot 6 (slots 0-5 are used by RAM/VGA/etc.)
+    let ret = corevm_set_memory_region(handle, 6, vars_base, vars_alloc as u64, vars_ptr);
+    if ret != 0 {
+        return Err(format!("Failed to map OVMF VARS at 0x{:X}", vars_base));
+    }
+    // vars_ptr intentionally leaked
+
+    eprintln!("[ovmf] CODE: 0x{:X} ({}KB from {:?})", code_base, code_size / 1024, code_path);
+    eprintln!("[ovmf] VARS: 0x{:X} ({}KB from {:?})", vars_base, vars_size / 1024, vars_path);
+
+    Ok(())
+}
+
+/// Find OVMF_CODE firmware in standard locations.
+fn find_ovmf_code(extra_paths: &[PathBuf]) -> Option<PathBuf> {
+    let names = [
+        "OVMF_CODE_4M.fd",
+        "OVMF_CODE.fd",
+        "OVMF.fd",
+    ];
+    let mut search_dirs = bios_search_paths(extra_paths);
+    // Add OVMF-specific directories
+    #[cfg(target_os = "linux")]
+    {
+        search_dirs.push(PathBuf::from("/usr/share/OVMF"));
+        search_dirs.push(PathBuf::from("/usr/share/ovmf"));
+        search_dirs.push(PathBuf::from("/usr/share/edk2/ovmf"));
+    }
+    for dir in &search_dirs {
+        for name in &names {
+            let p = dir.join(name);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// Find OVMF_VARS template in standard locations.
+fn find_ovmf_vars(extra_paths: &[PathBuf]) -> Option<PathBuf> {
+    let names = [
+        "OVMF_VARS_4M.fd",
+        "OVMF_VARS.fd",
+    ];
+    let mut search_dirs = bios_search_paths(extra_paths);
+    #[cfg(target_os = "linux")]
+    {
+        search_dirs.push(PathBuf::from("/usr/share/OVMF"));
+        search_dirs.push(PathBuf::from("/usr/share/ovmf"));
+        search_dirs.push(PathBuf::from("/usr/share/edk2/ovmf"));
+    }
+    for dir in &search_dirs {
+        for name in &names {
+            let p = dir.join(name);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
 /// Load CoreVM custom BIOS into the VM at 0xF0000.
 pub fn load_corevm_bios(handle: u64, extra_bios_paths: &[PathBuf]) -> Result<(), String> {
     let bios_path = find_bios("corevm-bios.bin", extra_bios_paths)
