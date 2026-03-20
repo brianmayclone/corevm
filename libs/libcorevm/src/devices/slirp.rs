@@ -1101,10 +1101,9 @@ impl SlirpNet {
         }
 
         const TCP_MSS: usize = 1460;
-        const MAX_UNACKED_BYTES: u32 = 32 * 1024; // 32 KB — conservative to avoid flooding guest
-        const RETRANSMIT_TIMEOUT_MS: u128 = 500;
-        const MAX_SEGMENTS_PER_POLL: usize = 16;
-        const MAX_RETRANSMIT_QUEUE: usize = 32; // drop connection if retransmit queue gets too large
+        const MAX_UNACKED_CAP: u32 = 64 * 1024; // 64 KB max in-flight per connection
+        const RETRANSMIT_TIMEOUT_MS: u128 = 200;
+        const MAX_SEGMENTS_PER_POLL: usize = 32;
 
         let mut data_to_send: Vec<(TcpFlowKey, u32, Vec<u8>)> = Vec::new(); // (key, seq, data)
         let mut closed: Vec<TcpFlowKey> = Vec::new();
@@ -1115,21 +1114,8 @@ impl SlirpNet {
         for (key, conn) in &mut self.tcp_conns {
             if conn.state != TcpState::Established { continue; }
 
-            // Kill connections with hopelessly large retransmit queues — guest has
-            // clearly lost track and will never ACK these segments.
-            if conn.retransmit_queue.len() > MAX_RETRANSMIT_QUEUE {
-                eprintln!("[slirp-tcp] KILL :{} retransmit_q={} unacked={} — connection stalled",
-                    key.guest_port, conn.retransmit_queue.len(), conn.unacked);
-                closed.push(*key);
-                continue;
-            }
-
-            // Don't read new data while we still have significant unacked bytes.
-            // This is the PRIMARY flow control — wait for ACKs before sending more.
-            if conn.unacked >= MAX_UNACKED_BYTES { continue; }
-
             // Respect rx_queue backpressure — don't flood the E1000 ring
-            if self.rx_queue.len() + data_to_send.len() > 128 { break; }
+            if self.rx_queue.len() > 512 { break; }
 
             // Non-blocking read: temporarily switch to non-blocking mode
             let _ = conn.stream.set_nonblocking(true);
@@ -1138,10 +1124,12 @@ impl SlirpNet {
             let mut segments_this_conn = 0;
             loop {
                 if segments_this_conn >= MAX_SEGMENTS_PER_POLL { break; }
-                if self.rx_queue.len() + data_to_send.len() > 128 { break; }
+                if self.rx_queue.len() + data_to_send.len() > 512 { break; }
 
-                // Stop if we've already buffered enough unacked data
-                if conn.unacked >= MAX_UNACKED_BYTES { break; }
+                // Flow control: respect guest's advertised window (already scaled), with fallback
+                let guest_win = if conn.guest_window > 0 { conn.guest_window } else { 65535 };
+                let max_unacked = guest_win.min(MAX_UNACKED_CAP);
+                if conn.unacked >= max_unacked { break; }
 
                 match conn.stream.read(&mut conn.read_buf[..TCP_MSS]) {
                     Ok(0) => { closed.push(*key); break; }
@@ -1162,10 +1150,6 @@ impl SlirpNet {
             let _ = conn.stream.set_nonblocking(false);
             if segments_this_conn > 0 {
                 conn.last_retransmit = Some(now);
-                eprintln!("[slirp-tcp] poll :{} read {} segs, unacked={} win={} rxq={} retransmit_q={}",
-                    key.guest_port, segments_this_conn, conn.unacked,
-                    conn.guest_window, self.rx_queue.len() + data_to_send.len(),
-                    conn.retransmit_queue.len());
             }
 
             // Retransmit check: if we have unacked segments and haven't
@@ -1178,12 +1162,8 @@ impl SlirpNet {
                 if should_retransmit {
                     // Retransmit the first (oldest) unacked segment
                     let (seg_seq, seg_data) = conn.retransmit_queue[0].clone();
-                    let seg_len = seg_data.len();
                     retransmits.push((*key, seg_seq, seg_data));
                     conn.last_retransmit = Some(now);
-                    eprintln!("[slirp-tcp] RETRANSMIT :{} seq={} len={} unacked={} retransmit_q={}",
-                        key.guest_port, seg_seq, seg_len, conn.unacked,
-                        conn.retransmit_queue.len());
                 }
             }
         }

@@ -65,6 +65,9 @@ pub struct Vm {
     /// Pointer to the PCI MMIO router (lives inside the MMIO dispatch regions).
     /// Used by `corevm_setup_e1000()` to add E1000 to the router after AHCI setup.
     pub pci_mmio_router_ptr: *mut crate::ffi::PciMmioRouter,
+
+    /// True if booting via UEFI/OVMF (skips legacy VBE LFB mapping at 0xE0000000).
+    pub uefi_boot: bool,
     pub pci_io_router_ptr: *mut crate::ffi::PciIoRouter,
 
     /// Tracks whether AHCI IRQ 11 is currently asserted on the in-kernel irqchip.
@@ -218,6 +221,7 @@ impl Vm {
             net_backend: None,
             #[cfg(feature = "std")]
             pending_mouse: std::sync::Mutex::new(alloc::vec::Vec::new()),
+            uefi_boot: false,
         })
     }
 
@@ -485,9 +489,13 @@ impl Vm {
         // The PCI MMIO catchall starts at 0xF200_0000 (PCI_MMIO_CATCHALL_BASE in ffi.rs),
         // so the LFB must not extend past 0xF1FF_FFFF. Maximum safe size = 0x1200_0000 (288MB).
         // IOAPIC at 0xFEC00000 and LAPIC at 0xFEE00000 are even harder limits.
-        let max_lfb_size: u64 = 0x1200_0000; // 288 MB, up to 0xF1FFFFFF
-        let lfb_size = fb_size.min(max_lfb_size);
-        self.backend.set_memory_region(2, 0xE000_0000, lfb_size, fb_ptr)?;
+        // Skip legacy VBE LFB mapping at 0xE0000000 for UEFI boot — OVMF
+        // relocates PCIEXBAR to 0xE0000000 and needs it for PCI MMCONFIG.
+        if !self.uefi_boot {
+            let max_lfb_size: u64 = 0x1200_0000; // 288 MB, up to 0xF1FFFFFF
+            let lfb_size = fb_size.min(max_lfb_size);
+            self.backend.set_memory_region(2, 0xE000_0000, lfb_size, fb_ptr)?;
+        }
 
         // Slot 4: VGA LFB at PCI BAR0 address.
         // Linux bochs-drm uses the PCI BAR0 address, not the VBE default.

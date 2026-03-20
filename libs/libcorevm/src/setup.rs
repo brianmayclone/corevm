@@ -377,6 +377,12 @@ pub fn load_ovmf(
     eprintln!("[ovmf] Mapped {}KB at 0x{:X}-0x{:X} (from {:?})",
         fw_size / 1024, fw_base, fw_base + fw_alloc as u64 - 1, vars_path);
 
+    // Mark VM as UEFI boot — this skips the legacy VBE LFB KVM mapping at
+    // 0xE0000000 which would conflict with OVMF's PCIEXBAR relocation.
+    if let Some(vm) = crate::ffi::get_vm(handle) {
+        vm.uefi_boot = true;
+    }
+
     Ok(())
 }
 
