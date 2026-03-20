@@ -1,0 +1,196 @@
+//! VM lifecycle manager — start, stop, pause, resume.
+//!
+//! Mirrors the setup sequence from vmmanager/engine/vm.rs but without GUI deps.
+
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::Instant;
+
+use tokio::sync::broadcast;
+
+use libcorevm::ffi::*;
+use libcorevm::setup;
+use libcorevm::runtime::{VmRuntime, VmRuntimeConfig, VmControlHandle};
+
+use vmm_core::config::*;
+use crate::vm::event_handler::{FrameBufferData, ServerEventHandler};
+
+/// Everything needed to control a running VM.
+pub struct RunningVm {
+    pub handle: u64,
+    pub control: VmControlHandle,
+    pub framebuffer: Arc<Mutex<FrameBufferData>>,
+    pub serial_tx: broadcast::Sender<Vec<u8>>,
+    pub thread: JoinHandle<()>,
+}
+
+/// Start a VM from config. Returns RunningVm on success.
+pub fn start_vm(config: &VmConfig, bios_paths: &[std::path::PathBuf]) -> Result<RunningVm, String> {
+    // Install SIGUSR1 handler (Linux/KVM — allows cancel_vcpu to interrupt KVM_RUN)
+    #[cfg(target_os = "linux")]
+    libcorevm::backend::kvm::install_sigusr1_handler();
+
+    // Create VM
+    let handle = corevm_create(config.ram_mb);
+    if handle == 0 {
+        return Err(format!("Failed to create VM: {}",
+            setup::get_last_error().unwrap_or_else(|| "Unknown error".into())));
+    }
+
+    let num_cpus = config.cpu_cores.max(1).min(32);
+    corevm_set_cpu_count(handle, num_cpus);
+
+    for cpu_id in 0..num_cpus {
+        if corevm_create_vcpu(handle, cpu_id) != 0 {
+            corevm_destroy(handle);
+            return Err(format!("Failed to create vCPU {}", cpu_id));
+        }
+    }
+    setup::set_vram_mb(handle, config.vram_mb);
+
+    // Standard devices (PCI bus, PIC, IOAPIC, LAPIC, serial, PS/2, PIT, CMOS)
+    corevm_setup_standard_devices(handle);
+
+    // HPET for Windows guests
+    let is_windows = matches!(config.guest_os,
+        GuestOs::Windows7 | GuestOs::Windows8 | GuestOs::Windows10 | GuestOs::Windows11 |
+        GuestOs::WindowsServer2016 | GuestOs::WindowsServer2019 | GuestOs::WindowsServer2022);
+    if is_windows {
+        corevm_setup_hpet(handle);
+    }
+
+    // AHCI controller
+    corevm_setup_ahci(handle, 6);
+
+    // Networking
+    if config.net_enabled {
+        let mac = setup::resolve_mac(
+            &config.uuid,
+            config.mac_mode == MacMode::Static,
+            &config.mac_address,
+        );
+        match config.nic_model {
+            NicModel::VirtioNet => {
+                corevm_setup_virtio_net(handle, mac.as_ptr());
+            }
+            NicModel::E1000 => {
+                corevm_setup_e1000(handle, mac.as_ptr());
+                let _ = setup::load_e1000_rom(handle, bios_paths);
+            }
+        }
+        let net_mode_id = match config.net_mode {
+            NetMode::Disconnected => 0,
+            NetMode::UserMode => 1,
+            NetMode::Bridge => 2,
+        };
+        corevm_setup_net(handle, net_mode_id);
+    }
+
+    // USB tablet
+    if config.usb_tablet {
+        corevm_setup_uhci(handle);
+    }
+
+    // Audio
+    if config.audio_enabled {
+        corevm_setup_ac97(handle);
+    }
+
+    // VirtIO GPU
+    let has_virtio_gpu = config.gpu_model == GpuModel::VirtioGpu;
+    if has_virtio_gpu {
+        corevm_setup_virtio_gpu(handle, config.vram_mb.max(64));
+        corevm_setup_virtio_input(handle);
+    }
+
+    // ACPI tables (AFTER all PCI devices)
+    if is_windows {
+        corevm_setup_acpi_tables_with_hpet(handle);
+    } else {
+        corevm_setup_acpi_tables(handle);
+    }
+
+    // Load firmware
+    let bios_paths_str: Vec<&std::path::Path> = bios_paths.iter().map(|p| p.as_path()).collect();
+    match config.bios_type {
+        BiosType::SeaBios => setup::load_seabios(handle, bios_paths)?,
+        BiosType::CoreVm => setup::load_corevm_bios(handle, bios_paths)?,
+        BiosType::Uefi => {
+            let vars_path = std::env::temp_dir().join(format!("{}_ovmf.fd", config.uuid));
+            setup::load_ovmf(handle, bios_paths, &vars_path)?;
+        }
+    }
+
+    // Attach ISO (port 1 = CDROM)
+    if !config.iso_image.is_empty() {
+        setup::attach_image_to_ahci(handle, &config.iso_image, 1, true)?;
+        if is_windows {
+            let _ = setup::attach_cdrom_to_ide(handle, &config.iso_image);
+        }
+    }
+
+    // Attach disk images (ports 0, 2, 3, 4, 5)
+    let disk_ports = [0u32, 2, 3, 4, 5];
+    for (i, disk_path) in config.disk_images.iter().enumerate() {
+        if !disk_path.is_empty() {
+            if let Some(&port) = disk_ports.get(i) {
+                setup::attach_image_to_ahci(handle, disk_path, port, false)?;
+                let cache_mode = match config.disk_cache_mode {
+                    DiskCacheMode::WriteBack => 0u32,
+                    DiskCacheMode::WriteThrough => 1,
+                    DiskCacheMode::None => 2,
+                };
+                setup::configure_disk_cache(handle, port, config.disk_cache_mb, cache_mode);
+            }
+        }
+    }
+
+    // Initial CPU state
+    if config.bios_type == BiosType::Uefi {
+        setup::set_initial_cpu_state_uefi(handle)?;
+    } else {
+        setup::set_initial_cpu_state(handle)?;
+    }
+    setup::setup_bda_com1(handle);
+
+    // Create shared state
+    let fb = Arc::new(Mutex::new(FrameBufferData::default()));
+    let (serial_tx, _) = broadcast::channel(256);
+
+    // Build runtime
+    let rt_config = VmRuntimeConfig {
+        handle,
+        num_cpus,
+        usb_tablet: config.usb_tablet,
+        audio_enabled: config.audio_enabled,
+        net_enabled: config.net_enabled,
+        virtio_gpu: has_virtio_gpu,
+        virtio_input: has_virtio_gpu,
+        diagnostics: false,
+        ..Default::default()
+    };
+
+    let mut runtime = VmRuntime::new(rt_config, libcorevm::runtime::NullEventHandler);
+    let control = runtime.control_handle();
+
+    let handler = ServerEventHandler::new(
+        fb.clone(), serial_tx.clone(), control.clone(), handle,
+    );
+    runtime.set_handler(handler);
+
+    // Spawn VM execution thread
+    let vm_thread = thread::spawn(move || {
+        runtime.start();
+        runtime.wait();
+        corevm_ahci_flush_caches(handle);
+        corevm_destroy(handle);
+    });
+
+    Ok(RunningVm {
+        handle,
+        control,
+        framebuffer: fb,
+        serial_tx,
+        thread: vm_thread,
+    })
+}

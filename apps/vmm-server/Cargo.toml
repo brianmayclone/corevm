@@ -1,0 +1,55 @@
+[package]
+name = "vmm-server"
+version = "0.1.0"
+edition = "2021"
+description = "CoreVM web management server — REST API + WebSocket console"
+
+[[bin]]
+name = "vmm-server"
+path = "src/main.rs"
+
+[dependencies]
+# Shared models
+vmm-core = { path = "../../libs/vmm-core" }
+
+# VM engine
+libcorevm = { path = "../../libs/libcorevm", default-features = false }
+
+# Web framework
+axum = { version = "0.8", features = ["ws", "multipart"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tower = { version = "0.5" }
+tower-http = { version = "0.6", features = ["cors", "compression-gzip", "fs", "trace"] }
+tokio = { version = "1", features = ["full"] }
+
+# Auth
+jsonwebtoken = "9"
+argon2 = "0.5"
+rand = "0.8"
+
+# Database
+rusqlite = { version = "0.33", features = ["bundled"] }
+
+# Platform
+libc = "0.2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Image encoding (framebuffer -> JPEG)
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dashmap = "6"
+futures = "0.3"
+
+[features]
+default = ["linux"]
+linux = ["libcorevm/linux"]
+windows = ["libcorevm/windows"]

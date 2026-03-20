@@ -2,10 +2,13 @@
 members = [
   "apps/vmctl",
   "apps/vmmanager",
+  "apps/vmm-server",
+  "libs/vmm-core",
   "tests/hosttests",
 ]
 exclude = [
   # libcorevm has its own workspace (no_std / multi-target)
-  "libs/*",
+  "libs/libcorevm",
+  "libs/stubs",
 ]
 resolver = "2"
