@@ -1161,20 +1161,33 @@ pub extern "C" fn corevm_ahci_poll_irq(handle: u64) {
         }
     }
 
-    // Sync MSI state from PCI config space into AHCI struct.
-    // AHCI is PCI device 00:03.0, MSI cap at offset 0x80.
+    // Sync MSI state from PCI config space and set up irqfd if needed.
+    // AHCI is PCI device 00:02.0, MSI cap at offset 0x80.
     if !vm.pci_bus_ptr.is_null() {
         let bus = unsafe { &mut *vm.pci_bus_ptr };
         let msi_cap = crate::devices::ahci::AHCI_MSI_CAP_OFFSET;
         let ahci_slot = vm.chipset.slots.ahci;
         let mcr = bus.mmcfg_read(0, ahci_slot, 0, msi_cap + 2, 2) as u16;
         let ahci = unsafe { &mut *vm.ahci_ptr };
+        let was_enabled = ahci.msi_enabled;
         ahci.msi_enabled = (mcr & 0x01) != 0;
         if ahci.msi_enabled {
             let addr_lo = bus.mmcfg_read(0, ahci_slot, 0, msi_cap + 4, 4) as u32;
             let data = bus.mmcfg_read(0, ahci_slot, 0, msi_cap + 8, 2) as u32;
+            let addr_changed = ahci.msi_address != addr_lo as u64 || ahci.msi_data != data;
             ahci.msi_address = addr_lo as u64;
             ahci.msi_data = data;
+
+            // Set up or update irqfd routing when MSI is first enabled
+            // or when the guest changes the MSI address/data.
+            #[cfg(feature = "linux")]
+            if (!was_enabled || addr_changed) && addr_lo != 0 {
+                if vm.backend.ahci_msi_fd < 0 {
+                    let _ = vm.backend.setup_ahci_msi_irqfd(addr_lo as u64, data);
+                } else if addr_changed {
+                    let _ = vm.backend.update_ahci_msi_route(addr_lo as u64, data);
+                }
+            }
         }
     }
 
@@ -1184,18 +1197,37 @@ pub extern "C" fn corevm_ahci_poll_irq(handle: u64) {
     #[cfg(feature = "linux")]
     {
         if ahci.msi_enabled {
-            // MSI mode — shouldn't happen since AHCI no longer advertises MSI
+            // MSI + legacy IRQ belt-and-suspenders approach.
+            //
+            // MSI with Lowest Priority delivery can lose interrupts on SMP
+            // when the target vCPU has IF=0 (edge-triggered = fire-and-forget).
+            // KVM_IRQFD would fix this but KVM_SET_GSI_ROUTING fails on some
+            // configurations. Instead: send MSI for speed AND assert legacy
+            // IRQ 11 as backup. The guest handles whichever arrives first;
+            // the other is a harmless no-op (ISR finds PORT_IS already cleared).
             if want_asserted {
                 ahci.diag_irqs_delivered += 1;
-                let _ = vm.backend.signal_msi(ahci.msi_address, ahci.msi_data);
+                // Try irqfd first (kernel-level delivery), fallback to signal_msi
+                if vm.backend.ahci_msi_fd >= 0 {
+                    let _ = vm.backend.trigger_ahci_msi();
+                } else {
+                    let _ = vm.backend.signal_msi(ahci.msi_address, ahci.msi_data);
+                }
+                // Also assert legacy IRQ as safety net
+                if !vm.ahci_irq_asserted {
+                    let _ = vm.backend.set_irq_line(11, true);
+                    vm.ahci_irq_asserted = true;
+                }
                 ahci.clear_irq();
-                if vm.ahci_irq_asserted {
+            } else if vm.ahci_irq_asserted {
+                // Deassert legacy IRQ when no longer needed
+                vm.ahci_irq_asserted = false;
+                if !vm.e1000_irq_asserted && !vm.virtio_net_irq_asserted {
                     let _ = vm.backend.set_irq_line(11, false);
-                    vm.ahci_irq_asserted = false;
                 }
             }
         } else {
-            // Legacy level-triggered mode
+            // Legacy level-triggered mode (MSI not enabled by guest)
             if want_asserted && !vm.ahci_irq_asserted {
                 ahci.diag_irqs_delivered += 1;
                 let _ = vm.backend.set_irq_line(11, true);

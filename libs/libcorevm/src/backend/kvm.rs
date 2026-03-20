@@ -224,6 +224,8 @@ const KVM_CREATE_IRQCHIP: u64 = 0xAE60;
 const KVM_IRQ_LINE: u64 = 0x4008_AE61;
 const KVM_ENABLE_CAP: u64 = 0x4068_AEA3;
 const KVM_SIGNAL_MSI: u64 = 0x4020_AEA5;
+const KVM_IRQFD: u64 = 0x4020_AE76;
+const KVM_SET_GSI_ROUTING: u64 = 0x4008_AE6A;
 const KVM_CREATE_PIT2: u64 = 0x4040_AE77;
 const KVM_GET_LAPIC: u64 = 0x8400_AE8E;
 const KVM_SET_LAPIC: u64 = 0x4400_AE8F;
@@ -427,6 +429,37 @@ unsafe fn sys_close(fd: i32) -> i32 {
         "syscall",
         in("rax") 3_u64,
         in("rdi") fd as u64,
+        lateout("rax") ret,
+        out("rcx") _,
+        out("r11") _,
+        options(nostack)
+    );
+    ret as i32
+}
+
+unsafe fn sys_write(fd: i32, buf: *const u8, len: usize) -> i64 {
+    let ret: i64;
+    core::arch::asm!(
+        "syscall",
+        in("rax") 1_u64, // SYS_write
+        in("rdi") fd as u64,
+        in("rsi") buf as u64,
+        in("rdx") len as u64,
+        lateout("rax") ret,
+        out("rcx") _,
+        out("r11") _,
+        options(nostack)
+    );
+    ret
+}
+
+unsafe fn sys_eventfd(initval: u32, flags: i32) -> i32 {
+    let ret: i64;
+    core::arch::asm!(
+        "syscall",
+        in("rax") 290_u64, // SYS_eventfd2
+        in("rdi") initval as u64,
+        in("rsi") flags as u64,
         lateout("rax") ret,
         out("rcx") _,
         out("r11") _,
@@ -676,6 +709,43 @@ struct KvmMsi {
     _pad: [u8; 12],
 }
 
+/// kvm_irqfd for KVM_IRQFD
+#[repr(C)]
+struct KvmIrqfd {
+    fd: u32,
+    gsi: u32,
+    flags: u32,
+    resamplefd: u32,
+    _pad: [u8; 16],
+}
+
+/// kvm_irq_routing for KVM_SET_GSI_ROUTING
+#[repr(C)]
+struct KvmIrqRouting {
+    nr: u32,
+    flags: u32,
+    // entries follow (variable length)
+}
+
+/// kvm_irq_routing_entry
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct KvmIrqRoutingEntry {
+    gsi: u32,
+    entry_type: u32,
+    flags: u32,
+    pad: u32,
+    // union: MSI fields
+    address_lo: u32,
+    address_hi: u32,
+    data: u32,
+    /// devid for KVM_MSI_VALID_DEVID
+    union_pad: [u32; 5],
+}
+
+const KVM_IRQ_ROUTING_MSI: u32 = 1;
+const KVM_IRQ_ROUTING_IRQCHIP: u32 = 0;
+
 // ── Memory region tracking for read_phys / write_phys ─────────────────────
 
 struct MemorySlot {
@@ -718,6 +788,12 @@ pub struct KvmBackend {
     pub vm_slot: usize,
     /// Fixed TSC frequency in kHz for all vCPUs (0 = not set).
     tsc_khz: u32,
+    /// AHCI MSI irqfd — eventfd used for kernel-level MSI delivery.
+    /// When set, writing 1 to this fd triggers an MSI via KVM_IRQFD.
+    /// The GSI routing entry maps this to the correct MSI address/data.
+    pub ahci_msi_fd: i32,
+    /// GSI number allocated for AHCI MSI routing.
+    ahci_msi_gsi: u32,
 }
 
 impl KvmBackend {
@@ -813,6 +889,8 @@ impl KvmBackend {
                 cpu_count: 1,
                 vm_slot: slot,
                 tsc_khz: 0,
+                ahci_msi_fd: -1,
+                ahci_msi_gsi: 0,
             };
 
             // Store VM fd in per-VM slot for PIT channel 2 gate sync
@@ -891,10 +969,14 @@ impl KvmBackend {
                 }
 
                 // Leaf 4 (Deterministic Cache Parameters, Intel):
-                // Pass through host values. Modifying EAX[31:26] and EAX[25:14]
-                // to reflect VM topology can break IOAPIC/LAPIC destination routing
-                // when Windows derives APIC IDs from these fields.
-                // KVM already provides correct per-vCPU APIC IDs.
+                // EAX[25:14] = max addressable IDs for cores in physical package
+                // Must match VM core count so Windows Task Manager shows correct CPUs.
+                // EAX[31:26] = max logical CPUs sharing this cache — set to max_cpus-1
+                // (all cores share each cache level in our simple topology).
+                if e.function == 4 {
+                    eax = (eax & 0x03FF_FFFF) | (((max_cpus - 1) & 0x3F) << 26);
+                    eax = (eax & 0xFC00_3FFF) | (((max_cpus - 1) & 0xFFF) << 14);
+                }
 
                 // Leaf 0x6 (Thermal/Power Management):
                 // Clear hardware P-state/frequency features that don't apply
@@ -961,10 +1043,25 @@ impl KvmBackend {
                 }
 
                 // Leaf 0x80000008 (AMD Processor Capacity):
-                // Pass through host values. KVM handles APIC ID assignment.
-                // Modifying NC/ApicIdSize can break LAPIC destination matching.
+                // ECX[7:0] = NC = number of physical cores - 1
+                // ECX[15:12] = ApicIdSize = bits needed for APIC IDs
+                // Must reflect VM topology for Windows to show correct CPU count.
+                // MSI delivery is now handled via KVM_IRQFD (kernel-level),
+                // so CPUID topology changes no longer affect interrupt routing.
                 if e.function == 0x8000_0008 {
+                    let nc = max_cpus - 1;
+                    let mut apic_id_size = 0u32;
+                    while (1u32 << apic_id_size) <= nc { apic_id_size += 1; }
                     ebx = 0; // clear CPPC/RDPRU bits that don't work in a VM
+                    ecx = (ecx & 0xFFFF_0000) | ((apic_id_size & 0xF) << 12) | (nc & 0xFF);
+                }
+
+                // AMD Extended APIC ID (leaf 0x8000001E).
+                // EAX = Extended APIC ID (set per-vCPU in create_vcpu)
+                // EBX[7:0] = Compute Unit ID, EBX[15:8] = threads per unit - 1
+                if e.function == 0x8000_001E {
+                    eax = 0; // set per-vCPU in create_vcpu
+                    ebx = 0; // 1 thread per core (threads_per_unit - 1 = 0)
                 }
 
                 // Keep KVM hypervisor leaves (0x40000000+) — SeaBIOS uses
@@ -1289,10 +1386,222 @@ impl KvmBackend {
         // ret=1: delivered to a LAPIC, ret=0: no matching LAPIC found
         Ok(ret)
     }
+
+    /// Build a minimal GSI routing table with just the MSI entry for AHCI.
+    ///
+    /// Two strategies are tried:
+    /// 1. Full table (PIC + IOAPIC + MSI) — works with full in-kernel irqchip
+    /// 2. MSI-only table — works with split irqchip (irqchip_split=true
+    ///    rejects KVM_IRQ_ROUTING_IRQCHIP entries with EINVAL)
+    fn build_gsi_routing(&self, msi_address: u64, msi_data: u32, msi_only: bool) -> Vec<u8> {
+        let entry_size = core::mem::size_of::<KvmIrqRoutingEntry>();
+        let header_size = core::mem::size_of::<KvmIrqRouting>();
+
+        if msi_only {
+            // MSI-only: just 1 entry
+            let nr_entries = 1u32;
+            let total_size = header_size + nr_entries as usize * entry_size;
+            let mut buf = alloc::vec![0u8; total_size];
+            let routing = buf.as_mut_ptr() as *mut KvmIrqRouting;
+            unsafe {
+                (*routing).nr = nr_entries;
+                (*routing).flags = 0;
+                let e = &mut *(buf.as_mut_ptr().add(header_size) as *mut KvmIrqRoutingEntry);
+                *e = core::mem::zeroed();
+                e.gsi = 24;
+                e.entry_type = KVM_IRQ_ROUTING_MSI;
+                e.address_lo = msi_address as u32;
+                e.address_hi = (msi_address >> 32) as u32;
+                e.data = msi_data;
+            }
+            return buf;
+        }
+
+        // Full table: KVM default (PIC + IOAPIC) + MSI
+        let nr_entries = 41u32;
+        let total_size = header_size + nr_entries as usize * entry_size;
+        let mut buf = alloc::vec![0u8; total_size];
+        let routing = buf.as_mut_ptr() as *mut KvmIrqRouting;
+        unsafe { (*routing).nr = nr_entries; }
+        unsafe { (*routing).flags = 0; }
+
+        let entries = unsafe { buf.as_mut_ptr().add(header_size) as *mut KvmIrqRoutingEntry };
+        let mut idx = 0usize;
+
+        // GSI 0-7: PIC_MASTER + IOAPIC
+        for i in 0..8u32 {
+            unsafe {
+                let e = &mut *entries.add(idx);
+                *e = core::mem::zeroed();
+                e.gsi = i;
+                e.entry_type = KVM_IRQ_ROUTING_IRQCHIP;
+                e.address_lo = 0; // PIC_MASTER
+                e.address_hi = i;
+            }
+            idx += 1;
+            unsafe {
+                let e = &mut *entries.add(idx);
+                *e = core::mem::zeroed();
+                e.gsi = i;
+                e.entry_type = KVM_IRQ_ROUTING_IRQCHIP;
+                e.address_lo = 2; // IOAPIC
+                e.address_hi = i;
+            }
+            idx += 1;
+        }
+        // GSI 8-15: PIC_SLAVE + IOAPIC
+        for i in 8..16u32 {
+            unsafe {
+                let e = &mut *entries.add(idx);
+                *e = core::mem::zeroed();
+                e.gsi = i;
+                e.entry_type = KVM_IRQ_ROUTING_IRQCHIP;
+                e.address_lo = 1; // PIC_SLAVE
+                e.address_hi = i - 8;
+            }
+            idx += 1;
+            unsafe {
+                let e = &mut *entries.add(idx);
+                *e = core::mem::zeroed();
+                e.gsi = i;
+                e.entry_type = KVM_IRQ_ROUTING_IRQCHIP;
+                e.address_lo = 2; // IOAPIC
+                e.address_hi = i;
+            }
+            idx += 1;
+        }
+        // GSI 16-23: IOAPIC only
+        for i in 16..24u32 {
+            unsafe {
+                let e = &mut *entries.add(idx);
+                *e = core::mem::zeroed();
+                e.gsi = i;
+                e.entry_type = KVM_IRQ_ROUTING_IRQCHIP;
+                e.address_lo = 2; // IOAPIC
+                e.address_hi = i;
+            }
+            idx += 1;
+        }
+        // GSI 24: AHCI MSI
+        unsafe {
+            let e = &mut *entries.add(idx);
+            *e = core::mem::zeroed();
+            e.gsi = 24;
+            e.entry_type = KVM_IRQ_ROUTING_MSI;
+            e.address_lo = msi_address as u32;
+            e.address_hi = (msi_address >> 32) as u32;
+            e.data = msi_data;
+        }
+        buf
+    }
+
+    /// Set up kernel-level MSI delivery for AHCI using KVM_IRQFD + GSI routing.
+    pub fn setup_ahci_msi_irqfd(&mut self, address: u64, data: u32) -> Result<(), VmError> {
+        unsafe {
+            let fd = sys_eventfd(0, 0);
+            if fd < 0 {
+                return Err(VmError::BackendError(fd as i32));
+            }
+
+            let gsi: u32 = 24;
+
+            // Try to set up GSI routing for irqfd.
+            // Build MSI-only routing (1 entry). Full PIC+IOAPIC routing
+            // fails on some kernels/CPUs (e.g. AMD with specific irqchip config).
+            #[repr(C)]
+            struct MsiOnlyRouting {
+                header: KvmIrqRouting,
+                entry: KvmIrqRoutingEntry,
+            }
+            let mut routing: MsiOnlyRouting = core::mem::zeroed();
+            routing.header.nr = 1;
+            routing.entry.gsi = gsi;
+            routing.entry.entry_type = KVM_IRQ_ROUTING_MSI;
+            routing.entry.address_lo = address as u32;
+            routing.entry.address_hi = (address >> 32) as u32;
+            routing.entry.data = data;
+
+            let ret = sys_ioctl(self.vm_fd, KVM_SET_GSI_ROUTING, &routing as *const _ as u64);
+            if ret < 0 {
+                // GSI routing not available — irqfd won't work.
+                // Fall back to signal_msi + legacy IRQ belt-and-suspenders.
+                sys_close(fd);
+                eprintln!("[kvm] KVM_SET_GSI_ROUTING unavailable ({}), using signal_msi+legacy fallback", ret);
+                return Err(VmError::BackendError(ret as i32));
+            }
+
+            let irqfd = KvmIrqfd {
+                fd: fd as u32,
+                gsi,
+                flags: 0,
+                resamplefd: 0,
+                _pad: [0; 16],
+            };
+            let ret = sys_ioctl(self.vm_fd, KVM_IRQFD, &irqfd as *const _ as u64);
+            if ret < 0 {
+                sys_close(fd);
+                eprintln!("[kvm] KVM_IRQFD failed: {}", ret);
+                return Err(VmError::BackendError(ret as i32));
+            }
+
+            if self.ahci_msi_fd >= 0 {
+                sys_close(self.ahci_msi_fd);
+            }
+
+            self.ahci_msi_fd = fd;
+            self.ahci_msi_gsi = gsi;
+
+            eprintln!("[kvm] AHCI MSI irqfd setup: fd={} gsi={} addr=0x{:X} data=0x{:X}",
+                fd, gsi, address, data);
+            Ok(())
+        }
+    }
+
+    /// Update the AHCI MSI routing entry when the guest changes MSI address/data.
+    pub fn update_ahci_msi_route(&mut self, address: u64, data: u32) -> Result<(), VmError> {
+        if self.ahci_msi_fd < 0 {
+            return self.setup_ahci_msi_irqfd(address, data);
+        }
+        unsafe {
+            // Try full, then MSI-only
+            let buf = self.build_gsi_routing(address, data, false);
+            let routing = buf.as_ptr() as *const KvmIrqRouting;
+            let mut ret = sys_ioctl(self.vm_fd, KVM_SET_GSI_ROUTING, routing as u64);
+            if ret < 0 {
+                let buf2 = self.build_gsi_routing(address, data, true);
+                let routing2 = buf2.as_ptr() as *const KvmIrqRouting;
+                ret = sys_ioctl(self.vm_fd, KVM_SET_GSI_ROUTING, routing2 as u64);
+            }
+            if ret < 0 {
+                return Err(VmError::BackendError(ret as i32));
+            }
+            Ok(())
+        }
+    }
+
+    /// Trigger AHCI MSI interrupt via the kernel-level irqfd (eventfd write).
+    /// This is much more reliable than KVM_SIGNAL_MSI because the kernel
+    /// handles delivery retries and interrupt coalescing.
+    pub fn trigger_ahci_msi(&self) -> Result<(), VmError> {
+        if self.ahci_msi_fd < 0 {
+            return Err(VmError::BackendError(-1));
+        }
+        let val: u64 = 1;
+        let ret = unsafe {
+            sys_write(self.ahci_msi_fd, &val as *const u64 as *const u8, 8)
+        };
+        if ret < 0 {
+            return Err(VmError::BackendError(ret as i32));
+        }
+        Ok(())
+    }
 }
 
 impl Drop for KvmBackend {
     fn drop(&mut self) {
+        if self.ahci_msi_fd >= 0 {
+            unsafe { sys_close(self.ahci_msi_fd); }
+        }
         self.destroy();
     }
 }

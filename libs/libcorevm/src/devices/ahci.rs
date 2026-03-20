@@ -1368,12 +1368,10 @@ pub fn create_ahci_pci_device(mmio_base: u32) -> crate::devices::bus::PciDevice 
     dev.set_subsystem(0x8086, 0x2922);
     dev.set_interrupt(11, 1);
     dev.set_bar(5, mmio_base, 0x1000, true);
-    // No MSI capability — force legacy level-triggered IRQ 11.
-    //
-    // MSI with Lowest Priority delivery mode is unreliable on SMP:
-    // KVM delivers the edge-triggered MSI to the vCPU with lowest TPR,
-    // but if that vCPU has IF=0, the MSI is silently lost. Windows then
-    // waits ~1 second for the timeout before retrying each AHCI command.
-    // Legacy level-triggered IRQ stays asserted until acknowledged.
+    // No MSI capability — use legacy level-triggered IRQ 11.
+    // MSI delivery is unreliable on SMP with KVM: KVM_SIGNAL_MSI delivers
+    // but guest doesn't process (IF=0 coalescing), KVM_SET_GSI_ROUTING
+    // fails with EINVAL on AMD, and belt-and-suspenders fails because
+    // guest masks IRQ 11 in IOAPIC when MSI is enabled.
     dev
 }
