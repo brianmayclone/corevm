@@ -130,11 +130,23 @@ pub enum FilePickTarget {
 
 pub struct AppPreferences {
     pub theme_mode: theme::ThemeMode,
+    /// Use evdev for raw mouse/keyboard capture (Linux only).
+    /// When false, falls back to UHCI USB tablet mode (no capture/grab).
+    pub evdev_capture: bool,
+    /// Preferred evdev mouse device path (empty = auto-detect).
+    pub evdev_mouse_device: String,
+    /// Preferred evdev keyboard device path (empty = auto-detect).
+    pub evdev_kbd_device: String,
 }
 
 impl Default for AppPreferences {
     fn default() -> Self {
-        Self { theme_mode: theme::ThemeMode::Dark }
+        Self {
+            theme_mode: theme::ThemeMode::Dark,
+            evdev_capture: cfg!(target_os = "linux"),
+            evdev_mouse_device: String::new(),
+            evdev_kbd_device: String::new(),
+        }
     }
 }
 
@@ -146,12 +158,22 @@ impl AppPreferences {
             for line in contents.lines() {
                 let line = line.trim();
                 if let Some((key, val)) = line.split_once('=') {
+                    let val = val.trim();
                     match key.trim() {
                         "theme" => {
-                            prefs.theme_mode = match val.trim() {
+                            prefs.theme_mode = match val {
                                 "light" => theme::ThemeMode::Light,
                                 _ => theme::ThemeMode::Dark,
                             };
+                        }
+                        "evdev_capture" => {
+                            prefs.evdev_capture = val == "1";
+                        }
+                        "evdev_mouse_device" => {
+                            prefs.evdev_mouse_device = val.to_string();
+                        }
+                        "evdev_kbd_device" => {
+                            prefs.evdev_kbd_device = val.to_string();
                         }
                         _ => {}
                     }
@@ -163,51 +185,375 @@ impl AppPreferences {
 
     pub fn save(&self) {
         let path = platform::layout_dir().join("preferences.conf");
-        let content = format!("theme={}\n", match self.theme_mode {
-            theme::ThemeMode::Dark => "dark",
-            theme::ThemeMode::Light => "light",
-        });
+        let content = format!(
+            "theme={}\nevdev_capture={}\nevdev_mouse_device={}\nevdev_kbd_device={}\n",
+            match self.theme_mode {
+                theme::ThemeMode::Dark => "dark",
+                theme::ThemeMode::Light => "light",
+            },
+            if self.evdev_capture { "1" } else { "0" },
+            self.evdev_mouse_device,
+            self.evdev_kbd_device,
+        );
         let _ = std::fs::write(path, content);
     }
 }
 
 // ─── Preferences dialog ─────────────────────────────────────────────────
 
+#[derive(PartialEq, Clone, Copy)]
+enum PrefsTab {
+    Appearance,
+    Integration,
+}
+
+impl PrefsTab {
+    const ALL: &'static [PrefsTab] = &[PrefsTab::Appearance, PrefsTab::Integration];
+
+    fn label(&self) -> &'static str {
+        match self {
+            PrefsTab::Appearance => "Appearance",
+            PrefsTab::Integration => "Integration",
+        }
+    }
+
+    fn icon(&self) -> &'static str {
+        match self {
+            PrefsTab::Appearance => "\u{1F3A8}",  // 🎨
+            PrefsTab::Integration => "\u{1F50C}", // 🔌
+        }
+    }
+}
+
 pub struct PreferencesDialog {
+    tab: PrefsTab,
     pub theme_mode: theme::ThemeMode,
+    pub evdev_capture: bool,
+    pub evdev_mouse_device: String,
+    pub evdev_kbd_device: String,
+    /// Cached list of available evdev devices: (path, name, has_rel, has_key)
+    #[cfg(target_os = "linux")]
+    available_devices: Vec<(String, String, bool, bool)>,
 }
 
 impl PreferencesDialog {
     pub fn new(prefs: &AppPreferences) -> Self {
-        Self { theme_mode: prefs.theme_mode }
+        let mut dlg = Self {
+            tab: PrefsTab::Appearance,
+            theme_mode: prefs.theme_mode,
+            evdev_capture: prefs.evdev_capture,
+            evdev_mouse_device: prefs.evdev_mouse_device.clone(),
+            evdev_kbd_device: prefs.evdev_kbd_device.clone(),
+            #[cfg(target_os = "linux")]
+            available_devices: Vec::new(),
+        };
+        #[cfg(target_os = "linux")]
+        { dlg.scan_devices(); }
+        dlg
+    }
+
+    #[cfg(target_os = "linux")]
+    fn scan_devices(&mut self) {
+        self.available_devices.clear();
+        for i in 0..32 {
+            let path = format!("/dev/input/event{}", i);
+            let name = Self::read_device_name(&path).unwrap_or_else(|| format!("event{}", i));
+            let (has_rel, has_key) = Self::check_device_caps(&path);
+            if has_rel || has_key {
+                self.available_devices.push((path, name, has_rel, has_key));
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_device_name(path: &str) -> Option<String> {
+        let c_path = std::ffi::CString::new(path).ok()?;
+        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
+        if fd < 0 { return None; }
+        let mut name_buf = [0u8; 256];
+        // EVIOCGNAME(256)
+        let ret = unsafe {
+            libc::ioctl(fd, 0x81004506u64 as libc::c_ulong, name_buf.as_mut_ptr())
+        };
+        unsafe { libc::close(fd); }
+        if ret < 0 { return None; }
+        let len = name_buf.iter().position(|&b| b == 0).unwrap_or(ret as usize);
+        Some(String::from_utf8_lossy(&name_buf[..len]).trim().to_string())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn check_device_caps(path: &str) -> (bool, bool) {
+        let c_path = match std::ffi::CString::new(path) {
+            Ok(p) => p,
+            Err(_) => return (false, false),
+        };
+        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
+        if fd < 0 { return (false, false); }
+        let mut ev_bits = [0u8; 32];
+        let ret = unsafe { libc::ioctl(fd, 0x80084520u64 as libc::c_ulong, ev_bits.as_mut_ptr()) };
+        if ret < 0 { unsafe { libc::close(fd); } return (false, false); }
+        let has_rel = (ev_bits[0] & (1 << 2)) != 0;
+        let has_key = (ev_bits[0] & (1 << 1)) != 0;
+        unsafe { libc::close(fd); }
+        (has_rel, has_key)
     }
 
     /// Returns true if the dialog should remain open.
     pub fn show(&mut self, ctx: &egui::Context, prefs: &mut AppPreferences) -> bool {
-        let mut open = true;
+        let mut still_open = true;
+        let mut button_close = false;
+        let screen_h = ctx.screen_rect().height();
+        let max_h = (screen_h * 0.7).clamp(350.0, 600.0);
+
         egui::Window::new("Preferences")
-            .open(&mut open)
-            .resizable(false)
+            .open(&mut still_open)
+            .resizable(true)
             .collapsible(false)
-            .default_width(320.0)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .min_width(500.0)
+            .min_height(300.0)
+            .max_height(max_h)
+            .default_size([580.0, max_h.min(500.0)])
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
+                let avail_h = ui.available_height() - 46.0; // room for button bar
+
+                let content_h = avail_h.max(200.0);
                 ui.horizontal(|ui| {
-                    ui.label("Appearance:");
-                    egui::ComboBox::from_id_salt("theme_mode")
-                        .selected_text(self.theme_mode.label())
+                    // ── Left sidebar ──
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(130.0, content_h),
+                        egui::Layout::top_down(egui::Align::LEFT),
+                        |ui| {
+                            self.render_sidebar(ui);
+                            // Fill remaining height so sidebar stretches to bottom
+                            let used = ui.min_rect().height();
+                            let remaining = content_h - used;
+                            if remaining > 0.0 {
+                                ui.allocate_space(egui::vec2(1.0, remaining));
+                            }
+                        },
+                    );
+                    ui.separator();
+                    // ── Right content ──
+                    ui.vertical(|ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(content_h)
+                            .auto_shrink([false; 2])
+                            .show(ui, |ui| {
+                                ui.set_min_width(360.0);
+                                match self.tab {
+                                    PrefsTab::Appearance => self.page_appearance(ui, prefs),
+                                    PrefsTab::Integration => self.page_integration(ui, prefs),
+                                }
+                                ui.add_space(8.0);
+                            });
+                    });
+                });
+
+                ui.separator();
+
+                // ── Button bar ──
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(egui::Button::new("Done").fill(theme::accent_blue()).min_size(egui::vec2(80.0, 28.0))).clicked() {
+                            button_close = true;
+                        }
+                    });
+                });
+            });
+        still_open && !button_close
+    }
+
+    fn render_sidebar(&mut self, ui: &mut egui::Ui) {
+        let sidebar_bg = theme::settings_sidebar_bg();
+        let selected_bg = theme::settings_selected_bg();
+        let hover_bg = theme::settings_hover_bg();
+        let text_normal = theme::text_secondary();
+        let text_selected = theme::text_bright();
+        let text_hover = theme::text_value();
+        let icon_color = theme::accent_blue();
+
+        egui::Frame::new()
+            .fill(sidebar_bg)
+            .corner_radius(egui::CornerRadius::same(6))
+            .inner_margin(egui::Margin::symmetric(4, 4))
+            .show(ui, |ui| {
+                ui.set_min_width(118.0);
+                for &tab in PrefsTab::ALL {
+                    let is_selected = self.tab == tab;
+                    let (rect, resp) = ui.allocate_exact_size(
+                        egui::vec2(118.0, 26.0), egui::Sense::click(),
+                    );
+                    let is_hovered = resp.hovered();
+                    let bg = if is_selected { selected_bg }
+                             else if is_hovered { hover_bg }
+                             else { sidebar_bg };
+                    let text_color = if is_selected { text_selected }
+                                     else if is_hovered { text_hover }
+                                     else { text_normal };
+                    ui.painter().rect_filled(rect, 4.0, bg);
+                    if is_selected {
+                        let bar = egui::Rect::from_min_size(
+                            rect.left_top() + egui::vec2(0.0, 2.0),
+                            egui::vec2(3.0, rect.height() - 4.0),
+                        );
+                        ui.painter().rect_filled(bar, 1.0, icon_color);
+                    }
+                    let text = format!(" {}  {}", tab.icon(), tab.label());
+                    let galley = ui.painter().layout_no_wrap(
+                        text, egui::FontId::proportional(13.0), text_color,
+                    );
+                    let text_pos = egui::pos2(
+                        rect.left() + 6.0, rect.center().y - galley.size().y * 0.5,
+                    );
+                    ui.painter().galley(text_pos, galley, text_color);
+                    if resp.clicked() { self.tab = tab; }
+                }
+            });
+    }
+
+    fn page_appearance(&mut self, ui: &mut egui::Ui, prefs: &mut AppPreferences) {
+        ui.heading("Appearance");
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label("Theme:");
+            egui::ComboBox::from_id_salt("pref_theme_mode")
+                .selected_text(self.theme_mode.label())
+                .show_ui(ui, |ui| {
+                    for &mode in theme::ThemeMode::all() {
+                        if ui.selectable_value(&mut self.theme_mode, mode, mode.label()).changed() {
+                            prefs.theme_mode = self.theme_mode;
+                            theme::set_theme_mode(self.theme_mode);
+                            prefs.save();
+                        }
+                    }
+                });
+        });
+    }
+
+    fn page_integration(&mut self, ui: &mut egui::Ui, prefs: &mut AppPreferences) {
+        ui.heading("Input Capture");
+        ui.add_space(8.0);
+
+        #[cfg(target_os = "linux")]
+        {
+            ui.label("Mouse and keyboard capture mode when clicking the VM display:");
+            ui.add_space(4.0);
+
+            if ui.checkbox(&mut self.evdev_capture, "Use evdev raw input capture").changed() {
+                prefs.evdev_capture = self.evdev_capture;
+                prefs.save();
+            }
+            ui.indent("evdev_desc", |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "When enabled, mouse and keyboard input is captured directly from \
+                         /dev/input/ devices for reliable cursor lock and key repeat. \
+                         Requires 'input' group membership."
+                    ).small().color(theme::text_secondary())
+                );
+            });
+
+            if self.evdev_capture {
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+                ui.label("Device Selection");
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Leave on \"Auto-detect\" unless you have multiple mice or keyboards \
+                         (e.g. notebook with external devices)."
+                    ).small().color(theme::text_secondary())
+                );
+                ui.add_space(4.0);
+
+                // Mouse device selector
+                let mouse_devices: Vec<&(String, String, bool, bool)> =
+                    self.available_devices.iter().filter(|d| d.2).collect();
+                let mouse_label = if self.evdev_mouse_device.is_empty() {
+                    "Auto-detect".to_string()
+                } else {
+                    mouse_devices.iter()
+                        .find(|d| d.0 == self.evdev_mouse_device)
+                        .map(|d| format!("{} ({})", d.1, d.0))
+                        .unwrap_or_else(|| self.evdev_mouse_device.clone())
+                };
+                ui.horizontal(|ui| {
+                    ui.label("Mouse:");
+                    egui::ComboBox::from_id_salt("pref_evdev_mouse")
+                        .selected_text(&mouse_label)
+                        .width(280.0)
                         .show_ui(ui, |ui| {
-                            for &mode in theme::ThemeMode::all() {
-                                if ui.selectable_value(&mut self.theme_mode, mode, mode.label()).changed() {
-                                    prefs.theme_mode = self.theme_mode;
-                                    theme::set_theme_mode(self.theme_mode);
+                            if ui.selectable_value(&mut self.evdev_mouse_device, String::new(), "Auto-detect").changed() {
+                                prefs.evdev_mouse_device = self.evdev_mouse_device.clone();
+                                prefs.save();
+                            }
+                            for dev in &mouse_devices {
+                                let label = format!("{} ({})", dev.1, dev.0);
+                                if ui.selectable_value(&mut self.evdev_mouse_device, dev.0.clone(), &label).changed() {
+                                    prefs.evdev_mouse_device = self.evdev_mouse_device.clone();
                                     prefs.save();
                                 }
                             }
                         });
                 });
-            });
-        open
+
+                // Keyboard device selector
+                let kbd_devices: Vec<&(String, String, bool, bool)> =
+                    self.available_devices.iter().filter(|d| d.3).collect();
+                let kbd_label = if self.evdev_kbd_device.is_empty() {
+                    "Auto-detect".to_string()
+                } else {
+                    kbd_devices.iter()
+                        .find(|d| d.0 == self.evdev_kbd_device)
+                        .map(|d| format!("{} ({})", d.1, d.0))
+                        .unwrap_or_else(|| self.evdev_kbd_device.clone())
+                };
+                ui.horizontal(|ui| {
+                    ui.label("Keyboard:");
+                    egui::ComboBox::from_id_salt("pref_evdev_kbd")
+                        .selected_text(&kbd_label)
+                        .width(280.0)
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_value(&mut self.evdev_kbd_device, String::new(), "Auto-detect").changed() {
+                                prefs.evdev_kbd_device = self.evdev_kbd_device.clone();
+                                prefs.save();
+                            }
+                            for dev in &kbd_devices {
+                                let label = format!("{} ({})", dev.1, dev.0);
+                                if ui.selectable_value(&mut self.evdev_kbd_device, dev.0.clone(), &label).changed() {
+                                    prefs.evdev_kbd_device = self.evdev_kbd_device.clone();
+                                    prefs.save();
+                                }
+                            }
+                        });
+                });
+
+                ui.add_space(8.0);
+                if ui.button("Rescan Devices").clicked() {
+                    self.scan_devices();
+                }
+            }
+
+            ui.add_space(12.0);
+            ui.separator();
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(
+                    "When evdev capture is disabled, the VM uses USB tablet mode (absolute \
+                     positioning, no cursor lock). This works without special permissions but \
+                     may have mouse scaling issues in some guest operating systems."
+                ).small().color(theme::text_secondary())
+            );
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            ui.label("Input capture settings are only available on Linux.");
+        }
     }
 }
 
@@ -639,12 +985,14 @@ impl eframe::App for CoreVmApp {
         theme::apply_theme(ctx);
         self.load_os_icons(ctx);
 
-        // ── Linux evdev permission check (runs once on first frame) ──
+        // ── Linux evdev permission check (runs once on first frame, only if evdev enabled) ──
         #[cfg(target_os = "linux")]
         {
             use crate::engine::evdev_input;
             if matches!(self.evdev_perm_state, EvdevPermState::Unchecked) {
-                if evdev_input::check_access() {
+                if !self.preferences.evdev_capture {
+                    self.evdev_perm_state = EvdevPermState::Dismissed;
+                } else if evdev_input::check_access() {
                     self.evdev_perm_state = EvdevPermState::Ok;
                 } else {
                     self.evdev_perm_state = EvdevPermState::NeedPermission;
@@ -745,7 +1093,8 @@ impl eframe::App for CoreVmApp {
         // so they never reach any handler (prevents double key sends since evdev and
         // X11/Wayland both deliver the same physical keystrokes).
         #[cfg(target_os = "linux")]
-        let evdev_kbd_active = self.display.mouse_captured
+        let evdev_kbd_active = self.preferences.evdev_capture
+            && self.display.mouse_captured
             && self.display.evdev_input.as_ref().map_or(false, |e| e.is_running() && e.has_keyboard());
         #[cfg(not(target_os = "linux"))]
         let evdev_kbd_active = false;
@@ -1106,8 +1455,9 @@ impl eframe::App for CoreVmApp {
 
                 if let Some((state, fb, vm_handle)) = vm_info {
                     if state == VmState::Running || state == VmState::Paused {
+                        let use_evdev = self.preferences.evdev_capture;
                         let (display_focused, _display_rect) = if let Ok(fb_data) = fb.lock() {
-                            self.display.show(ui, ctx, &fb_data, vm_handle)
+                            self.display.show(ui, ctx, &fb_data, vm_handle, use_evdev)
                         } else {
                             (false, None)
                         };
