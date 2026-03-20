@@ -549,7 +549,6 @@ impl E1000 {
             msi_enabled: false,
             msi_address: 0,
             msi_data: 0,
-            mmio_access_count: 0,
             #[cfg(feature = "std")]
             irq_callback: None,
             irq_pending_assert: false,
