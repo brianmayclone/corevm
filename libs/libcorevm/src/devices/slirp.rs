@@ -157,9 +157,11 @@ struct TcpConnection {
     /// Initial guest sequence from SYN.
     guest_isn: u32,
     /// Read buffer for data from host socket.
-    read_buf: [u8; 4096],
-    /// Last advertised window from the guest (for flow control).
-    guest_window: u16,
+    read_buf: [u8; 16384],
+    /// Last advertised window from the guest (for flow control), already scaled.
+    guest_window: u32,
+    /// TCP Window Scale shift count from the guest's SYN (RFC 1323).
+    guest_wscale: u8,
     /// Retransmit queue: (seq, data) for segments not yet ACKed by guest.
     retransmit_queue: Vec<(u32, Vec<u8>)>,
     /// Timestamp of last retransmit check.
@@ -223,7 +225,8 @@ pub struct SlirpNet {
     /// DHCP state — true once guest has been offered an address.
     dhcp_offered: bool,
     /// Pending TCP connects (non-blocking, completed in poll_tcp).
-    pending_connects: Vec<(TcpFlowKey, std::sync::mpsc::Receiver<std::io::Result<TcpStream>>, u32, u32)>,
+    /// Tuple: (key, receiver, guest_seq, our_seq, guest_wscale)
+    pending_connects: Vec<(TcpFlowKey, std::sync::mpsc::Receiver<std::io::Result<TcpStream>>, u32, u32, u8)>,
     /// FTP ALG: tracks FTP control connections for PORT command rewriting.
     ftp_control: BTreeMap<TcpFlowKey, FtpControlState>,
     /// FTP ALG: active-mode data connection listeners.
@@ -665,6 +668,35 @@ impl SlirpNet {
 
     // ── TCP NAT ──────────────────────────────────────────────────────────
 
+    /// Parse TCP options from a SYN segment and extract the Window Scale shift count.
+    fn parse_wscale(tcp_payload: &[u8]) -> u8 {
+        let data_offset = ((tcp_payload[12] >> 4) as usize) * 4;
+        if data_offset <= 20 || data_offset > tcp_payload.len() {
+            return 0; // no options
+        }
+        let options = &tcp_payload[20..data_offset];
+        let mut i = 0;
+        while i < options.len() {
+            match options[i] {
+                0 => break,             // End of Option List
+                1 => { i += 1; }        // NOP
+                3 => {                   // Window Scale (kind=3, len=3, shift_count)
+                    if i + 2 < options.len() && options[i + 1] == 3 {
+                        return options[i + 2].min(14); // RFC 1323: max shift is 14
+                    }
+                    break;
+                }
+                _ => {                   // Skip unknown option
+                    if i + 1 >= options.len() { break; }
+                    let len = options[i + 1] as usize;
+                    if len < 2 { break; }
+                    i += len;
+                }
+            }
+        }
+        0
+    }
+
     fn handle_tcp(&mut self, src_ip: [u8; 4], dst_ip: [u8; 4], payload: &[u8]) {
         if payload.len() < 20 { return; }
         let src_port = u16be(payload, 0);
@@ -696,6 +728,7 @@ impl SlirpNet {
                     conn.guest_isn = seq;
                     conn.guest_seq = seq.wrapping_add(1);
                     conn.our_seq = conn.our_seq.wrapping_add(1); // SYN consumed
+                    conn.guest_wscale = Self::parse_wscale(payload);
                     conn.state = TcpState::Established;
                     let our_seq = conn.our_seq;
                     let guest_seq = conn.guest_seq;
@@ -721,7 +754,8 @@ impl SlirpNet {
             });
 
             let our_seq: u32 = 0x1000_0000;
-            self.pending_connects.push((key, rx, seq, our_seq));
+            let wscale = Self::parse_wscale(payload);
+            self.pending_connects.push((key, rx, seq, our_seq, wscale));
             // FTP ALG: track control connections (port 21).
             if dst_port == 21 {
                 eprintln!("[slirp-ftp] FTP control connection detected: :{} → {}:21", src_port,
@@ -741,9 +775,9 @@ impl SlirpNet {
                 None => return,
             };
 
-            // Track guest window size for flow control
-            let window = u16be(payload, 14);
-            conn.guest_window = window;
+            // Track guest window size for flow control (apply Window Scale from SYN)
+            let raw_window = u16be(payload, 14) as u32;
+            conn.guest_window = raw_window << conn.guest_wscale;
 
             if ack_flag && conn.state == TcpState::SynReceived {
                 conn.state = TcpState::Established;
@@ -964,8 +998,9 @@ impl SlirpNet {
             unacked: 0,
             guest_seq: 0,
             guest_isn: 0,
-            read_buf: [0u8; 4096],
+            read_buf: [0u8; 16384],
             guest_window: 0,
+            guest_wscale: 0, // will be updated from SYN-ACK
             retransmit_queue: Vec::new(),
             last_retransmit: None,
         };
@@ -1027,7 +1062,7 @@ impl SlirpNet {
         while i < self.pending_connects.len() {
             match self.pending_connects[i].1.try_recv() {
                 Ok(Ok(stream)) => {
-                    let (key, _, guest_seq_raw, our_seq) = self.pending_connects.remove(i);
+                    let (key, _, guest_seq_raw, our_seq, wscale) = self.pending_connects.remove(i);
                     // Keep socket blocking for writes (write_all must not lose data).
                     // Reads use set_nonblocking temporarily in poll_tcp.
                     let _ = stream.set_nodelay(true);
@@ -1038,15 +1073,16 @@ impl SlirpNet {
                         unacked: 0,
                         guest_seq: guest_seq_raw.wrapping_add(1),
                         guest_isn: guest_seq_raw,
-                        read_buf: [0u8; 4096],
+                        read_buf: [0u8; 16384],
                         guest_window: 0,
+                        guest_wscale: wscale,
                         retransmit_queue: Vec::new(),
                         last_retransmit: None,
                     };
                     completed.push((key, conn, our_seq, guest_seq_raw));
                 }
                 Ok(Err(_)) => {
-                    let (key, _, guest_seq_raw, _) = self.pending_connects.remove(i);
+                    let (key, _, guest_seq_raw, _, _) = self.pending_connects.remove(i);
                     self.send_tcp_flags(key, 0x14, 0, guest_seq_raw.wrapping_add(1), &[]);
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => { i += 1; } // still connecting
@@ -1059,9 +1095,9 @@ impl SlirpNet {
         }
 
         const TCP_MSS: usize = 1460;
-        const MAX_UNACKED_CAP: u32 = 65535;
+        const MAX_UNACKED_CAP: u32 = 512 * 1024; // 512 KB — generous for scaled windows
         const RETRANSMIT_TIMEOUT_MS: u128 = 200;
-        const MAX_SEGMENTS_PER_POLL: usize = 64; // was 16 — read more per poll for throughput
+        const MAX_SEGMENTS_PER_POLL: usize = 128;
 
         let mut data_to_send: Vec<(TcpFlowKey, u32, Vec<u8>)> = Vec::new(); // (key, seq, data)
         let mut closed: Vec<TcpFlowKey> = Vec::new();
@@ -1073,7 +1109,7 @@ impl SlirpNet {
             if conn.state != TcpState::Established { continue; }
 
             // Respect rx_queue backpressure — don't flood the E1000 ring
-            if self.rx_queue.len() > 512 { break; }
+            if self.rx_queue.len() > 1024 { break; }
 
             // Non-blocking read: temporarily switch to non-blocking mode
             let _ = conn.stream.set_nonblocking(true);
@@ -1082,10 +1118,10 @@ impl SlirpNet {
             let mut segments_this_conn = 0;
             loop {
                 if segments_this_conn >= MAX_SEGMENTS_PER_POLL { break; }
-                if self.rx_queue.len() + data_to_send.len() > 512 { break; }
+                if self.rx_queue.len() + data_to_send.len() > 1024 { break; }
 
-                // Flow control: respect guest's advertised window, with fallback
-                let guest_win = if conn.guest_window > 0 { conn.guest_window as u32 } else { 32768 };
+                // Flow control: respect guest's advertised window (already scaled), with fallback
+                let guest_win = if conn.guest_window > 0 { conn.guest_window } else { 65535 };
                 let max_unacked = guest_win.min(MAX_UNACKED_CAP);
                 if conn.unacked >= max_unacked { break; }
 
@@ -1177,8 +1213,9 @@ impl SlirpNet {
 
     fn send_tcp_flags(&mut self, key: TcpFlowKey, flags: u8, seq: u32, ack: u32, data: &[u8]) {
         let syn = flags & 0x02 != 0;
-        // SYN-ACK needs MSS option (4 bytes) → 24-byte TCP header (padded to 4-byte boundary).
-        let hdr_len: u8 = if syn { 24 } else { 20 };
+        // SYN-ACK needs MSS (4) + NOP (1) + Window Scale (3) = 8 bytes options
+        // → 28-byte TCP header (must be 4-byte aligned: 20 + 8 = 28).
+        let hdr_len: u8 = if syn { 28 } else { 20 };
         let mut tcp = vec![0u8; hdr_len as usize + data.len()];
         put_u16be(&mut tcp, 0, key.remote_port); // src port (from gateway perspective)
         put_u16be(&mut tcp, 2, key.guest_port);  // dst port
@@ -1186,8 +1223,7 @@ impl SlirpNet {
         put_u32be(&mut tcp, 8, ack);
         tcp[12] = (hdr_len / 4) << 4; // data offset
         tcp[13] = flags;
-        // Advertise a 64KB window — large enough for bulk transfers.
-        // This is what the guest sees as our receive capacity.
+        // Advertise a 64KB raw window. With our wscale=8, the guest sees 64KB << 8 = 16 MB.
         put_u16be(&mut tcp, 14, 65535);
         if syn {
             // TCP Option: MSS = 1460 (kind=2, len=4, value=0x05B4)
@@ -1195,6 +1231,12 @@ impl SlirpNet {
             tcp[21] = 4;    // Length: 4 bytes
             tcp[22] = 0x05; // MSS high byte (1460 = 0x05B4)
             tcp[23] = 0xB4; // MSS low byte
+            // TCP Option: NOP (padding for alignment)
+            tcp[24] = 1;    // Kind: NOP
+            // TCP Option: Window Scale (kind=3, len=3, shift_count=8)
+            tcp[25] = 3;    // Kind: Window Scale
+            tcp[26] = 3;    // Length: 3 bytes
+            tcp[27] = 8;    // Shift count: 8 (our window = raw_window << 8)
         }
         if !data.is_empty() {
             tcp[hdr_len as usize..].copy_from_slice(data);

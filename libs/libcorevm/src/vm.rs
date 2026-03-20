@@ -670,6 +670,15 @@ impl Vm {
                 // Fallback: check VGA BAR2 for VBE DISPI registers
                 if let Some(offset) = self.vga_bar2_offset(addr) {
                     self.svga_dispi_write(offset, size, val);
+                } else {
+                    #[cfg(feature = "std")]
+                    {
+                        static UNH_MMIO_WR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                        let n = UNH_MMIO_WR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if n < 30 {
+                            eprintln!("[mmio] unhandled write addr=0x{:X} size={} val=0x{:X}", addr, size, val);
+                        }
+                    }
                 }
             }
         } else {
@@ -687,6 +696,14 @@ impl Vm {
                     let val = if let Some(offset) = self.vga_bar2_offset(addr) {
                         self.svga_dispi_read(offset, size)
                     } else {
+                        #[cfg(feature = "std")]
+                        {
+                            static UNH_MMIO_RD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                            let n = UNH_MMIO_RD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if n < 30 {
+                                eprintln!("[mmio] unhandled read addr=0x{:X} size={}", addr, size);
+                            }
+                        }
                         0xFFFF_FFFF_FFFF_FFFF
                     };
                     let bytes = val.to_le_bytes();

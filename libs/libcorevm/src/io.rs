@@ -89,6 +89,14 @@ impl IoDispatch {
             }
         }
         // No handler — return bus float (all ones) matching the access size.
+        #[cfg(feature = "std")]
+        {
+            static UNHANDLED_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = UNHANDLED_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 30 {
+                eprintln!("[io] unhandled read port=0x{:04X} size={}", port, size);
+            }
+        }
         let val = match size {
             1 => 0xFF,
             2 => 0xFFFF,
@@ -109,6 +117,14 @@ impl IoDispatch {
             }
         }
         // No handler — silently discard the write.
+        #[cfg(feature = "std")]
+        {
+            static UNHANDLED_WR_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = UNHANDLED_WR_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 30 {
+                eprintln!("[io] unhandled write port=0x{:04X} size={} val=0x{:X}", port, size, val);
+            }
+        }
         Ok(())
     }
 

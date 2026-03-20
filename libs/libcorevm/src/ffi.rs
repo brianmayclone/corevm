@@ -2696,7 +2696,7 @@ pub extern "C" fn corevm_net_poll(handle: u64) -> i32 {
                 vnet.process_rx();
             } else if use_e1000 {
                 let e1000 = unsafe { &mut *vm.e1000_ptr };
-                const RX_BUFFER_LIMIT: usize = 512;
+                const RX_BUFFER_LIMIT: usize = 1024;
                 for pkt in &rx_packets {
                     if e1000.rx_buffer.len() >= RX_BUFFER_LIMIT { break; }
                     e1000.receive_packet(pkt);

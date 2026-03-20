@@ -395,6 +395,8 @@ impl PciBus {
             // Read-only field protection.
             match register {
                 0x00..=0x03 | 0x08..=0x0B => { /* Vendor/Device ID, Class: read-only */ }
+                // PCIEXBAR on host bridge: read-only (MMCONFIG handler is fixed)
+                0x60..=0x67 if device == 0 && bus == 0 => {}
                 _ => match size {
                     1 => {
                         if register < dev.config_space.len() {
@@ -474,11 +476,9 @@ impl PciBus {
         #[cfg(feature = "std")]
         {
             static PCI_WR_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            if register >= 0x10 && register <= 0x24 {
-                let n = PCI_WR_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if n < 50 {
-                    eprintln!("[pci] write bus={} dev={} fn={} reg=0x{:02X} val=0x{:08X}", bus, device_num, function, register, val);
-                }
+            let n = PCI_WR_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 100 {
+                eprintln!("[pci-wr] bus={} dev={} fn={} reg=0x{:02X} val=0x{:08X}", bus, device_num, function, register, val);
             }
         }
 
@@ -527,6 +527,10 @@ impl PciBus {
                 match register {
                     0x00..=0x03 => { /* Vendor/Device ID: read-only */ }
                     0x08..=0x0B => { /* Revision/Class: read-only */ }
+                    // PCIEXBAR (0x60-0x67) on host bridge (device 0): read-only.
+                    // OVMF tries to relocate PCIEXBAR, but our MMCONFIG handler
+                    // is fixed at the configured address. Ignore writes.
+                    0x60..=0x67 if device_num == 0 && bus == 0 => { /* PCIEXBAR: read-only */ }
                     _ => {
                         config_write_u32(&mut dev.config_space, register, val);
                     }
