@@ -208,6 +208,133 @@ impl StorageService {
     }
 }
 
+// ── Pool Browsing + Auto-Create ──────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct PoolFile {
+    pub name: String,
+    pub path: String,
+    pub size_bytes: u64,
+    pub is_dir: bool,
+}
+
+impl StorageService {
+    /// Browse files in a storage pool. Optionally filter by extension.
+    pub fn browse_pool(db: &Connection, pool_id: i64, filter_ext: Option<&str>) -> Result<Vec<PoolFile>, String> {
+        let pool_path: String = db.query_row(
+            "SELECT path FROM storage_pools WHERE id = ?1", rusqlite::params![pool_id], |r| r.get(0),
+        ).map_err(|_| "Pool not found".to_string())?;
+
+        let mut files = Vec::new();
+        Self::scan_dir(std::path::Path::new(&pool_path), &pool_path, filter_ext, &mut files, 3);
+        files.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(files)
+    }
+
+    fn scan_dir(dir: &std::path::Path, base: &str, filter_ext: Option<&str>, out: &mut Vec<PoolFile>, depth: u8) {
+        if depth == 0 { return; }
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let meta = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let name = entry.file_name().to_string_lossy().to_string();
+            let path = entry.path().to_string_lossy().to_string();
+
+            if meta.is_dir() {
+                out.push(PoolFile { name: name.clone(), path: path.clone(), size_bytes: 0, is_dir: true });
+                Self::scan_dir(&entry.path(), base, filter_ext, out, depth - 1);
+            } else {
+                if let Some(ext) = filter_ext {
+                    if !name.ends_with(ext) { continue; }
+                }
+                out.push(PoolFile { name, path, size_bytes: meta.len(), is_dir: false });
+            }
+        }
+    }
+
+    /// Create a disk image for a VM inside its own subdirectory in the pool.
+    /// Returns the full path of the created disk.
+    pub fn create_vm_disk(db: &Connection, vm_name: &str, vm_id: &str, size_gb: u64, pool_id: i64) -> Result<(i64, String), String> {
+        let pool_path: String = db.query_row(
+            "SELECT path FROM storage_pools WHERE id = ?1", rusqlite::params![pool_id], |r| r.get(0),
+        ).map_err(|_| "Storage pool not found".to_string())?;
+
+        // Create VM subdirectory
+        let safe_name = vm_name.replace(' ', "_").replace('/', "_").to_lowercase();
+        let vm_dir = std::path::Path::new(&pool_path).join(&safe_name);
+        std::fs::create_dir_all(&vm_dir).map_err(|e| format!("Cannot create VM dir: {}", e))?;
+
+        // Find next disk number
+        let existing: Vec<String> = std::fs::read_dir(&vm_dir)
+            .map(|entries| entries.flatten()
+                .filter_map(|e| {
+                    let n = e.file_name().to_string_lossy().to_string();
+                    if n.ends_with(".raw") { Some(n) } else { None }
+                }).collect())
+            .unwrap_or_default();
+        let disk_num = existing.len();
+        let filename = if disk_num == 0 { "disk.raw".to_string() } else { format!("disk{}.raw", disk_num) };
+        let disk_path = vm_dir.join(&filename);
+
+        let size_bytes = size_gb * 1024 * 1024 * 1024;
+        let file = std::fs::File::create(&disk_path).map_err(|e| format!("Create failed: {}", e))?;
+        file.set_len(size_bytes).map_err(|e| format!("Allocate failed: {}", e))?;
+
+        let path_str = disk_path.to_string_lossy().to_string();
+        let disk_name = format!("{}/{}", safe_name, filename);
+        db.execute(
+            "INSERT INTO disk_images (name, path, size_bytes, format, pool_id, vm_id) VALUES (?1, ?2, ?3, 'raw', ?4, ?5)",
+            rusqlite::params![&disk_name, &path_str, size_bytes as i64, pool_id, vm_id],
+        ).map_err(|e| e.to_string())?;
+        Ok((db.last_insert_rowid(), path_str))
+    }
+
+    /// Get aggregate stats across all pools.
+    pub fn aggregate_stats(db: &Connection) -> Result<StorageStats, String> {
+        let pools = Self::list_pools(db)?;
+        let total_bytes: u64 = pools.iter().map(|p| p.total_bytes).sum();
+        let free_bytes: u64 = pools.iter().map(|p| p.free_bytes).sum();
+        let used_bytes = total_bytes.saturating_sub(free_bytes);
+
+        let total_images: i64 = db.query_row("SELECT COUNT(*) FROM disk_images", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        let image_bytes: i64 = db.query_row("SELECT COALESCE(SUM(size_bytes), 0) FROM disk_images", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        let total_isos: i64 = db.query_row("SELECT COUNT(*) FROM isos", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        let orphaned: i64 = db.query_row("SELECT COUNT(*) FROM disk_images WHERE vm_id IS NULL", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+
+        Ok(StorageStats {
+            total_pools: pools.len() as u32,
+            online_pools: pools.iter().filter(|p| p.total_bytes > 0).count() as u32,
+            total_bytes, used_bytes, free_bytes,
+            vm_disk_bytes: image_bytes as u64,
+            total_images: total_images as u32,
+            total_isos: total_isos as u32,
+            orphaned_images: orphaned as u32,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct StorageStats {
+    pub total_pools: u32,
+    pub online_pools: u32,
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    pub free_bytes: u64,
+    pub vm_disk_bytes: u64,
+    pub total_images: u32,
+    pub total_isos: u32,
+    pub orphaned_images: u32,
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 fn get_disk_space(path: &str) -> (u64, u64) {

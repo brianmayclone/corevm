@@ -97,4 +97,19 @@ export interface SystemInfo {
   arch: string
   hw_virtualization: boolean
   cpu_count: number
+  total_ram_mb: number
+  free_ram_mb: number
+  total_disk_bytes: number
+  free_disk_bytes: number
+}
+
+export interface DashboardStats {
+  total_vms: number
+  running_vms: number
+  stopped_vms: number
+  cpu_count: number
+  total_ram_mb: number
+  used_ram_mb: number
+  total_disk_bytes: number
+  used_disk_bytes: number
 }

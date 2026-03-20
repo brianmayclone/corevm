@@ -15,6 +15,7 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         // System (health check — no auth)
         .route("/api/system/info", get(system::info))
+        .route("/api/system/stats", get(system::stats))
         // Auth
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/me", get(auth::me))

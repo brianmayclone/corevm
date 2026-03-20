@@ -7,6 +7,7 @@ use std::sync::Arc;
 use crate::state::{AppState, VmInstance, VmState};
 use crate::auth::middleware::{AuthUser, AppError, require_operator};
 use crate::services::vm::VmService;
+use crate::services::audit::AuditService;
 use vmm_core::config::VmConfig;
 
 #[derive(Serialize)]
@@ -57,6 +58,7 @@ pub async fn create(auth: AuthUser, State(state): State<Arc<AppState>>, Json(mut
         id: config.uuid.clone(), config: config.clone(), state: VmState::Stopped,
         vm_handle: None, control: None, framebuffer: None, serial_tx: None, vm_thread: None,
     });
+    AuditService::log(&db, auth.id, "vm.created", "vm", &config.uuid, Some(&config.name));
     Ok(Json(serde_json::json!({"id": config.uuid, "name": config.name})))
 }
 
@@ -121,6 +123,7 @@ pub async fn start(auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_i
         vm.serial_tx = Some(running.serial_tx);
         vm.vm_thread = Some(running.thread);
     }
+    { let db = state.db.lock().unwrap(); AuditService::log(&db, auth.id, "vm.started", "vm", &vm_id, None); }
     tracing::info!("VM {} started", vm_id);
     Ok(Json(serde_json::json!({"ok": true, "state": "running"})))
 }
@@ -133,6 +136,7 @@ pub async fn stop(auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_id
     if let Some(ref control) = vm.control { control.request_stop(); }
     drop(vm);
     if let Some(mut vm) = state.vms.get_mut(&vm_id) { vm.state = VmState::Stopping; }
+    { let db = state.db.lock().unwrap(); AuditService::log(&db, auth.id, "vm.stop_requested", "vm", &vm_id, None); }
     tracing::info!("VM {} stop requested", vm_id);
     Ok(Json(serde_json::json!({"ok": true, "state": "stopping"})))
 }
@@ -150,6 +154,7 @@ pub async fn force_stop(auth: AuthUser, State(state): State<Arc<AppState>>, Path
         vm.vm_handle = None; vm.control = None; vm.framebuffer = None;
         vm.serial_tx = None; vm.vm_thread = None;
     }
+    { let db = state.db.lock().unwrap(); AuditService::log(&db, auth.id, "vm.force_stopped", "vm", &vm_id, None); }
     tracing::info!("VM {} force-stopped", vm_id);
     Ok(Json(serde_json::json!({"ok": true, "state": "stopped"})))
 }
