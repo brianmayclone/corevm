@@ -6,6 +6,8 @@ import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
 import VmDetail from './pages/VmDetail'
 import VmCreate from './pages/VmCreate'
+import VmConsole from './pages/VmConsole'
+import Storage from './pages/Storage'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore()
@@ -25,8 +27,9 @@ export default function App() {
           <Route index element={<Dashboard />} />
           <Route path="vms/create" element={<VmCreate />} />
           <Route path="vms/:id" element={<VmDetail />} />
+          <Route path="vms/:id/console" element={<VmConsole />} />
           <Route path="vms/:id/settings" element={<VmCreate />} />
-          <Route path="storage" element={<Placeholder title="Storage" />} />
+          <Route path="storage" element={<Storage />} />
           <Route path="networks" element={<Placeholder title="Networks" />} />
           <Route path="settings" element={<Placeholder title="Settings" />} />
         </Route>

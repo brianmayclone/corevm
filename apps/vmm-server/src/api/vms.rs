@@ -115,6 +115,8 @@ pub async fn start(auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_i
         .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, format!("Spawn error: {}", e)))?
         .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    let control_for_watcher = running.control.clone();
+
     if let Some(mut vm) = state.vms.get_mut(&vm_id) {
         vm.state = VmState::Running;
         vm.vm_handle = Some(running.handle);
@@ -125,6 +127,36 @@ pub async fn start(auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_i
     }
     { let db = state.db.lock().unwrap(); AuditService::log(&db, auth.id, "vm.started", "vm", &vm_id, None); }
     tracing::info!("VM {} started", vm_id);
+
+    // Spawn a watcher task that detects when the VM thread exits
+    // and updates the state back to Stopped.
+    let watcher_state = state.clone();
+    let watcher_vm_id = vm_id.clone();
+    tokio::spawn(async move {
+        // Poll the control handle until the VM exits
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if control_for_watcher.is_exited() {
+                break;
+            }
+        }
+        let reason = control_for_watcher.exit_reason().unwrap_or_default();
+        tracing::info!("VM {} exited: {}", watcher_vm_id, if reason.is_empty() { "normal" } else { &reason });
+
+        if let Some(mut vm) = watcher_state.vms.get_mut(&watcher_vm_id) {
+            vm.state = VmState::Stopped;
+            vm.vm_handle = None;
+            vm.control = None;
+            vm.framebuffer = None;
+            vm.serial_tx = None;
+            vm.vm_thread = None;
+        }
+        {
+            let db = watcher_state.db.lock().unwrap();
+            AuditService::log(&db, 0, "vm.exited", "vm", &watcher_vm_id, Some(&reason));
+        }
+    });
+
     Ok(Json(serde_json::json!({"ok": true, "state": "running"})))
 }
 

@@ -64,8 +64,28 @@ async fn main() {
     let jwt_secret = cfg.auth.jwt_secret.clone();
 
     // Build app state
+    let vms_map = dashmap::DashMap::new();
+
+    // Load existing VMs from database into memory
+    {
+        use crate::services::vm::VmService;
+        match VmService::list(&conn) {
+            Ok(records) => {
+                for r in records {
+                    tracing::info!("Loaded VM '{}' ({})", r.name, r.id);
+                    vms_map.insert(r.id.clone(), state::VmInstance {
+                        id: r.id, config: r.config, state: state::VmState::Stopped,
+                        vm_handle: None, control: None, framebuffer: None,
+                        serial_tx: None, vm_thread: None,
+                    });
+                }
+            }
+            Err(e) => tracing::warn!("Failed to load VMs: {}", e),
+        }
+    }
+
     let state = Arc::new(AppState {
-        vms: dashmap::DashMap::new(),
+        vms: vms_map,
         db: Mutex::new(conn),
         jwt_secret,
         config: cfg,

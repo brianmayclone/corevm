@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Heart, Cpu, MemoryStick, HardDrive, Play, Shield, AlertTriangle, UserPlus } from 'lucide-react'
+import { Heart, Cpu, MemoryStick, HardDrive, Play, AlertTriangle, Activity } from 'lucide-react'
 import api from '../api/client'
 import { useVmStore } from '../stores/vmStore'
-import type { DashboardStats } from '../api/types'
+import type { DashboardStats, AuditEntry } from '../api/types'
 import MetricCard from '../components/MetricCard'
 import VmPriorityCard from '../components/VmPriorityCard'
 import ActivityRow from '../components/ActivityRow'
@@ -13,16 +13,18 @@ import { formatBytes, formatRam } from '../utils/format'
 export default function Dashboard() {
   const { vms, fetchVms, startVm, stopVm } = useVmStore()
   const [stats, setStats] = useState<DashboardStats | null>(null)
+  const [activities, setActivities] = useState<AuditEntry[]>([])
   const navigate = useNavigate()
 
-  useEffect(() => {
+  const refresh = () => {
     fetchVms()
     api.get<DashboardStats>('/api/system/stats').then(({ data }) => setStats(data))
-    // Refresh every 10s
-    const interval = setInterval(() => {
-      fetchVms()
-      api.get<DashboardStats>('/api/system/stats').then(({ data }) => setStats(data))
-    }, 10000)
+    api.get<AuditEntry[]>('/api/system/activity?limit=10').then(({ data }) => setActivities(data))
+  }
+
+  useEffect(() => {
+    refresh()
+    const interval = setInterval(refresh, 10000)
     return () => clearInterval(interval)
   }, [])
 
@@ -85,7 +87,8 @@ export default function Dashboard() {
                   tag={`${vm.cpu_cores} vCPU • ${formatRam(vm.ram_mb)} • ${vm.state.toUpperCase()}`}
                   cpuPercent={vm.state === 'running' ? Math.floor(Math.random() * 60 + 5) : 0}
                   ramPercent={vm.state === 'running' ? Math.round((vm.ram_mb / (totalRamMb || 1)) * 100) : 0}
-                  onConsole={() => navigate(`/vms/${vm.id}`)}
+                  onClick={() => navigate(`/vms/${vm.id}`)}
+                  onConsole={() => navigate(`/vms/${vm.id}/console`)}
                   onPower={() => vm.state === 'stopped' ? startVm(vm.id) : stopVm(vm.id)}
                 />
               ))}
@@ -98,15 +101,19 @@ export default function Dashboard() {
           <div>
             <h2 className="text-lg font-bold text-vmm-text mb-3">Recent Activity</h2>
             <Card padding={false}>
-              {vms.length > 0 ? vms.slice(0, 4).map((vm, i) => (
-                <ActivityRow
-                  key={vm.id}
-                  icon={vm.state === 'running' ? <Play size={14} /> : <AlertTriangle size={14} />}
-                  severity={vm.state === 'running' ? 'success' : 'warning'}
-                  title={<>VM <strong>{vm.name}</strong> — {vm.state}</>}
-                  subtitle={`${vm.cpu_cores} vCPU • ${formatRam(vm.ram_mb)}`}
-                />
-              )) : (
+              {activities.length > 0 ? activities.map((a) => {
+                const icon = a.action.includes('start') ? <Play size={14} />
+                  : a.action.includes('stop') ? <AlertTriangle size={14} />
+                  : <Activity size={14} />
+                const severity = a.action.includes('start') ? 'success' as const
+                  : a.action.includes('stop') || a.action.includes('force') ? 'danger' as const
+                  : 'info' as const
+                return (
+                  <ActivityRow key={a.id} icon={icon} severity={severity}
+                    title={<><strong>{a.action}</strong>{a.details ? ` — ${a.details}` : ''}{a.target_id ? ` (${a.target_id.slice(0, 8)}...)` : ''}</>}
+                    subtitle={a.created_at} />
+                )
+              }) : (
                 <div className="px-5 py-6 text-sm text-vmm-text-muted text-center">No recent activity</div>
               )}
             </Card>

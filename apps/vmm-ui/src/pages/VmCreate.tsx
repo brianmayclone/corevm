@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { Info, Monitor, Zap, SlidersHorizontal, HardDrive, Cpu, MemoryStick, Clock } from 'lucide-react'
+import { Info, Monitor, Zap, SlidersHorizontal, HardDrive, Cpu, MemoryStick, Clock, Search, Plus } from 'lucide-react'
 import api from '../api/client'
 import type { VmConfig, VmDetail } from '../api/types'
 import TabBar from '../components/TabBar'
@@ -12,6 +12,8 @@ import Select from '../components/Select'
 import Toggle from '../components/Toggle'
 import Button from '../components/Button'
 import Card from '../components/Card'
+import PoolBrowser from '../components/PoolBrowser'
+import CreateDiskDialog from '../components/CreateDiskDialog'
 
 const tabs = [
   { id: 'general', label: 'General' },
@@ -75,6 +77,9 @@ export default function VmCreate() {
   const [saving, setSaving] = useState(false)
   const [loading, setLoading] = useState(isEdit)
   const [error, setError] = useState('')
+  const [isoBrowserOpen, setIsoBrowserOpen] = useState(false)
+  const [diskBrowserOpen, setDiskBrowserOpen] = useState(false)
+  const [createDiskOpen, setCreateDiskOpen] = useState(false)
 
   const [form, setForm] = useState<VmConfig>({
     uuid: '', name: '', guest_os: 'other', guest_arch: 'x64',
@@ -181,7 +186,12 @@ export default function VmCreate() {
                 </div>
               </FormField>
               <FormField label="ISO Image">
-                <TextInput value={form.iso_image} onChange={(e) => set('iso_image', e.target.value)} placeholder="/path/to/image.iso" />
+                <div className="flex gap-2">
+                  <TextInput value={form.iso_image} onChange={(e) => set('iso_image', e.target.value)}
+                    placeholder="/path/to/image.iso" className="flex-1" />
+                  <Button variant="outline" size="md" icon={<Search size={14} />}
+                    onClick={() => setIsoBrowserOpen(true)}>Browse</Button>
+                </div>
               </FormField>
             </div>
           </SectionCard>
@@ -258,23 +268,27 @@ export default function VmCreate() {
           <div className="space-y-3">
             {form.disk_images.length === 0 ? (
               <div className="text-sm text-vmm-text-muted py-4 text-center border border-dashed border-vmm-border rounded-lg">
-                No disks attached
+                No disks attached. Create a new disk or browse an existing one.
               </div>
             ) : form.disk_images.map((disk, i) => (
-              <div key={i} className="flex items-center gap-3">
-                <TextInput value={disk} onChange={(e) => {
-                  const copy = [...form.disk_images]
-                  copy[i] = e.target.value
-                  set('disk_images', copy)
-                }} placeholder={`/path/to/disk${i}.raw`} className="flex-1" />
+              <div key={i} className="flex items-center gap-2 bg-vmm-bg-alt border border-vmm-border rounded-lg px-4 py-3">
+                <HardDrive size={14} className="text-vmm-text-muted flex-shrink-0" />
+                <span className="text-sm text-vmm-text font-mono flex-1 truncate">{disk}</span>
                 <Button variant="danger" size="sm" onClick={() => {
                   set('disk_images', form.disk_images.filter((_, j) => j !== i))
                 }}>Remove</Button>
               </div>
             ))}
-            <Button variant="outline" size="sm" onClick={() => set('disk_images', [...form.disk_images, ''])}>
-              + Add Disk
-            </Button>
+            <div className="flex gap-2">
+              <Button variant="primary" size="sm" icon={<Plus size={14} />}
+                onClick={() => setCreateDiskOpen(true)}>
+                Create New Disk
+              </Button>
+              <Button variant="outline" size="sm" icon={<Search size={14} />}
+                onClick={() => setDiskBrowserOpen(true)}>
+                Browse Existing
+              </Button>
+            </div>
           </div>
           <div className="grid grid-cols-2 gap-6 mt-5 pt-5 border-t border-vmm-border">
             <FormField label="Disk Cache (MB)">
@@ -310,6 +324,19 @@ export default function VmCreate() {
           </Button>
         </div>
       </div>
+
+      {/* ── Dialogs ───────────────────────────────────────────────── */}
+      <PoolBrowser open={isoBrowserOpen} onClose={() => setIsoBrowserOpen(false)}
+        filterExt=".iso" title="Select ISO Image"
+        onSelect={(path) => set('iso_image', path)} />
+
+      <PoolBrowser open={diskBrowserOpen} onClose={() => setDiskBrowserOpen(false)}
+        filterExt=".raw" title="Select Disk Image"
+        onSelect={(path) => set('disk_images', [...form.disk_images, path])} />
+
+      <CreateDiskDialog open={createDiskOpen} onClose={() => setCreateDiskOpen(false)}
+        vmName={form.name || 'new-vm'} vmId={form.uuid}
+        onCreated={(path) => set('disk_images', [...form.disk_images, path])} />
     </div>
   )
 }

@@ -1,6 +1,6 @@
 //! Storage management API endpoints — pools, disk images, ISOs.
 
-use axum::{extract::{Path, State, Multipart}, http::StatusCode, Json};
+use axum::{extract::{Path, State, Query, Multipart}, http::StatusCode, Json};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -132,4 +132,60 @@ pub async fn delete_iso(auth: AuthUser, State(state): State<Arc<AppState>>, Path
     let db = state.db.lock().unwrap();
     StorageService::delete_iso(&db, iso_id).map_err(|e| AppError(StatusCode::NOT_FOUND, e))?;
     Ok(Json(serde_json::json!({"ok": true})))
+}
+
+// ── Pool Browsing ────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct BrowseQuery {
+    pub ext: Option<String>,
+}
+
+/// GET /api/storage/pools/:id/browse — list files in a pool directory.
+pub async fn browse_pool(
+    _auth: AuthUser,
+    State(state): State<Arc<AppState>>,
+    Path(pool_id): Path<i64>,
+    Query(q): Query<BrowseQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = state.db.lock().unwrap();
+    let files = StorageService::browse_pool(&db, pool_id, q.ext.as_deref())
+        .map_err(|e| AppError(StatusCode::NOT_FOUND, e))?;
+    Ok(Json(serde_json::to_value(files).unwrap()))
+}
+
+// ── Auto-create VM disk ──────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct CreateVmDiskRequest {
+    pub vm_name: String,
+    pub vm_id: String,
+    pub size_gb: u64,
+    pub pool_id: i64,
+}
+
+/// POST /api/storage/vm-disk — create a disk automatically in pool/<vm_name>/disk.raw
+pub async fn create_vm_disk(
+    auth: AuthUser,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateVmDiskRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_operator(&auth)?;
+    let db = state.db.lock().unwrap();
+    let (id, path) = StorageService::create_vm_disk(&db, &req.vm_name, &req.vm_id, req.size_gb, req.pool_id)
+        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(serde_json::json!({"id": id, "path": path})))
+}
+
+// ── Aggregate Stats ──────────────────────────────────────────────────────
+
+/// GET /api/storage/stats — aggregate storage stats across all pools.
+pub async fn storage_stats(
+    _auth: AuthUser,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = state.db.lock().unwrap();
+    let stats = StorageService::aggregate_stats(&db)
+        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::to_value(stats).unwrap()))
 }

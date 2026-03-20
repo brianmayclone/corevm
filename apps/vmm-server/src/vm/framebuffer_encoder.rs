@@ -14,9 +14,6 @@ pub fn encode_frame(
     if fb.width == 0 || fb.height == 0 || fb.pixels.is_empty() {
         return None;
     }
-    if !fb.dirty {
-        return None;
-    }
 
     // Fast hash for delta detection — hash a sample of pixels, not all.
     let hash = fast_hash(&fb.pixels);

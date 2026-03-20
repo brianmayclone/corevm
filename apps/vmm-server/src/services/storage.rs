@@ -250,7 +250,7 @@ impl StorageService {
                 Self::scan_dir(&entry.path(), base, filter_ext, out, depth - 1);
             } else {
                 if let Some(ext) = filter_ext {
-                    if !name.ends_with(ext) { continue; }
+                    if !name.to_lowercase().ends_with(&ext.to_lowercase()) { continue; }
                 }
                 out.push(PoolFile { name, path, size_bytes: meta.len(), is_dir: false });
             }
@@ -287,9 +287,11 @@ impl StorageService {
 
         let path_str = disk_path.to_string_lossy().to_string();
         let disk_name = format!("{}/{}", safe_name, filename);
+        // vm_id may be empty for new VMs not yet saved — store NULL to avoid FK violation
+        let vm_id_param: Option<&str> = if vm_id.is_empty() { None } else { Some(vm_id) };
         db.execute(
             "INSERT INTO disk_images (name, path, size_bytes, format, pool_id, vm_id) VALUES (?1, ?2, ?3, 'raw', ?4, ?5)",
-            rusqlite::params![&disk_name, &path_str, size_bytes as i64, pool_id, vm_id],
+            rusqlite::params![&disk_name, &path_str, size_bytes as i64, pool_id, vm_id_param],
         ).map_err(|e| e.to_string())?;
         Ok((db.last_insert_rowid(), path_str))
     }

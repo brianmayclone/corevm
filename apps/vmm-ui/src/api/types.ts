@@ -113,3 +113,32 @@ export interface DashboardStats {
   total_disk_bytes: number
   used_disk_bytes: number
 }
+
+export interface StorageStats {
+  total_pools: number
+  online_pools: number
+  total_bytes: number
+  used_bytes: number
+  free_bytes: number
+  vm_disk_bytes: number
+  total_images: number
+  total_isos: number
+  orphaned_images: number
+}
+
+export interface AuditEntry {
+  id: number
+  user_id: number | null
+  action: string
+  target_type: string | null
+  target_id: string | null
+  details: string | null
+  created_at: string
+}
+
+export interface PoolFile {
+  name: string
+  path: string
+  size_bytes: number
+  is_dir: boolean
+}

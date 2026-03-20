@@ -13,9 +13,10 @@ pub mod storage;
 /// Build the complete API router.
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
-        // System (health check — no auth)
+        // System
         .route("/api/system/info", get(system::info))
         .route("/api/system/stats", get(system::stats))
+        .route("/api/system/activity", get(system::activity))
         // Auth
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/me", get(auth::me))
@@ -33,6 +34,9 @@ pub fn router() -> Router<Arc<AppState>> {
         // Storage pools
         .route("/api/storage/pools", get(storage::list_pools).post(storage::create_pool))
         .route("/api/storage/pools/{id}", delete(storage::delete_pool))
+        .route("/api/storage/pools/{id}/browse", get(storage::browse_pool))
+        .route("/api/storage/stats", get(storage::storage_stats))
+        .route("/api/storage/vm-disk", post(storage::create_vm_disk))
         // Disk images
         .route("/api/storage/images", get(storage::list_images).post(storage::create_image))
         .route("/api/storage/images/{id}", delete(storage::delete_image))

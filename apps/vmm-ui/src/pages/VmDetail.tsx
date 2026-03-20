@@ -11,6 +11,7 @@ import SpecRow from '../components/SpecRow'
 import ProgressBar from '../components/ProgressBar'
 import TabBar from '../components/TabBar'
 import ConsolePreview from '../components/ConsolePreview'
+import ConsoleCanvas from '../components/ConsoleCanvas'
 import ActivityCard from '../components/ActivityCard'
 import QuickAction from '../components/QuickAction'
 import { guestOsLabel, formatRam } from '../utils/format'
@@ -32,9 +33,12 @@ export default function VmDetail() {
   const { startVm, stopVm, forceStopVm } = useVmStore()
 
   useEffect(() => {
-    if (id) {
-      api.get<VmDetailType>(`/api/vms/${id}`).then(({ data }) => setVm(data))
-    }
+    if (!id) return
+    const load = () => api.get<VmDetailType>(`/api/vms/${id}`).then(({ data }) => setVm(data))
+    load()
+    // Poll every 2s to detect state changes (e.g. VM exited)
+    const interval = setInterval(load, 2000)
+    return () => clearInterval(interval)
   }, [id])
 
   if (!vm) return <div className="text-vmm-text-muted">Loading...</div>
@@ -90,11 +94,12 @@ export default function VmDetail() {
         <div className="grid grid-cols-[1fr_300px] gap-6">
           {/* Left column */}
           <div className="space-y-6">
-            {/* Console preview */}
-            <ConsolePreview
-              state={isRunning ? 'live' : 'off'}
-              onOpenConsole={isRunning ? () => navigate(`/vms/${vm.id}/console`) : undefined}
-            />
+            {/* Console — live when running, placeholder when stopped */}
+            {isRunning ? (
+              <ConsoleCanvas vmId={vm.id} />
+            ) : (
+              <ConsolePreview state="off" />
+            )}
 
             {/* Recent Activity */}
             <div>

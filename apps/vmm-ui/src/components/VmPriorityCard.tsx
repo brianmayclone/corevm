@@ -6,13 +6,18 @@ interface Props {
   tag: string
   cpuPercent: number
   ramPercent: number
+  onClick?: () => void
   onConsole?: () => void
   onPower?: () => void
 }
 
-export default function VmPriorityCard({ name, tag, cpuPercent, ramPercent, onConsole, onPower }: Props) {
+export default function VmPriorityCard({ name, tag, cpuPercent, ramPercent, onClick, onConsole, onPower }: Props) {
   return (
-    <div className="bg-vmm-surface border border-vmm-border rounded-xl p-4">
+    <div
+      onClick={onClick}
+      className={`bg-vmm-surface border border-vmm-border rounded-xl p-4 transition-colors
+        ${onClick ? 'hover:border-vmm-border-light cursor-pointer' : ''}`}
+    >
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-vmm-bg-alt flex items-center justify-center">
@@ -23,7 +28,7 @@ export default function VmPriorityCard({ name, tag, cpuPercent, ramPercent, onCo
             <div className="text-[10px] text-vmm-text-muted font-mono tracking-wider">{tag}</div>
           </div>
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
           {onConsole && (
             <button onClick={onConsole} className="p-1.5 hover:bg-vmm-surface-hover rounded text-vmm-text-muted hover:text-vmm-text transition-colors cursor-pointer">
               <Monitor size={13} />

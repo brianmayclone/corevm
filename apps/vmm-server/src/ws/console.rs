@@ -34,18 +34,30 @@ pub async fn handler(
     // Validate JWT from query param
     let token = match query.token {
         Some(t) => t,
-        None => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
+        None => {
+            tracing::warn!("WebSocket console: missing token for VM {}", vm_id);
+            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+        }
     };
-    if jwt::validate_token(&token, &state.jwt_secret).is_err() {
+    if let Err(e) = jwt::validate_token(&token, &state.jwt_secret) {
+        tracing::warn!("WebSocket console: invalid token for VM {}: {}", vm_id, e);
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     }
 
-    // Check VM exists and is running
-    let vm_exists = state.vms.get(&vm_id)
-        .map(|v| v.state == VmState::Running && v.framebuffer.is_some())
-        .unwrap_or(false);
-    if !vm_exists {
-        return axum::http::StatusCode::NOT_FOUND.into_response();
+    // Check VM exists and is running with a framebuffer
+    let vm_info = state.vms.get(&vm_id).map(|v| (v.state, v.framebuffer.is_some()));
+    match vm_info {
+        Some((VmState::Running, true)) => {
+            tracing::info!("WebSocket console: upgrading for VM {}", vm_id);
+        }
+        Some((st, has_fb)) => {
+            tracing::warn!("WebSocket console: VM {} not ready (state={:?}, fb={})", vm_id, st, has_fb);
+            return axum::http::StatusCode::CONFLICT.into_response();
+        }
+        None => {
+            tracing::warn!("WebSocket console: VM {} not found", vm_id);
+            return axum::http::StatusCode::NOT_FOUND.into_response();
+        }
     }
 
     ws.on_upgrade(move |socket| handle_socket(socket, vm_id, state))
