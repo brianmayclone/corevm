@@ -78,6 +78,7 @@ impl EventHandler for VmManagerEventHandler {
             }
             VmEvent::DebugOutput(data) => {
                 if let Ok(s) = std::str::from_utf8(&data) {
+                    eprint!("{}", s);
                     self.diag.append_debug_text(s);
                 }
             }
@@ -252,9 +253,18 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
         BiosType::CoreVm => setup::load_corevm_bios(handle, &extra_bios_paths)?,
         BiosType::Uefi => {
             // Per-VM OVMF_VARS copy (EFI variables are written during boot)
-            let vars_path = platform::config_dir()
-                .join(format!("{}_ovmf_vars.fd", config.uuid));
-            setup::load_ovmf(handle, &extra_bios_paths, &vars_path)?;
+            let ovmf_path = platform::config_dir()
+                .join(format!("{}_ovmf.fd", config.uuid));
+            // Remove stale per-VM copies from older format (VARS-only, ~528KB)
+            if ovmf_path.exists() {
+                if let Ok(meta) = std::fs::metadata(&ovmf_path) {
+                    if meta.len() < 0x200000 {
+                        eprintln!("[ovmf] Removing stale per-VM copy ({}KB, too small)", meta.len() / 1024);
+                        let _ = std::fs::remove_file(&ovmf_path);
+                    }
+                }
+            }
+            setup::load_ovmf(handle, &extra_bios_paths, &ovmf_path)?;
         }
     }
 
@@ -289,7 +299,12 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
     }
 
     // Set initial CPU state: CS:IP = F000:FFF0 (real-mode reset vector)
-    let sregs_rc = setup::set_initial_cpu_state(handle);
+    // For UEFI: CS.base = 0xFFFF0000 so first fetch is at 0xFFFFFFF0 (top of 4GB)
+    let sregs_rc = if config.bios_type == BiosType::Uefi {
+        setup::set_initial_cpu_state_uefi(handle)
+    } else {
+        setup::set_initial_cpu_state(handle)
+    };
     if entry.config.diagnostics {
         if let Err(ref e) = sregs_rc {
             entry.diag_log.log(DiagCategory::Error, format!("set_initial_cpu_state failed: {}", e));

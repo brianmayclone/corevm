@@ -313,115 +313,78 @@ pub fn load_seabios(handle: u64, extra_bios_paths: &[PathBuf]) -> Result<(), Str
 
 /// Load OVMF UEFI firmware into the VM.
 ///
-/// OVMF_CODE is mapped as ROM at the top of 4GB (read-only firmware code).
-/// OVMF_VARS is copied per-VM and mapped as RAM at the address just below
-/// OVMF_CODE (read-write EFI variable store).
+/// Uses the combined OVMF.fd image (CODE+VARS in one file, typically 4MB).
+/// Mapped as a single writable RAM region at `4GB - image_size` so that:
+///   - The reset vector at the end of the image lands at 0xFFFFFFF0
+///   - The variable store at the beginning is writable
 ///
-/// `vars_path`: path to the per-VM OVMF_VARS copy. If it doesn't exist,
-/// the template is copied there first.
+/// A per-VM copy is used so EFI variables persist across reboots.
+/// `vars_path` is the per-VM copy path; the template is copied there on first use.
 pub fn load_ovmf(
     handle: u64,
     extra_bios_paths: &[PathBuf],
     vars_path: &std::path::Path,
 ) -> Result<(), String> {
-    // Find OVMF_CODE firmware
-    let code_path = find_ovmf_code(extra_bios_paths)
-        .ok_or("OVMF UEFI firmware not found. Install the 'ovmf' package.")?;
-
-    let code = std::fs::read(&code_path)
-        .map_err(|e| format!("Failed to read OVMF_CODE: {}", e))?;
-
-    if code.len() < 0x10000 {
-        return Err(format!("OVMF_CODE too small: {} bytes", code.len()));
-    }
-
-    // Ensure per-VM VARS copy exists
+    // Ensure per-VM OVMF copy exists
     if !vars_path.exists() {
-        let vars_template = find_ovmf_vars(extra_bios_paths)
-            .ok_or("OVMF_VARS template not found. Install the 'ovmf' package.")?;
-        std::fs::copy(&vars_template, vars_path)
-            .map_err(|e| format!("Failed to copy OVMF_VARS to {:?}: {}", vars_path, e))?;
+        let template = find_ovmf(extra_bios_paths)
+            .ok_or("OVMF UEFI firmware (OVMF.fd) not found.")?;
+        std::fs::copy(&template, vars_path)
+            .map_err(|e| format!("Failed to copy OVMF to {:?}: {}", vars_path, e))?;
+        eprintln!("[ovmf] Created per-VM copy from {:?}", template);
     }
 
-    let vars = std::fs::read(vars_path)
-        .map_err(|e| format!("Failed to read OVMF_VARS: {}", e))?;
+    let fw = std::fs::read(vars_path)
+        .map_err(|e| format!("Failed to read OVMF firmware: {}", e))?;
 
-    // OVMF_CODE: ROM at top of 4GB, aligned to 4KB
-    let code_size = code.len();
-    let code_alloc = (code_size + 0xFFF) & !0xFFF;
-    let code_base = 0x1_0000_0000u64 - code_alloc as u64;
-
-    let layout = std::alloc::Layout::from_size_align(code_alloc, 4096)
-        .map_err(|e| format!("OVMF CODE layout error: {}", e))?;
-    let code_ptr = unsafe { std::alloc::alloc_zeroed(layout) };
-    if code_ptr.is_null() {
-        return Err("Failed to allocate OVMF CODE memory".into());
+    let fw_size = fw.len();
+    if fw_size < 0x10000 || fw_size > 0x800000 {
+        return Err(format!("OVMF firmware has unexpected size: {} bytes (expected 2-8 MB)", fw_size));
     }
-    unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), code_ptr, code_size); }
 
-    let ret = corevm_set_memory_region(handle, 1, code_base, code_alloc as u64, code_ptr);
+    // Map at top of 4GB address space, page-aligned.
+    // The reset vector (at offset fw_size-16) must land at physical 0xFFFFFFF0.
+    let fw_alloc = (fw_size + 0xFFF) & !0xFFF;
+    let fw_base = 0x1_0000_0000u64 - fw_alloc as u64;
+
+    let layout = std::alloc::Layout::from_size_align(fw_alloc, 4096)
+        .map_err(|e| format!("OVMF layout error: {}", e))?;
+    let fw_ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+    if fw_ptr.is_null() {
+        return Err("Failed to allocate OVMF memory".into());
+    }
+    unsafe { std::ptr::copy_nonoverlapping(fw.as_ptr(), fw_ptr, fw_size); }
+
+    // Use memory slot 1 (same as SeaBIOS ROM overlay).
+    // Must be writable (RAM, not ROM) so OVMF can write EFI variables.
+    let ret = corevm_set_memory_region(handle, 1, fw_base, fw_alloc as u64, fw_ptr);
     if ret != 0 {
-        return Err(format!("Failed to map OVMF CODE at 0x{:X}", code_base));
+        return Err(format!("Failed to map OVMF at 0x{:X} (slot 1)", fw_base));
     }
-    // code_ptr intentionally leaked — must remain valid for VM lifetime
+    // fw_ptr intentionally leaked — must remain valid for VM lifetime
 
-    // OVMF_VARS: writable RAM region just below OVMF_CODE
-    let vars_size = vars.len();
-    let vars_alloc = (vars_size + 0xFFF) & !0xFFF;
-    let vars_base = code_base - vars_alloc as u64;
+    // Also load at the legacy BIOS area (0xC0000-0xFFFFF) so early real-mode
+    // code can find the firmware before switching to protected mode.
+    // Copy the last 256KB of the firmware image (the code portion).
+    let legacy_size = 0x40000usize.min(fw_size); // 256KB max
+    let legacy_offset = fw_size - legacy_size;
+    corevm_load_binary(
+        handle, 0xC0000,
+        unsafe { fw_ptr.add(legacy_offset) },
+        legacy_size as u32,
+    );
 
-    let vlayout = std::alloc::Layout::from_size_align(vars_alloc, 4096)
-        .map_err(|e| format!("OVMF VARS layout error: {}", e))?;
-    let vars_ptr = unsafe { std::alloc::alloc_zeroed(vlayout) };
-    if vars_ptr.is_null() {
-        return Err("Failed to allocate OVMF VARS memory".into());
-    }
-    unsafe { std::ptr::copy_nonoverlapping(vars.as_ptr(), vars_ptr, vars_size); }
-
-    // Use slot 6 (slots 0-5 are used by RAM/VGA/etc.)
-    let ret = corevm_set_memory_region(handle, 6, vars_base, vars_alloc as u64, vars_ptr);
-    if ret != 0 {
-        return Err(format!("Failed to map OVMF VARS at 0x{:X}", vars_base));
-    }
-    // vars_ptr intentionally leaked
-
-    eprintln!("[ovmf] CODE: 0x{:X} ({}KB from {:?})", code_base, code_size / 1024, code_path);
-    eprintln!("[ovmf] VARS: 0x{:X} ({}KB from {:?})", vars_base, vars_size / 1024, vars_path);
+    eprintln!("[ovmf] Mapped {}KB at 0x{:X}-0x{:X} (from {:?})",
+        fw_size / 1024, fw_base, fw_base + fw_alloc as u64 - 1, vars_path);
 
     Ok(())
 }
 
-/// Find OVMF_CODE firmware in standard locations.
-fn find_ovmf_code(extra_paths: &[PathBuf]) -> Option<PathBuf> {
+/// Find the combined OVMF.fd firmware image.
+fn find_ovmf(extra_paths: &[PathBuf]) -> Option<PathBuf> {
     let names = [
-        "OVMF_CODE_4M.fd",
-        "OVMF_CODE.fd",
         "OVMF.fd",
-    ];
-    let mut search_dirs = bios_search_paths(extra_paths);
-    // Add OVMF-specific directories
-    #[cfg(target_os = "linux")]
-    {
-        search_dirs.push(PathBuf::from("/usr/share/OVMF"));
-        search_dirs.push(PathBuf::from("/usr/share/ovmf"));
-        search_dirs.push(PathBuf::from("/usr/share/edk2/ovmf"));
-    }
-    for dir in &search_dirs {
-        for name in &names {
-            let p = dir.join(name);
-            if p.exists() {
-                return Some(p);
-            }
-        }
-    }
-    None
-}
-
-/// Find OVMF_VARS template in standard locations.
-fn find_ovmf_vars(extra_paths: &[PathBuf]) -> Option<PathBuf> {
-    let names = [
-        "OVMF_VARS_4M.fd",
-        "OVMF_VARS.fd",
+        "OVMF_CODE_4M.fd",  // fallback to CODE-only (no persistent vars)
     ];
     let mut search_dirs = bios_search_paths(extra_paths);
     #[cfg(target_os = "linux")]
@@ -429,6 +392,7 @@ fn find_ovmf_vars(extra_paths: &[PathBuf]) -> Option<PathBuf> {
         search_dirs.push(PathBuf::from("/usr/share/OVMF"));
         search_dirs.push(PathBuf::from("/usr/share/ovmf"));
         search_dirs.push(PathBuf::from("/usr/share/edk2/ovmf"));
+        search_dirs.push(PathBuf::from("/usr/share/qemu"));
     }
     for dir in &search_dirs {
         for name in &names {
@@ -454,8 +418,20 @@ pub fn load_corevm_bios(handle: u64, extra_bios_paths: &[PathBuf]) -> Result<(),
 
 // ── CPU state initialization ────────────────────────────────────────
 
-/// Set initial CPU state to real-mode reset vector (F000:FFF0).
+/// Set initial CPU state to real-mode reset vector.
+///
+/// For SeaBIOS: CS.base=0xF0000 → first fetch at 0xFFFF0 (legacy BIOS area).
+/// For UEFI:    CS.base=0xFFFF0000 → first fetch at 0xFFFFFFF0 (top of 4GB).
 pub fn set_initial_cpu_state(handle: u64) -> Result<(), String> {
+    set_initial_cpu_state_with_base(handle, 0xF0000)
+}
+
+/// Set initial CPU state for UEFI boot (CS.base=0xFFFF0000).
+pub fn set_initial_cpu_state_uefi(handle: u64) -> Result<(), String> {
+    set_initial_cpu_state_with_base(handle, 0xFFFF0000)
+}
+
+fn set_initial_cpu_state_with_base(handle: u64, cs_base: u64) -> Result<(), String> {
     let data_seg = SegmentReg {
         base: 0,
         limit: 0xFFFF,
@@ -472,9 +448,9 @@ pub fn set_initial_cpu_state(handle: u64) -> Result<(), String> {
 
     let sregs = VcpuSregs {
         cs: SegmentReg {
-            base: 0xF0000,
+            base: cs_base,
             limit: 0xFFFF,
-            selector: 0xF000,
+            selector: 0xF000,  // Selector is always F000h on x86 reset
             type_: 0x0B, // execute/read, accessed
             present: 1,
             dpl: 0,
