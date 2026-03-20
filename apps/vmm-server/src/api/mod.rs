@@ -39,4 +39,6 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/storage/isos", get(storage::list_isos))
         .route("/api/storage/isos/upload", post(storage::upload_iso))
         .route("/api/storage/isos/{id}", delete(storage::delete_iso))
+        // WebSocket console
+        .route("/ws/console/{vm_id}", get(crate::ws::console::handler))
 }

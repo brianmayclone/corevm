@@ -7,8 +7,10 @@ mod config;
 mod state;
 mod db;
 mod auth;
+mod services;
 mod api;
 mod vm;
+mod ws;
 
 use std::sync::{Arc, Mutex};
 use tower_http::cors::CorsLayer;

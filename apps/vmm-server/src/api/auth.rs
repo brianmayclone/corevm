@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::state::AppState;
-use crate::auth::jwt;
 use crate::auth::middleware::{AuthUser, AppError};
+use crate::services::auth::AuthService;
 
 #[derive(Deserialize)]
 pub struct LoginRequest {
@@ -33,26 +33,14 @@ pub async fn login(
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, AppError> {
     let db = state.db.lock().unwrap();
-    let (user_id, password_hash, role) = db.query_row(
-        "SELECT id, password_hash, role FROM users WHERE username = ?1",
-        rusqlite::params![&req.username],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
-    ).map_err(|_| AppError(StatusCode::UNAUTHORIZED, "Invalid credentials".into()))?;
-
-    use argon2::{Argon2, PasswordHash, PasswordVerifier};
-    let parsed_hash = PasswordHash::new(&password_hash)
-        .map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "Internal error".into()))?;
-    Argon2::default().verify_password(req.password.as_bytes(), &parsed_hash)
-        .map_err(|_| AppError(StatusCode::UNAUTHORIZED, "Invalid credentials".into()))?;
-
-    let token = jwt::create_access_token(
-        user_id, &req.username, &role,
+    let (user, token) = AuthService::login(
+        &db, &req.username, &req.password,
         &state.jwt_secret, state.config.auth.session_timeout_hours,
-    ).map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    ).map_err(|e| AppError(StatusCode::UNAUTHORIZED, e))?;
 
     Ok(Json(LoginResponse {
         access_token: token,
-        user: UserInfo { id: user_id, username: req.username, role },
+        user: UserInfo { id: user.id, username: user.username, role: user.role },
     }))
 }
 

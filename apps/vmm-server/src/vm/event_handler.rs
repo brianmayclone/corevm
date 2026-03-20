@@ -1,6 +1,6 @@
 //! Server-side EventHandler for libcorevm VmRuntime.
 //!
-//! Routes VM events to shared state (framebuffer, serial broadcast, stats)
+//! Routes VM events to shared state (framebuffer, serial broadcast)
 //! instead of to an egui UI.
 
 use std::sync::{Arc, Mutex};
@@ -13,6 +13,7 @@ use libcorevm::ffi::{
     corevm_vga_get_fb_offset, corevm_has_virtio_gpu,
     corevm_virtio_gpu_get_framebuffer, corevm_virtio_gpu_get_mode,
     corevm_virtio_gpu_scanout_active,
+    corevm_read_phys,
 };
 
 /// Shared framebuffer data between VM thread and WebSocket handlers.
@@ -43,7 +44,6 @@ pub struct ServerEventHandler {
     last_fb_update: Instant,
 }
 
-// Safety: all fields are Send-safe (Arc, broadcast::Sender, VmControlHandle).
 unsafe impl Send for ServerEventHandler {}
 
 impl ServerEventHandler {
@@ -63,9 +63,7 @@ impl EventHandler for ServerEventHandler {
             VmEvent::SerialOutput(data) => {
                 let _ = self.serial_tx.send(data);
             }
-            VmEvent::DebugOutput(_data) => {
-                // Could log to tracing if needed
-            }
+            VmEvent::DebugOutput(_) => {}
             VmEvent::Shutdown => {
                 tracing::info!("VM shutdown (handle={})", self.handle);
                 self.control.set_exit_reason("Shutdown".into());
@@ -89,7 +87,6 @@ impl EventHandler for ServerEventHandler {
     }
 
     fn on_tick(&mut self, handle: u64) {
-        // Update framebuffer at ~30fps (lower than GUI's 60fps)
         if self.last_fb_update.elapsed() >= Duration::from_millis(33) {
             update_framebuffer(handle, &self.fb);
             self.last_fb_update = Instant::now();
@@ -97,125 +94,186 @@ impl EventHandler for ServerEventHandler {
     }
 }
 
-/// Read the current framebuffer state from libcorevm into shared FrameBufferData.
-/// This is the same logic as vmmanager's update_framebuffer but without egui deps.
+/// Read the current framebuffer from libcorevm into shared FrameBufferData.
+/// Mirrors vmmanager's update_framebuffer but without egui/display deps.
 fn update_framebuffer(handle: u64, fb: &Arc<Mutex<FrameBufferData>>) {
     let mut fb_lock = match fb.lock() {
         Ok(l) => l,
         Err(_) => return,
     };
 
-    // Check VirtIO GPU first (if present and active)
+    // VirtIO GPU (if active)
     if corevm_has_virtio_gpu(handle) != 0 && corevm_virtio_gpu_scanout_active(handle) != 0 {
-        let mut ptr: *const u8 = std::ptr::null();
-        let mut w: u32 = 0;
-        let mut h: u32 = 0;
-        let mut stride: u32 = 0;
-        let mut format: u32 = 0;
-        corevm_virtio_gpu_get_framebuffer(handle, &mut ptr, &mut w, &mut h, &mut stride, &mut format);
-        if !ptr.is_null() && w > 0 && h > 0 {
-            let size = (h * stride) as usize;
-            let data = unsafe { std::slice::from_raw_parts(ptr, size) };
-            // Convert BGRA -> RGBA if needed (VirtIO GPU format 1 = B8G8R8X8)
-            let row_bytes = (w * 4) as usize;
-            fb_lock.pixels.resize(row_bytes * h as usize, 0);
-            for y in 0..h as usize {
-                let src_off = y * stride as usize;
-                let dst_off = y * row_bytes;
-                for x in 0..w as usize {
-                    let si = src_off + x * 4;
-                    let di = dst_off + x * 4;
-                    if si + 3 < data.len() && di + 3 < fb_lock.pixels.len() {
-                        if format == 1 { // BGRX
-                            fb_lock.pixels[di]     = data[si + 2]; // R
-                            fb_lock.pixels[di + 1] = data[si + 1]; // G
-                            fb_lock.pixels[di + 2] = data[si];     // B
-                            fb_lock.pixels[di + 3] = 255;
-                        } else { // RGBX
-                            fb_lock.pixels[di..di+4].copy_from_slice(&data[si..si+4]);
-                        }
-                    }
+        let mut gpu_w: u32 = 0;
+        let mut gpu_h: u32 = 0;
+        let mut gpu_bpp: u8 = 0;
+        if corevm_virtio_gpu_get_mode(handle, &mut gpu_w, &mut gpu_h, &mut gpu_bpp) == 0
+            && gpu_w > 0 && gpu_h > 0
+        {
+            let mut fb_ptr: *const u8 = std::ptr::null();
+            let mut fb_len: u32 = 0;
+            if corevm_virtio_gpu_get_framebuffer(handle, &mut fb_ptr, &mut fb_len) == 0
+                && !fb_ptr.is_null() && fb_len > 0
+            {
+                let fb_size = (gpu_w as usize) * (gpu_h as usize) * 4;
+                if (fb_len as usize) >= fb_size {
+                    let raw = unsafe { std::slice::from_raw_parts(fb_ptr, fb_size) };
+                    fb_lock.text_mode = false;
+                    fb_lock.width = gpu_w;
+                    fb_lock.height = gpu_h;
+                    fb_lock.pixels.resize(fb_size, 0);
+                    fb_lock.pixels.copy_from_slice(raw);
+                    fb_lock.dirty = true;
+                    return;
                 }
             }
-            fb_lock.width = w;
-            fb_lock.height = h;
-            fb_lock.text_mode = false;
-            fb_lock.dirty = true;
-            return;
         }
     }
 
-    // Fallback: VGA framebuffer
-    let mut ptr: *const u8 = std::ptr::null();
-    let mut w: u32 = 0;
-    let mut h: u32 = 0;
-    let mut bpp: u32 = 0;
-    let mut stride: u32 = 0;
-    corevm_vga_get_framebuffer(handle, &mut ptr, &mut w, &mut h, &mut bpp, &mut stride);
+    // VGA mode
+    let mut vga_w: u32 = 0;
+    let mut vga_h: u32 = 0;
+    let mut vga_bpp: u8 = 0;
+    let mode_ret = corevm_vga_get_mode(handle, &mut vga_w, &mut vga_h, &mut vga_bpp);
 
-    let mode = corevm_vga_get_mode(handle);
-    if mode == 3 || mode == 7 {
+    if mode_ret == 1 {
         // Text mode
         let mut text_ptr: *const u16 = std::ptr::null();
         let mut text_len: u32 = 0;
-        corevm_vga_get_text_buffer(handle, &mut text_ptr, &mut text_len);
-        if !text_ptr.is_null() && text_len > 0 {
-            let text_data = unsafe { std::slice::from_raw_parts(text_ptr, text_len as usize) };
-            fb_lock.text_buffer = text_data.to_vec();
+        let ret = corevm_vga_get_text_buffer(handle, &mut text_ptr, &mut text_len);
+        if ret == 0 && !text_ptr.is_null() && text_len > 0 {
+            let text_cells = unsafe { std::slice::from_raw_parts(text_ptr, text_len as usize) };
             fb_lock.text_mode = true;
-            fb_lock.width = 720;  // 80*9
-            fb_lock.height = 400; // 25*16
+            fb_lock.text_buffer = text_cells.to_vec();
+            let text_buf = fb_lock.text_buffer.clone();
+            render_text_to_rgba(&text_buf, &mut fb_lock.pixels);
+            fb_lock.width = 720;
+            fb_lock.height = 400;
             fb_lock.dirty = true;
         }
-        return;
+    } else if mode_ret == 0 && vga_w > 0 && vga_h > 0 && vga_bpp > 0 {
+        // Graphics mode — read VGA framebuffer via corevm_read_phys
+        let bytes_per_pixel = (vga_bpp as usize + 7) / 8;
+        let fb_size = vga_w as usize * vga_h as usize * bytes_per_pixel;
+        let vram_offset = corevm_vga_get_fb_offset(handle);
+        let read_addr = 0xE000_0000u64 + vram_offset;
+
+        let mut raw_pixels = vec![0u8; fb_size];
+        let phys_ret = corevm_read_phys(handle, read_addr, raw_pixels.as_mut_ptr(), fb_size as u32);
+
+        if phys_ret != 0 {
+            // Fallback: read internal SVGA buffer
+            let mut fb_ptr: *const u8 = std::ptr::null();
+            let mut fb_len: u32 = 0;
+            corevm_vga_get_framebuffer(handle, &mut fb_ptr, &mut fb_len);
+            if !fb_ptr.is_null() && fb_len > 0 {
+                let off = vram_offset as usize;
+                let avail = (fb_len as usize).saturating_sub(off);
+                let len = avail.min(fb_size);
+                if len > 0 {
+                    let raw = unsafe { std::slice::from_raw_parts(fb_ptr.add(off), len) };
+                    raw_pixels[..len].copy_from_slice(raw);
+                }
+            }
+        }
+
+        // Convert to RGBA32
+        let rgba_size = vga_w as usize * vga_h as usize * 4;
+        fb_lock.pixels.resize(rgba_size, 0);
+        bgr_to_rgba(&raw_pixels, &mut fb_lock.pixels, vga_w as usize, vga_h as usize, vga_bpp);
+        fb_lock.text_mode = false;
+        fb_lock.width = vga_w;
+        fb_lock.height = vga_h;
+        fb_lock.dirty = true;
     }
+}
 
-    // Graphics mode
-    if !ptr.is_null() && w > 0 && h > 0 && bpp >= 8 {
-        let fb_offset = corevm_vga_get_fb_offset(handle) as usize;
-        let row_bytes = (w * 4) as usize;
-        fb_lock.pixels.resize(row_bytes * h as usize, 0);
-
-        for y in 0..h as usize {
-            let src_off = fb_offset + y * stride as usize;
-            let dst_off = y * row_bytes;
-            for x in 0..w as usize {
-                let si = src_off + x * (bpp as usize / 8);
-                let di = dst_off + x * 4;
-                if di + 3 < fb_lock.pixels.len() {
-                    match bpp {
-                        32 => {
-                            // BGRA -> RGBA
-                            let src = unsafe { std::slice::from_raw_parts(ptr.add(si), 4) };
-                            fb_lock.pixels[di]     = src[2]; // R
-                            fb_lock.pixels[di + 1] = src[1]; // G
-                            fb_lock.pixels[di + 2] = src[0]; // B
-                            fb_lock.pixels[di + 3] = 255;
-                        }
-                        24 => {
-                            let src = unsafe { std::slice::from_raw_parts(ptr.add(si), 3) };
-                            fb_lock.pixels[di]     = src[2];
-                            fb_lock.pixels[di + 1] = src[1];
-                            fb_lock.pixels[di + 2] = src[0];
-                            fb_lock.pixels[di + 3] = 255;
-                        }
-                        16 => {
-                            let lo = unsafe { *ptr.add(si) } as u16;
-                            let hi = unsafe { *ptr.add(si + 1) } as u16;
-                            let pixel = lo | (hi << 8);
-                            fb_lock.pixels[di]     = ((pixel >> 11) as u8) << 3;
-                            fb_lock.pixels[di + 1] = (((pixel >> 5) & 0x3F) as u8) << 2;
-                            fb_lock.pixels[di + 2] = ((pixel & 0x1F) as u8) << 3;
-                            fb_lock.pixels[di + 3] = 255;
-                        }
-                        _ => {}
+/// Convert BGR/BGRA raw pixels to RGBA32.
+fn bgr_to_rgba(src: &[u8], dst: &mut [u8], w: usize, h: usize, bpp: u8) {
+    let bpp_bytes = (bpp as usize + 7) / 8;
+    for y in 0..h {
+        for x in 0..w {
+            let si = (y * w + x) * bpp_bytes;
+            let di = (y * w + x) * 4;
+            if si + bpp_bytes <= src.len() && di + 4 <= dst.len() {
+                match bpp {
+                    32 => {
+                        dst[di]     = src[si + 2]; // R
+                        dst[di + 1] = src[si + 1]; // G
+                        dst[di + 2] = src[si];     // B
+                        dst[di + 3] = 255;
+                    }
+                    24 => {
+                        dst[di]     = src[si + 2];
+                        dst[di + 1] = src[si + 1];
+                        dst[di + 2] = src[si];
+                        dst[di + 3] = 255;
+                    }
+                    16 => {
+                        let pixel = (src[si] as u16) | ((src[si + 1] as u16) << 8);
+                        dst[di]     = ((pixel >> 11) as u8) << 3;
+                        dst[di + 1] = (((pixel >> 5) & 0x3F) as u8) << 2;
+                        dst[di + 2] = ((pixel & 0x1F) as u8) << 3;
+                        dst[di + 3] = 255;
+                    }
+                    _ => {
+                        dst[di..di+4].fill(0);
                     }
                 }
             }
         }
-        fb_lock.width = w;
-        fb_lock.height = h;
-        fb_lock.text_mode = false;
-        fb_lock.dirty = true;
+    }
+}
+
+/// Render text buffer (80x25 cells) to RGBA pixels (720x400) using a built-in
+/// CP437 8x16 font. This is a simplified version — the full VGA font is in vmmanager.
+fn render_text_to_rgba(text: &[u16], pixels: &mut Vec<u8>) {
+    const COLS: usize = 80;
+    const ROWS: usize = 25;
+    const CHAR_W: usize = 9;
+    const CHAR_H: usize = 16;
+    const FB_W: usize = COLS * CHAR_W;
+    const FB_H: usize = ROWS * CHAR_H;
+
+    // VGA 16-color palette (standard CGA/EGA colors)
+    const PALETTE: [[u8; 3]; 16] = [
+        [0, 0, 0],       [0, 0, 170],     [0, 170, 0],     [0, 170, 170],
+        [170, 0, 0],     [170, 0, 170],   [170, 85, 0],    [170, 170, 170],
+        [85, 85, 85],    [85, 85, 255],   [85, 255, 85],   [85, 255, 255],
+        [255, 85, 85],   [255, 85, 255],  [255, 255, 85],  [255, 255, 255],
+    ];
+
+    pixels.resize(FB_W * FB_H * 4, 0);
+    // Simple fallback: fill cells with background color, no glyph rendering
+    // (full glyph rendering needs the CP437 font bitmap which is in vmmanager)
+    for row in 0..ROWS {
+        for col in 0..COLS {
+            let idx = row * COLS + col;
+            if idx >= text.len() { break; }
+            let cell = text[idx];
+            let bg = ((cell >> 12) & 0x07) as usize;
+            let fg_color = PALETTE[((cell >> 8) & 0x0F) as usize];
+            let bg_color = PALETTE[bg];
+            let ch = (cell & 0xFF) as u8;
+            for cy in 0..CHAR_H {
+                for cx in 0..CHAR_W {
+                    let px = col * CHAR_W + cx;
+                    let py = row * CHAR_H + cy;
+                    let di = (py * FB_W + px) * 4;
+                    if di + 3 < pixels.len() {
+                        // Without a font bitmap, show background only (or simple block for non-space)
+                        let color = if ch != 0 && ch != 0x20 && cx < 8 {
+                            &fg_color
+                        } else {
+                            &bg_color
+                        };
+                        pixels[di]     = color[0];
+                        pixels[di + 1] = color[1];
+                        pixels[di + 2] = color[2];
+                        pixels[di + 3] = 255;
+                    }
+                }
+            }
+        }
     }
 }

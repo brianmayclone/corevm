@@ -1,16 +1,13 @@
 //! VM management API endpoints.
 
-use axum::{extract::{Path, State}, http::StatusCode, Json};
+use axum::{extract::{Path, State}, http::StatusCode, response::IntoResponse, Json};
 use serde::Serialize;
 use std::sync::Arc;
 
 use crate::state::{AppState, VmInstance, VmState};
 use crate::auth::middleware::{AuthUser, AppError, require_operator};
+use crate::services::vm::VmService;
 use vmm_core::config::VmConfig;
-
-fn db_err(e: impl std::fmt::Display) -> AppError {
-    AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-}
 
 #[derive(Serialize)]
 pub struct VmSummary {
@@ -34,116 +31,59 @@ pub struct VmDetail {
 }
 
 /// GET /api/vms
-pub async fn list(
-    _auth: AuthUser,
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<VmSummary>>, AppError> {
+pub async fn list(_auth: AuthUser, State(state): State<Arc<AppState>>) -> Result<Json<Vec<VmSummary>>, AppError> {
     let db = state.db.lock().unwrap();
-    let mut stmt = db.prepare("SELECT id, name, config_json, owner_id FROM vms ORDER BY name")
-        .map_err(db_err)?;
-    let vms: Vec<VmSummary> = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, i64>(3)?,
-        ))
-    }).map_err(db_err)?
-    .filter_map(|r| r.ok())
-    .map(|(id, name, config_json, owner_id)| {
-        let config: VmConfig = serde_json::from_str(&config_json).unwrap_or_default();
-        let vm_state = state.vms.get(&id).map(|v| v.state).unwrap_or(VmState::Stopped);
+    let records = VmService::list(&db).map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let vms = records.into_iter().map(|r| {
+        let vm_state = state.vms.get(&r.id).map(|v| v.state).unwrap_or(VmState::Stopped);
         VmSummary {
-            id, name, state: vm_state,
-            guest_os: config.guest_os.to_config_str().to_string(),
-            ram_mb: config.ram_mb, cpu_cores: config.cpu_cores, owner_id,
+            id: r.id, name: r.name, state: vm_state,
+            guest_os: r.config.guest_os.to_config_str().to_string(),
+            ram_mb: r.config.ram_mb, cpu_cores: r.config.cpu_cores, owner_id: r.owner_id,
         }
     }).collect();
     Ok(Json(vms))
 }
 
 /// POST /api/vms
-pub async fn create(
-    auth: AuthUser,
-    State(state): State<Arc<AppState>>,
-    Json(mut config): Json<VmConfig>,
-) -> Result<Json<serde_json::Value>, AppError> {
+pub async fn create(auth: AuthUser, State(state): State<Arc<AppState>>, Json(mut config): Json<VmConfig>) -> Result<Json<serde_json::Value>, AppError> {
     require_operator(&auth)?;
     if config.uuid.is_empty() {
         config.uuid = uuid::Uuid::new_v4().to_string().replace("-", "");
     }
-    let config_json = serde_json::to_string(&config)
-        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e.to_string()))?;
-
     let db = state.db.lock().unwrap();
-    db.execute(
-        "INSERT INTO vms (id, name, config_json, owner_id) VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![&config.uuid, &config.name, &config_json, auth.id],
-    ).map_err(|e| {
-        if e.to_string().contains("UNIQUE") {
-            AppError(StatusCode::CONFLICT, "VM already exists".into())
-        } else { db_err(e) }
-    })?;
-
+    VmService::create(&db, &config, auth.id).map_err(|e| AppError(StatusCode::CONFLICT, e))?;
     state.vms.insert(config.uuid.clone(), VmInstance {
         id: config.uuid.clone(), config: config.clone(), state: VmState::Stopped,
         vm_handle: None, control: None, framebuffer: None, serial_tx: None, vm_thread: None,
     });
-
     Ok(Json(serde_json::json!({"id": config.uuid, "name": config.name})))
 }
 
 /// GET /api/vms/:id
-pub async fn get(
-    _auth: AuthUser,
-    State(state): State<Arc<AppState>>,
-    Path(vm_id): Path<String>,
-) -> Result<Json<VmDetail>, AppError> {
+pub async fn get(_auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_id): Path<String>) -> Result<Json<VmDetail>, AppError> {
     let db = state.db.lock().unwrap();
-    let (id, name, config_json, owner_id, created_at) = db.query_row(
-        "SELECT id, name, config_json, owner_id, created_at FROM vms WHERE id = ?1",
-        rusqlite::params![&vm_id],
-        |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?, row.get::<_,i64>(3)?, row.get::<_,String>(4)?)),
-    ).map_err(|_| AppError(StatusCode::NOT_FOUND, "VM not found".into()))?;
-
-    let config: VmConfig = serde_json::from_str(&config_json).unwrap_or_default();
-    let vm_state = state.vms.get(&id).map(|v| v.state).unwrap_or(VmState::Stopped);
-    Ok(Json(VmDetail { id, name, state: vm_state, config, owner_id, created_at }))
+    let r = VmService::get(&db, &vm_id).map_err(|e| AppError(StatusCode::NOT_FOUND, e))?;
+    let vm_state = state.vms.get(&r.id).map(|v| v.state).unwrap_or(VmState::Stopped);
+    Ok(Json(VmDetail { id: r.id, name: r.name, state: vm_state, config: r.config, owner_id: r.owner_id, created_at: r.created_at }))
 }
 
 /// PUT /api/vms/:id
-pub async fn update(
-    auth: AuthUser,
-    State(state): State<Arc<AppState>>,
-    Path(vm_id): Path<String>,
-    Json(config): Json<VmConfig>,
-) -> Result<Json<serde_json::Value>, AppError> {
+pub async fn update(auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_id): Path<String>, Json(config): Json<VmConfig>) -> Result<Json<serde_json::Value>, AppError> {
     require_operator(&auth)?;
     if let Some(vm) = state.vms.get(&vm_id) {
         if vm.state != VmState::Stopped {
             return Err(AppError(StatusCode::CONFLICT, "VM must be stopped to update config".into()));
         }
     }
-    let config_json = serde_json::to_string(&config)
-        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e.to_string()))?;
-
     let db = state.db.lock().unwrap();
-    let affected = db.execute(
-        "UPDATE vms SET name = ?1, config_json = ?2, updated_at = datetime('now') WHERE id = ?3",
-        rusqlite::params![&config.name, &config_json, &vm_id],
-    ).map_err(db_err)?;
-
-    if affected == 0 { return Err(AppError(StatusCode::NOT_FOUND, "VM not found".into())); }
+    VmService::update(&db, &vm_id, &config).map_err(|e| AppError(StatusCode::NOT_FOUND, e))?;
     if let Some(mut vm) = state.vms.get_mut(&vm_id) { vm.config = config; }
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
 /// DELETE /api/vms/:id
-pub async fn delete(
-    auth: AuthUser,
-    State(state): State<Arc<AppState>>,
-    Path(vm_id): Path<String>,
-) -> Result<Json<serde_json::Value>, AppError> {
+pub async fn delete(auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
     require_operator(&auth)?;
     if let Some(vm) = state.vms.get(&vm_id) {
         if vm.state != VmState::Stopped {
@@ -151,31 +91,21 @@ pub async fn delete(
         }
     }
     let db = state.db.lock().unwrap();
-    let affected = db.execute("DELETE FROM vms WHERE id = ?1", rusqlite::params![&vm_id]).map_err(db_err)?;
-    if affected == 0 { return Err(AppError(StatusCode::NOT_FOUND, "VM not found".into())); }
+    VmService::delete(&db, &vm_id).map_err(|e| AppError(StatusCode::NOT_FOUND, e))?;
     state.vms.remove(&vm_id);
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
-/// POST /api/vms/:id/start — start VM via libcorevm.
-pub async fn start(
-    auth: AuthUser,
-    State(state): State<Arc<AppState>>,
-    Path(vm_id): Path<String>,
-) -> Result<Json<serde_json::Value>, AppError> {
+/// POST /api/vms/:id/start
+pub async fn start(auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
     require_operator(&auth)?;
-
-    // Get config (must be stopped)
     let config = {
-        let vm = state.vms.get(&vm_id)
-            .ok_or_else(|| AppError(StatusCode::NOT_FOUND, "VM not found".into()))?;
+        let vm = state.vms.get(&vm_id).ok_or_else(|| AppError(StatusCode::NOT_FOUND, "VM not found".into()))?;
         if vm.state != VmState::Stopped {
             return Err(AppError(StatusCode::CONFLICT, "VM is not stopped".into()));
         }
         vm.config.clone()
     };
-
-    // Start VM on blocking thread (KVM_RUN is blocking)
     let bios_paths = state.config.vms.bios_search_paths.clone();
     let running = tokio::task::spawn_blocking(move || {
         crate::vm::manager::start_vm(&config, &bios_paths)
@@ -183,7 +113,6 @@ pub async fn start(
         .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, format!("Spawn error: {}", e)))?
         .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    // Update state
     if let Some(mut vm) = state.vms.get_mut(&vm_id) {
         vm.state = VmState::Running;
         vm.vm_handle = Some(running.handle);
@@ -192,62 +121,35 @@ pub async fn start(
         vm.serial_tx = Some(running.serial_tx);
         vm.vm_thread = Some(running.thread);
     }
-
     tracing::info!("VM {} started", vm_id);
     Ok(Json(serde_json::json!({"ok": true, "state": "running"})))
 }
 
-/// POST /api/vms/:id/stop — graceful ACPI shutdown.
-pub async fn stop(
-    auth: AuthUser,
-    State(state): State<Arc<AppState>>,
-    Path(vm_id): Path<String>,
-) -> Result<Json<serde_json::Value>, AppError> {
+/// POST /api/vms/:id/stop
+pub async fn stop(auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
     require_operator(&auth)?;
-    {
-        let vm = state.vms.get(&vm_id)
-            .ok_or_else(|| AppError(StatusCode::NOT_FOUND, "VM not found".into()))?;
-        if vm.state != VmState::Running {
-            return Err(AppError(StatusCode::CONFLICT, "VM is not running".into()));
-        }
-    }
-
-    // Request graceful stop via VmControlHandle
-    if let Some(mut vm) = state.vms.get_mut(&vm_id) {
-        vm.state = VmState::Stopping;
-        if let Some(ref control) = vm.control {
-            control.request_stop();
-        }
-    }
-
+    let vm = state.vms.get(&vm_id).ok_or_else(|| AppError(StatusCode::NOT_FOUND, "VM not found".into()))?;
+    if vm.state != VmState::Running { return Err(AppError(StatusCode::CONFLICT, "VM is not running".into())); }
+    if let Some(ref control) = vm.control { control.request_stop(); }
+    drop(vm);
+    if let Some(mut vm) = state.vms.get_mut(&vm_id) { vm.state = VmState::Stopping; }
     tracing::info!("VM {} stop requested", vm_id);
     Ok(Json(serde_json::json!({"ok": true, "state": "stopping"})))
 }
 
-/// POST /api/vms/:id/force-stop — hard kill.
-pub async fn force_stop(
-    auth: AuthUser,
-    State(state): State<Arc<AppState>>,
-    Path(vm_id): Path<String>,
-) -> Result<Json<serde_json::Value>, AppError> {
+/// POST /api/vms/:id/force-stop
+pub async fn force_stop(auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
     require_operator(&auth)?;
-    if !state.vms.contains_key(&vm_id) {
-        return Err(AppError(StatusCode::NOT_FOUND, "VM not found".into()));
-    }
-
+    if !state.vms.contains_key(&vm_id) { return Err(AppError(StatusCode::NOT_FOUND, "VM not found".into())); }
     if let Some(mut vm) = state.vms.get_mut(&vm_id) {
         if let Some(ref control) = vm.control {
             control.set_exit_reason("Force stopped".into());
             control.set_exited();
         }
         vm.state = VmState::Stopped;
-        vm.vm_handle = None;
-        vm.control = None;
-        vm.framebuffer = None;
-        vm.serial_tx = None;
-        vm.vm_thread = None;
+        vm.vm_handle = None; vm.control = None; vm.framebuffer = None;
+        vm.serial_tx = None; vm.vm_thread = None;
     }
-
     tracing::info!("VM {} force-stopped", vm_id);
     Ok(Json(serde_json::json!({"ok": true, "state": "stopped"})))
 }
