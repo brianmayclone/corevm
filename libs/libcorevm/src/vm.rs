@@ -304,8 +304,10 @@ impl Vm {
         self.debug_port_ptr = &*dbg as *const DebugPort as *mut DebugPort;
         self.io.register(0x402, 1, dbg);
 
-        // ACPI PM at PMBASE 0xB000 (matches FADT PM1a_EVT_BLK)
+        // ACPI PM at PMBASE 0xB000 (matches FADT PM1a_EVT_BLK in SeaBIOS ACPI tables)
         self.io.register(0xB000, 0x40, Box::new(AcpiPm::new()));
+        // ACPI PM also at 0x600 — OVMF/UEFI sets ICH9 LPC PMBASE to 0x600
+        self.io.register(0x600, 0x40, Box::new(AcpiPm::new()));
 
         // APM (0xB2-0xB3)
         self.io.register(0xB2, 2, Box::new(ApmControl::new()));
@@ -359,6 +361,19 @@ impl Vm {
                 bridge.config_space[0x69] = 0x80; // PIRQF disabled
                 bridge.config_space[0x6A] = 0x80; // PIRQG disabled
                 bridge.config_space[0x6B] = 0x80; // PIRQH disabled
+
+                // PMBASE (0x40): ACPI PM I/O base address = 0x600 (ICH9 default)
+                bridge.config_space[0x40] = 0x01; // bit 0 = I/O space, base = 0x600
+                bridge.config_space[0x41] = 0x06;
+
+                // ACPI_CNTL (0x44): ACPI enable bit
+                bridge.config_space[0x44] = 0x80; // bit 7 = ACPI enabled
+
+                // RCBA (0xF0): Root Complex Base Address = 0xFED1C000 (ICH9 standard)
+                bridge.config_space[0xF0] = 0x01; // bit 0 = enable
+                bridge.config_space[0xF1] = 0xC0;
+                bridge.config_space[0xF2] = 0xD1;
+                bridge.config_space[0xF3] = 0xFE;
             }
             pci_bus.add_device(bridge);
         }
@@ -392,6 +407,10 @@ impl Vm {
 
         // PCI MMCONFIG MMIO (0xB0000000, 256MB)
         self.memory.add_mmio(0xB000_0000, 0x1000_0000, Box::new(PciMmcfgHandler::new(pci_bus_ptr)));
+
+        // ICH9 RCRB (Root Complex Register Block) at 0xFED1C000 (16KB)
+        // OVMF reads this via RCBA in LPC config space. Return zeros for unimplemented registers.
+        self.memory.add_mmio(0xFED1_C000, 0x4000, Box::new(RcrbMmioHandler));
 
         // IDE (0x1F0-0x1F7, 0x3F6, 0x170-0x177, 0x376)
         let ide = Box::new(Ide::new());
@@ -1402,6 +1421,20 @@ impl crate::io::IoHandler for Port92 {
         // (handled by the VM loop checking cf9_reset_pending)
         // Bit 1: A20 Gate — store it (KVM handles A20 internally)
         self.value = v & 0x02; // only store A20 bit, clear reset bit
+        Ok(())
+    }
+}
+
+/// ICH9 Root Complex Register Block (RCRB) MMIO handler.
+/// Returns zeros for all reads — stub for OVMF compatibility.
+struct RcrbMmioHandler;
+unsafe impl Send for RcrbMmioHandler {}
+
+impl crate::memory::mmio::MmioHandler for RcrbMmioHandler {
+    fn read(&mut self, _offset: u64, _size: u8) -> crate::error::Result<u64> {
+        Ok(0)
+    }
+    fn write(&mut self, _offset: u64, _size: u8, _val: u64) -> crate::error::Result<()> {
         Ok(())
     }
 }

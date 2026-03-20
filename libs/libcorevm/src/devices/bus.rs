@@ -448,6 +448,15 @@ impl PciBus {
             0xFFFFFFFF
         };
 
+        #[cfg(feature = "std")]
+        {
+            static PCI_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = PCI_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 200 {
+                eprintln!("[pci-rd] bus={} dev={} fn={} reg=0x{:02X} → 0x{:08X}", bus, device, function, register, result);
+            }
+        }
+
         result
     }
 
@@ -461,6 +470,17 @@ impl PciBus {
         let device_num = ((self.config_address >> 11) & 0x1F) as u8;
         let function = ((self.config_address >> 8) & 0x07) as u8;
         let register = (self.config_address & 0xFC) as usize;
+
+        #[cfg(feature = "std")]
+        {
+            static PCI_WR_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if register >= 0x10 && register <= 0x24 {
+                let n = PCI_WR_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n < 50 {
+                    eprintln!("[pci] write bus={} dev={} fn={} reg=0x{:02X} val=0x{:08X}", bus, device_num, function, register, val);
+                }
+            }
+        }
 
         if let Some(dev) = self.find_device(bus, device_num, function) {
             // Handle BAR writes: when the guest writes 0xFFFFFFFF to a BAR,
@@ -669,11 +689,29 @@ impl MmioHandler for PciMmcfgHandler {
         let (bus, device, function, register) = Self::decode_offset(offset);
         let pci_bus = unsafe { &mut *self.bus_ptr };
         let val = pci_bus.mmcfg_read(bus, device, function, register, size);
+        #[cfg(feature = "std")]
+        {
+            static MMCFG_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if val != 0xFFFFFFFF && val != 0xFF && val != 0xFFFF {
+                let n = MMCFG_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n < 100 {
+                    eprintln!("[mmcfg-rd] bus={} dev={} fn={} reg=0x{:03X} size={} → 0x{:X}", bus, device, function, register, size, val);
+                }
+            }
+        }
         Ok(val)
     }
 
     fn write(&mut self, offset: u64, size: u8, val: u64) -> Result<()> {
         let (bus, device, function, register) = Self::decode_offset(offset);
+        #[cfg(feature = "std")]
+        {
+            static MMCFG_WR_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = MMCFG_WR_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 100 {
+                eprintln!("[mmcfg-wr] bus={} dev={} fn={} reg=0x{:03X} size={} val=0x{:X}", bus, device, function, register, size, val);
+            }
+        }
         let pci_bus = unsafe { &mut *self.bus_ptr };
         pci_bus.mmcfg_write(bus, device, function, register, size, val);
         Ok(())

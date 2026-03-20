@@ -281,12 +281,21 @@ fn main() {
         }
     }
 
-    // Load BIOS — use vmmanager asset paths as extra search dirs
+    // Load firmware — use vmmanager asset paths as extra search dirs
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let extra_paths = vec![manifest_dir.join("../vmmanager/assets/bios")];
-    if let Err(e) = setup::load_seabios(handle, &extra_paths) {
-        eprintln!("[vmctl] ERROR: {}", e);
-        std::process::exit(1);
+    let is_uefi = args.bios == "uefi";
+    if is_uefi {
+        let vars_path = std::path::PathBuf::from("/tmp/corevm_ovmf_debug.fd");
+        if let Err(e) = setup::load_ovmf(handle, &extra_paths, &vars_path) {
+            eprintln!("[vmctl] ERROR: {}", e);
+            std::process::exit(1);
+        }
+    } else {
+        if let Err(e) = setup::load_seabios(handle, &extra_paths) {
+            eprintln!("[vmctl] ERROR: {}", e);
+            std::process::exit(1);
+        }
     }
 
     // Direct kernel boot via fw_cfg (like QEMU -kernel/-initrd/-append)
@@ -360,9 +369,16 @@ fn main() {
         }
     }
 
-    if let Err(e) = setup::set_initial_cpu_state(handle) {
-        eprintln!("[vmctl] ERROR: {}", e);
-        std::process::exit(1);
+    if is_uefi {
+        if let Err(e) = setup::set_initial_cpu_state_uefi(handle) {
+            eprintln!("[vmctl] ERROR: {}", e);
+            std::process::exit(1);
+        }
+    } else {
+        if let Err(e) = setup::set_initial_cpu_state(handle) {
+            eprintln!("[vmctl] ERROR: {}", e);
+            std::process::exit(1);
+        }
     }
 
     // Write COM1 base address into BDA so SeaBIOS finds the serial port.
@@ -886,6 +902,24 @@ fn main() {
             println!("{}", line);
         }
         println!("--- END SCREEN ---\n");
+
+        // Dump VBE / VGA mode state
+        println!("--- VBE / VGA STATE ---");
+        let mut w = 0u32; let mut h = 0u32; let mut bpp = 0u8;
+        let mode_ret = corevm_vga_get_mode(handle, &mut w, &mut h, &mut bpp);
+        println!("VGA mode: {}x{}x{} (mode_ret={})", w, h, bpp, mode_ret);
+        let lfb_addr = corevm_vga_get_lfb_addr(handle);
+        let fb_off = corevm_vga_get_fb_offset(handle);
+        println!("LFB addr: 0x{:X}  FB offset: 0x{:X}", lfb_addr, fb_off);
+
+        // Check framebuffer content at various addresses
+        for &addr in &[0xE000_0000u64, 0xFD00_0000, 0xA0000, 0xB8000] {
+            let mut buf = [0u8; 256];
+            corevm_read_phys(handle, addr, buf.as_mut_ptr(), 256);
+            let nonzero = buf.iter().filter(|&&b| b != 0).count();
+            println!("Memory at 0x{:08X}: {} non-zero bytes in first 256", addr, nonzero);
+        }
+        println!("--- END VBE STATE ---\n");
     }
 
     if args.show_regs {

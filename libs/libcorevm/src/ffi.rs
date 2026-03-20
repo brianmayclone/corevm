@@ -2007,6 +2007,14 @@ impl crate::memory::mmio::MmioHandler for PciMmioRouter {
         if vga_bar2 != 0 && abs_addr >= vga_bar2 && abs_addr < vga_bar2 + 0x1000 {
             let svga = unsafe { &mut *self.svga };
             let bar2_off = abs_addr - vga_bar2;
+            #[cfg(feature = "std")]
+            {
+                static DISPI_RD_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let n = DISPI_RD_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n < 30 {
+                    eprintln!("[vga-bar2] MMIO read off=0x{:X} size={} (bar2=0x{:X})", bar2_off, size, vga_bar2);
+                }
+            }
             return svga_dispi_mmio_read(svga, bar2_off, size);
         }
 
@@ -2074,6 +2082,14 @@ impl crate::memory::mmio::MmioHandler for PciMmioRouter {
         if vga_bar2 != 0 && abs_addr >= vga_bar2 && abs_addr < vga_bar2 + 0x1000 {
             let svga = unsafe { &mut *self.svga };
             let bar2_off = abs_addr - vga_bar2;
+            #[cfg(feature = "std")]
+            {
+                static DISPI_WR_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let n = DISPI_WR_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n < 30 {
+                    eprintln!("[vga-bar2] MMIO write off=0x{:X} size={} val=0x{:X} (bar2=0x{:X})", bar2_off, size, val, vga_bar2);
+                }
+            }
             return svga_dispi_mmio_write(svga, bar2_off, size, val);
         }
 

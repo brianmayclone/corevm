@@ -102,6 +102,15 @@ impl AcpiPm {
 
 impl IoHandler for AcpiPm {
     fn read(&mut self, port: u16, size: u8) -> Result<u32> {
+        #[cfg(feature = "std")]
+        {
+            static ACPI_RD_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = ACPI_RD_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 30 {
+                let tmr = self.timer_value();
+                eprintln!("[acpi-pm] read port=0x{:04X} size={} tmr=0x{:08X} ({})", port, size, tmr, tmr);
+            }
+        }
         let offset = port & 0x3F;
         let val = match offset {
             // PM1a Status Register.
