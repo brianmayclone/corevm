@@ -45,6 +45,8 @@ pub struct AcpiPm {
     /// Wall-clock epoch for std platforms (used in WHP mode).
     #[cfg(feature = "std")]
     epoch: std::time::Instant,
+    /// Set when the guest writes SLP_EN with SLP_TYP=S5 (soft-off/shutdown).
+    pub shutdown_requested: bool,
 }
 
 impl AcpiPm {
@@ -58,6 +60,7 @@ impl AcpiPm {
             instruction_credit: 0,
             #[cfg(feature = "std")]
             epoch: std::time::Instant::now(),
+            shutdown_requested: false,
         }
     }
 
@@ -147,8 +150,12 @@ impl IoHandler for AcpiPm {
             // PM1a Control: writable (bit 13 SLP_EN triggers sleep).
             0x04 => {
                 self.pm1_control = val as u16;
-                // SLP_EN (bit 13): guest requested sleep/shutdown.
-                // For now, just acknowledge it — the VMD can poll for this.
+                // SLP_EN (bit 13) + SLP_TYP (bits 12:10) = S5 → shutdown.
+                let slp_en = (val >> 13) & 1;
+                let slp_typ = (val >> 10) & 0x7;
+                if slp_en == 1 && slp_typ == 5 {
+                    self.shutdown_requested = true;
+                }
             }
             // PM Timer is read-only — writes are silently ignored.
             0x08 => {}

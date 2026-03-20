@@ -102,6 +102,14 @@ fn ap_loop(handle: u64, cpu_id: u32, control: &RuntimeControl) {
                     eprintln!("[smp] AP{} HLT #{} at iter={} ({}ms since start)",
                         cpu_id, exit_counts[7], iterations, start.elapsed().as_millis());
                 }
+
+                // Deliver AHCI IRQ immediately after MMIO exits from APs.
+                // Without this, AHCI completion IRQs from AP-submitted
+                // disk commands are delayed until the next BSP poll cycle
+                // (~1ms), causing severe disk I/O latency with SMP.
+                if exit.reason == 2 || exit.reason == 3 {
+                    corevm_ahci_poll_irq(handle);
+                }
             }
             loop_core::ExitAction::Shutdown
             | loop_core::ExitAction::Error

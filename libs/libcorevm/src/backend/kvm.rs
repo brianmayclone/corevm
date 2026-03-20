@@ -891,13 +891,10 @@ impl KvmBackend {
                 }
 
                 // Leaf 4 (Deterministic Cache Parameters, Intel):
-                // EAX[31:26] = max addressable IDs for logical CPUs sharing cache
-                // EAX[25:14] = max addressable IDs for cores in physical package
-                // Must reflect VM topology, not host topology.
-                if e.function == 4 {
-                    eax = (eax & 0x03FF_FFFF) | (((max_cpus - 1) & 0x3F) << 26);
-                    eax = (eax & 0xFC00_3FFF) | (((max_cpus - 1) & 0xFFF) << 14);
-                }
+                // Pass through host values. Modifying EAX[31:26] and EAX[25:14]
+                // to reflect VM topology can break IOAPIC/LAPIC destination routing
+                // when Windows derives APIC IDs from these fields.
+                // KVM already provides correct per-vCPU APIC IDs.
 
                 // Leaf 0x6 (Thermal/Power Management):
                 // Clear hardware P-state/frequency features that don't apply
@@ -928,6 +925,8 @@ impl KvmBackend {
                 // Synthesize VM-specific topology instead of passing through
                 // host values. Our topology: 1 thread per core, max_cpus cores.
                 // EDX = x2APIC ID (set per-vCPU in create_vcpu).
+                // Windows BSODs with MULTIPROCESSOR_CONFIGURATION_NOT_SUPPORTED
+                // if leaf 0xB reports host topology that doesn't match VM vCPU count.
                 if e.function == 0xB {
                     let subleaf = e.index;
                     if subleaf == 0 {
@@ -937,7 +936,6 @@ impl KvmBackend {
                         ecx = (1 << 8) | 0; // level type = SMT (1), level number = 0
                     } else if subleaf == 1 {
                         // Core level: max_cpus cores per package
-                        // bits_to_shift: smallest power of 2 >= max_cpus
                         let mut shift = 0u32;
                         while (1u32 << shift) < max_cpus { shift += 1; }
                         eax = shift;
@@ -963,24 +961,10 @@ impl KvmBackend {
                 }
 
                 // Leaf 0x80000008 (AMD Processor Capacity):
-                // ECX[7:0] = NC = number of physical cores - 1
-                // ECX[15:12] = ApicIdSize = bits needed for APIC IDs
-                // EBX: clear CPPC/RDPRU bits that don't work in a VM.
+                // Pass through host values. KVM handles APIC ID assignment.
+                // Modifying NC/ApicIdSize can break LAPIC destination matching.
                 if e.function == 0x8000_0008 {
-                    let nc = max_cpus - 1;
-                    let mut apic_id_size = 0u32;
-                    while (1u32 << apic_id_size) <= nc { apic_id_size += 1; }
-                    ebx = 0;
-                    ecx = (ecx & 0xFFFF_0000) | ((apic_id_size & 0xF) << 12) | (nc & 0xFF);
-                }
-
-                // AMD Extended APIC ID (leaf 0x8000001E).
-                // EAX = Extended APIC ID. Must match the LAPIC ID.
-                // EBX[7:0] = Compute Unit ID, EBX[15:8] = threads per unit - 1
-                // Set per-vCPU in create_vcpu; clear here so the base is 0.
-                if e.function == 0x8000001E {
-                    eax = 0; // set per-vCPU in create_vcpu
-                    ebx = 0; // 1 thread per core (threads_per_unit - 1 = 0)
+                    ebx = 0; // clear CPPC/RDPRU bits that don't work in a VM
                 }
 
                 // Keep KVM hypervisor leaves (0x40000000+) — SeaBIOS uses
@@ -1003,24 +987,20 @@ impl KvmBackend {
             }
 
             // On AMD, KVM may not provide leaf 0xB at all. Synthesize it
-            // so Windows can enumerate the topology (Windows uses leaf 0xB
-            // even on AMD-branded guests for extended topology discovery).
+            // so Windows can enumerate the topology. Without it, Windows
+            // BSODs with MULTIPROCESSOR_CONFIGURATION_NOT_SUPPORTED.
             if is_amd && !cpuid_entries.iter().any(|e| e.function == 0xB) && max_cpus > 1 {
-                // KVM_CPUID_FLAG_SIGNIFCANT_INDEX = 1 (subleaf matters)
-                let flags = 1u32;
+                let flags = 1u32; // KVM_CPUID_FLAG_SIGNIFCANT_INDEX
                 let mut shift = 0u32;
                 while (1u32 << shift) < max_cpus { shift += 1; }
-                // Subleaf 0: SMT level
                 cpuid_entries.push(CpuidEntry {
                     function: 0xB, index: 0, flags,
                     eax: 0, ebx: 1, ecx: (1 << 8) | 0, edx: 0,
                 });
-                // Subleaf 1: Core level
                 cpuid_entries.push(CpuidEntry {
                     function: 0xB, index: 1, flags,
                     eax: shift, ebx: max_cpus, ecx: (2 << 8) | 1, edx: 0,
                 });
-                // Subleaf 2: terminator
                 cpuid_entries.push(CpuidEntry {
                     function: 0xB, index: 2, flags,
                     eax: 0, ebx: 0, ecx: 2, edx: 0,
@@ -1291,7 +1271,7 @@ impl KvmBackend {
     /// Inject an MSI interrupt into the guest via KVM_SIGNAL_MSI.
     /// `address`: MSI address (written by guest to MSI capability register)
     /// `data`: MSI data (written by guest to MSI capability register)
-    pub fn signal_msi(&self, address: u64, data: u32) -> Result<(), VmError> {
+    pub fn signal_msi(&self, address: u64, data: u32) -> Result<i64, VmError> {
         let msi = KvmMsi {
             address_lo: address as u32,
             address_hi: (address >> 32) as u32,
@@ -1306,7 +1286,8 @@ impl KvmBackend {
         if ret < 0 {
             return Err(VmError::BackendError(ret as i32));
         }
-        Ok(())
+        // ret=1: delivered to a LAPIC, ret=0: no matching LAPIC found
+        Ok(ret)
     }
 }
 

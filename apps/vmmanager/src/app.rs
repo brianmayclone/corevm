@@ -5,7 +5,7 @@ use std::thread::JoinHandle;
 use eframe::egui;
 
 use crate::config::VmConfig;
-use crate::ui::dialogs::{AboutDialog, AddDiskDialog, AddDiskMode, CreateDiskDialog, CreateVmDialog, DiskPoolDialog, SnapshotsDialog};
+use crate::ui::dialogs::{AboutDialog, AddDiskDialog, AddDiskMode, CopyVmDialog, CreateDiskDialog, CreateVmDialog, DiskPoolDialog, SnapshotsDialog};
 use crate::ui::components::display::DisplayWidget;
 use crate::ui::components::filebrowser::FileBrowserDialog;
 use crate::engine::input;
@@ -17,7 +17,7 @@ use crate::ui::components::statusbar::{self, VmMetrics};
 use crate::ui::theme;
 use crate::ui::components::toolbar::{self, ToolbarAction};
 use crate::engine::vm;
-use crate::engine::vm::VmControl;
+use libcorevm::runtime::VmControlHandle;
 use libcorevm::ffi::{corevm_ps2_key_press, corevm_ps2_key_release};
 
 /// Shared framebuffer data between VM thread and UI
@@ -79,7 +79,7 @@ pub struct VmEntry {
     pub config: VmConfig,
     pub state: VmState,
     pub vm_handle: Option<u64>,
-    pub control: Option<Arc<VmControl>>,
+    pub control: Option<VmControlHandle>,
     pub framebuffer: Arc<Mutex<FrameBufferData>>,
     pub vm_thread: Option<JoinHandle<()>>,
     pub cpu_mode: u32,  // 0=real, 1=protected, 2=long
@@ -606,6 +606,7 @@ pub struct CoreVmApp {
     pub disk_pool_dialog: Option<DiskPoolDialog>,
     pub about_dialog: Option<AboutDialog>,
     pub snapshots_dialog: Option<SnapshotsDialog>,
+    pub copy_vm_dialog: Option<CopyVmDialog>,
     pub diagnostics_window: Option<DiagnosticsWindow>,
     pub error_message: Option<String>,
     pub info_message: Option<String>,
@@ -662,6 +663,7 @@ impl CoreVmApp {
             disk_pool_dialog: None,
             about_dialog: None,
             snapshots_dialog: None,
+            copy_vm_dialog: None,
             diagnostics_window: None,
             error_message: None,
             info_message: None,
@@ -775,6 +777,11 @@ impl CoreVmApp {
                     // Mark for mouse release (actual release in update() where ctx is available)
                     if self.display.mouse_captured {
                         self.display.mouse_captured = false;
+                        self.display.capture_time = None;
+                        #[cfg(target_os = "linux")]
+                        if let Some(ref mut evdev) = self.display.evdev_input {
+                            evdev.stop();
+                        }
                         self.display.needs_cursor_restore = true;
                     }
                 }
@@ -916,7 +923,7 @@ impl CoreVmApp {
         let state_label = match vm.state {
             VmState::Running => "Running",
             VmState::Paused => "Paused",
-            VmState::Stopped => return None,
+            VmState::Stopped | VmState::Stopping => return None,
         };
 
         let activity = vm.device_activity.lock().ok();
@@ -1089,77 +1096,66 @@ impl eframe::App for CoreVmApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
         }
 
-        // ── Capture mode: evdev handles all input, consume egui events early ──
-        // When captured on Linux with evdev, strip ALL egui key/text events immediately
-        // so they never reach any handler (prevents double key sends since evdev and
-        // X11/Wayland both deliver the same physical keystrokes).
+        // ── Capture mode: evdev provides additional input, egui is always available ──
+        // evdev gives reliable deltas and key-repeat, but we never strip egui events
+        // since evdev may fail to deliver events on some systems.  Both sources feed
+        // the VM; the evdev keyboard handler runs first and if it delivered events
+        // this frame we skip the egui handler to avoid double sends.
         #[cfg(target_os = "linux")]
-        let evdev_kbd_active = self.preferences.evdev_capture
+        let evdev_kbd_available = self.preferences.evdev_capture
             && self.display.mouse_captured
             && self.display.evdev_input.as_ref().map_or(false, |e| e.is_running() && e.has_keyboard());
         #[cfg(not(target_os = "linux"))]
-        let evdev_kbd_active = false;
+        let evdev_kbd_available = false;
 
-        if evdev_kbd_active {
-            // Consume all egui key/text events — evdev is the sole keyboard source
-            ctx.input_mut(|i| {
-                i.events.retain(|e| !matches!(e, egui::Event::Key { .. } | egui::Event::Text(_)));
-            });
-        }
-
-        // Check for mouse release shortcuts BEFORE keyboard handling consumes events.
-        // Note: when evdev_kbd_active, egui key events are already stripped above,
-        // but release detection also works via check_mouse_release in display.show()
-        // which checks evdev key events directly. We keep the modifier-state check
-        // as a fallback (modifiers.ctrl/alt still work even without events).
+        // Check for mouse release shortcuts (Ctrl+Alt+G/F/Esc).
+        // Works through both evdev (in display.show → check_mouse_release) and
+        // egui events/modifiers (here).
         if self.display.mouse_captured {
             let mod_release = ctx.input(|i| {
                 i.modifiers.ctrl && i.modifiers.alt
                     && (i.key_pressed(egui::Key::G) || i.key_pressed(egui::Key::F) || i.key_pressed(egui::Key::Escape))
             });
-            let event_release = if !evdev_kbd_active {
-                ctx.input(|i| {
-                    i.events.iter().any(|e| matches!(e,
-                        egui::Event::Key { key: egui::Key::G, pressed: true, modifiers, .. }
-                            if modifiers.ctrl && modifiers.alt
-                    ) || matches!(e,
-                        egui::Event::Key { key: egui::Key::F, pressed: true, modifiers, .. }
-                            if modifiers.ctrl && modifiers.alt
-                    ) || matches!(e,
-                        egui::Event::Key { key: egui::Key::Escape, pressed: true, modifiers, .. }
-                            if modifiers.ctrl && modifiers.alt
-                    ))
-                })
-            } else {
-                false
-            };
+            let event_release = ctx.input(|i| {
+                i.events.iter().any(|e| matches!(e,
+                    egui::Event::Key { key: egui::Key::G, pressed: true, modifiers, .. }
+                        if modifiers.ctrl && modifiers.alt
+                ) || matches!(e,
+                    egui::Event::Key { key: egui::Key::F, pressed: true, modifiers, .. }
+                        if modifiers.ctrl && modifiers.alt
+                ) || matches!(e,
+                    egui::Event::Key { key: egui::Key::Escape, pressed: true, modifiers, .. }
+                        if modifiers.ctrl && modifiers.alt
+                ))
+            });
             if mod_release || event_release {
                 self.display.release_mouse(ctx);
-                if !evdev_kbd_active {
-                    ctx.input_mut(|i| {
-                        i.events.retain(|e| !matches!(e,
-                            egui::Event::Key { key: egui::Key::G | egui::Key::F | egui::Key::Escape, pressed: true, modifiers, .. }
-                                if modifiers.ctrl && modifiers.alt
-                        ));
-                    });
-                }
+                ctx.input_mut(|i| {
+                    i.events.retain(|e| !matches!(e,
+                        egui::Event::Key { key: egui::Key::G | egui::Key::F | egui::Key::Escape, pressed: true, modifiers, .. }
+                            if modifiers.ctrl && modifiers.alt
+                    ));
+                });
             }
         }
 
         // Intercept keyboard events BEFORE egui widgets consume Enter/Tab/etc.
+        // Try evdev first (better key-repeat); fall back to egui if evdev had nothing.
         if self.display_focused || self.display.mouse_captured {
             if let Some(uuid) = &self.selected_vm {
                 if let Some(vm) = self.vms.iter().find(|v| &v.config.uuid == uuid) {
                     if let Some(handle) = vm.vm_handle {
-                        if evdev_kbd_active {
-                            // evdev keyboard: send raw key events with proper repeat
+                        let mut evdev_had_events = false;
+                        if evdev_kbd_available {
                             #[cfg(target_os = "linux")]
                             if let Some(label) = self.display.handle_evdev_keyboard(handle) {
                                 self.last_key_label = Some(label);
                                 self.last_key_time = std::time::Instant::now();
+                                evdev_had_events = true;
                             }
-                        } else {
-                            // Fallback: egui-based keyboard input
+                        }
+                        // Fallback: egui-based keyboard input (always available)
+                        if !evdev_had_events {
                             if let Some(label) = input::handle_keyboard_events(ctx, handle, true) {
                                 self.last_key_label = Some(label);
                                 self.last_key_time = std::time::Instant::now();
@@ -1412,6 +1408,11 @@ impl eframe::App for CoreVmApp {
                     self.selected_vm = Some(uuid.clone());
                     if let Some(entry) = self.find_vm(&uuid) {
                         self.settings_dialog = Some(SettingsDialog::new(&entry.config));
+                    }
+                }
+                SidebarAction::CopyVm(uuid) => {
+                    if let Some(vm) = self.find_vm(&uuid) {
+                        self.copy_vm_dialog = Some(CopyVmDialog::new(&vm.config));
                     }
                 }
                 SidebarAction::DeleteVm(uuid) => {
@@ -1692,6 +1693,21 @@ impl eframe::App for CoreVmApp {
             }
         }
 
+        // Copy VM dialog
+        if let Some(ref mut dialog) = self.copy_vm_dialog {
+            if !dialog.show(ctx) {
+                if let Some(result) = dialog.result.take() {
+                    let uuid = result.config.uuid.clone();
+                    let _ = result.config.save(&platform::config_dir());
+                    self.layout.add_vm(uuid.clone());
+                    let _ = self.layout.save(&platform::layout_dir().join("layout.conf"));
+                    self.vms.push(VmEntry::new(result.config));
+                    self.selected_vm = Some(uuid);
+                }
+                self.copy_vm_dialog = None;
+            }
+        }
+
         // Diagnostics window — shown in a separate OS-level window (viewport)
         if let Some(ref mut diag_win) = self.diagnostics_window {
             if diag_win.open {
@@ -1787,24 +1803,31 @@ impl eframe::App for CoreVmApp {
             }
         }
 
+        // Poll stopping VMs: join thread once it has finished (non-blocking).
+        for vm in &mut self.vms {
+            if vm.state == VmState::Stopping {
+                vm::finish_stop_if_ready(vm);
+            }
+        }
+
         // Check if any running VM thread has exited (or requested reboot)
         let mut reboot_uuid: Option<String> = None;
         let mut vm_exited = false;
         for vm in &mut self.vms {
             if vm.state == VmState::Running {
                 if let Some(ref ctl) = vm.control {
-                    if ctl.exited.load(std::sync::atomic::Ordering::Relaxed) {
-                        let wants_reboot = ctl.reboot_requested.load(std::sync::atomic::Ordering::Relaxed);
+                    if ctl.is_exited() {
+                        let wants_reboot = ctl.reboot_requested();
                         if wants_reboot {
-                            // Guest requested reboot — stop and restart
-                            vm.state = VmState::Stopped;
+                            // Guest requested reboot — thread already exited, join is safe.
                             vm::stop_vm(vm);
+                            vm::finish_stop_if_ready(vm);
                             reboot_uuid = Some(vm.config.uuid.clone());
                         } else {
-                            let reason = ctl.exit_reason.lock()
-                                .map(|r| r.clone())
-                                .unwrap_or_default();
-                            vm.state = VmState::Stopped;
+                            let reason = ctl.exit_reason();
+                            // Thread already exited, clean up synchronously.
+                            vm::stop_vm(vm);
+                            vm::finish_stop_if_ready(vm);
                             vm_exited = true;
                             self.error_message = Some(format!(
                                 "VM '{}' stopped ({})",
@@ -1827,11 +1850,16 @@ impl eframe::App for CoreVmApp {
         // Release mouse capture when VM exits unexpectedly
         if vm_exited && self.display.mouse_captured {
             self.display.mouse_captured = false;
+            self.display.capture_time = None;
+            #[cfg(target_os = "linux")]
+            if let Some(ref mut evdev) = self.display.evdev_input {
+                evdev.stop();
+            }
             self.display.needs_cursor_restore = true;
         }
 
-        // Repaint when VM running
-        if self.vms.iter().any(|v| v.state == VmState::Running) {
+        // Repaint when VM running or stopping (need to poll thread completion)
+        if self.vms.iter().any(|v| v.state == VmState::Running || v.state == VmState::Stopping) {
             ctx.request_repaint();
         }
     }
@@ -1904,6 +1932,7 @@ fn render_summary(ui: &mut egui::Ui, vm: &VmEntry, os_icon: Option<egui::Texture
         let (state_label, state_color) = match vm.state {
             VmState::Running => ("Running", theme::success_green()),
             VmState::Paused => ("Paused", theme::warning_orange()),
+            VmState::Stopping => ("Stopping\u{2026}", theme::warning_orange()),
             VmState::Stopped => ("Powered Off", theme::text_tertiary()),
         };
         painter.text(

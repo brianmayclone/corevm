@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -18,7 +18,7 @@ use libcorevm::ffi::{
     corevm_get_vcpu_regs,
     corevm_get_vcpu_sregs,
     corevm_vga_get_framebuffer, corevm_vga_get_text_buffer, corevm_vga_get_mode, corevm_vga_get_fb_offset,
-    corevm_cancel_vcpu, corevm_set_cpu_count,
+    corevm_set_cpu_count,
     corevm_ahci_flush_caches,
     corevm_setup_net,
     corevm_setup_virtio_net,
@@ -42,22 +42,14 @@ pub fn get_last_error_public() -> Option<String> {
     setup::get_last_error()
 }
 
-/// Shared control flags for the VM thread
-pub struct VmControl {
-    pub stop: AtomicBool,
-    pub pause: AtomicBool,
-    pub exited: AtomicBool,
-    pub exit_reason: Mutex<String>,
-    /// Set when the guest requests a reboot (soft reset).
-    pub reboot_requested: AtomicBool,
-}
+use libcorevm::runtime::VmControlHandle;
 
 /// EventHandler for vmmanager — routes VM events to DiagLog, FrameBufferData,
-/// and VmControl for the GUI to consume.
+/// and VmControlHandle for the GUI to consume.
 struct VmManagerEventHandler {
     fb: Arc<Mutex<FrameBufferData>>,
     diag: DiagLog,
-    control: Arc<VmControl>,
+    control: VmControlHandle,
     handle: u64,
     last_fb_update: Instant,
     fb_debug_count: u32,
@@ -84,25 +76,21 @@ impl EventHandler for VmManagerEventHandler {
             }
             VmEvent::Shutdown => {
                 self.diag.log(DiagCategory::Info, "VM shutdown".into());
-                if let Ok(mut r) = self.control.exit_reason.lock() {
-                    *r = "Shutdown".into();
-                }
-                self.control.exited.store(true, Ordering::Relaxed);
+                self.control.set_exit_reason("Shutdown".into());
+                self.control.set_exited();
                 // Final framebuffer update
                 update_framebuffer(self.handle, &self.fb, &self.diag, &mut self.fb_debug_count);
             }
             VmEvent::Error { message } => {
                 self.diag.log(DiagCategory::Error, format!("VM error: {}", message));
-                if let Ok(mut r) = self.control.exit_reason.lock() {
-                    *r = format!("Error: {}", message);
-                }
-                self.control.exited.store(true, Ordering::Relaxed);
+                self.control.set_exit_reason(format!("Error: {}", message));
+                self.control.set_exited();
                 update_framebuffer(self.handle, &self.fb, &self.diag, &mut self.fb_debug_count);
             }
             VmEvent::RebootRequested => {
                 self.diag.log(DiagCategory::Info, "System reset requested by guest".into());
-                self.control.reboot_requested.store(true, Ordering::Relaxed);
-                self.control.exited.store(true, Ordering::Relaxed);
+                self.control.set_reboot_requested();
+                self.control.set_exited();
             }
             VmEvent::Diagnostic(msg) => {
                 self.diag.log(DiagCategory::Info, msg);
@@ -338,15 +326,6 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
     // Write COM1 base address into BDA so SeaBIOS finds the serial port.
     setup::setup_bda_com1(handle);
 
-    // Setup shared state
-    let control = Arc::new(VmControl {
-        stop: AtomicBool::new(false),
-        pause: AtomicBool::new(false),
-        exited: AtomicBool::new(false),
-        exit_reason: Mutex::new(String::new()),
-        reboot_requested: AtomicBool::new(false),
-    });
-
     // Register WHP debug callback to route output to the diagnostics UI
     #[cfg(target_os = "windows")]
     {
@@ -360,7 +339,6 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
     libcorevm::backend::kvm::install_sigusr1_handler();
 
     let fb = entry.framebuffer.clone();
-    let control_clone = control.clone();
     let diag = entry.diag_log.clone();
     let diag_enabled = entry.config.diagnostics;
     let num_cpus = entry.config.cpu_cores.max(1).min(32);
@@ -390,15 +368,12 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
         fn ahci_io_cb(ctx: *mut (), port: u8) {
             let activity = unsafe { Arc::from_raw(ctx as *const std::sync::Mutex<crate::app::DeviceActivity>) };
             if let Ok(mut a) = activity.lock() {
-                // Port 0 = first disk, port with ATAPI = cdrom
-                // Simplified: port 0 = Disk(0), port 1 = CdRom (ISO drive is typically last port)
                 if port == 0 {
                     a.notify(DeviceKind::Disk(0));
                 } else {
                     a.notify(DeviceKind::CdRom);
                 }
             }
-            // Don't drop the Arc — leak it back
             std::mem::forget(activity);
         }
 
@@ -419,19 +394,25 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
         );
     }
 
-    // EventHandler that routes events to DiagLog + FrameBufferData
+    // Create runtime BEFORE spawning the thread so we can obtain a
+    // VmControlHandle that shares the runtime's internal stop/pause flags.
+    let mut runtime = VmRuntime::new(rt_config, libcorevm::runtime::NullEventHandler);
+    let control = runtime.control_handle();
+
+    // EventHandler that routes events to DiagLog + FrameBufferData.
+    // Uses the same VmControlHandle so exited/exit_reason are visible to the UI.
     let handler = VmManagerEventHandler {
         fb: fb.clone(),
         diag: diag.clone(),
-        control: control_clone.clone(),
+        control: control.clone(),
         handle,
         last_fb_update: Instant::now(),
         fb_debug_count: 0,
     };
+    runtime.set_handler(handler);
 
-    // Spawn VM execution thread using VmRuntime
+    // Spawn VM execution thread
     let thread = thread::spawn(move || {
-        let mut runtime = VmRuntime::new(rt_config, handler);
         runtime.start();
         runtime.wait();
         corevm_ahci_flush_caches(handle);
@@ -446,23 +427,39 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
     Ok(())
 }
 
-/// Stop a running VM
+/// Stop a running VM (non-blocking).
+///
+/// Signals the runtime's stop flag and kicks vCPUs out of KVM_RUN.
+/// Transitions to `Stopping`.  The actual thread join and cleanup happens in
+/// `finish_stop_if_ready()`, which the UI update loop polls each frame.
 pub fn stop_vm(entry: &mut VmEntry) {
     if let Some(ref control) = entry.control {
-        control.stop.store(true, Ordering::Relaxed);
+        control.request_stop();
     }
-    if let Some(thread) = entry.vm_thread.take() {
-        let _ = thread.join();
+    entry.state = VmState::Stopping;
+}
+
+/// Check whether a stopping VM's thread has finished and clean up if so.
+/// Returns `true` when the VM is now fully stopped.
+pub fn finish_stop_if_ready(entry: &mut VmEntry) -> bool {
+    let finished = entry.vm_thread.as_ref().map_or(true, |t| t.is_finished());
+    if finished {
+        if let Some(thread) = entry.vm_thread.take() {
+            let _ = thread.join();
+        }
+        entry.vm_handle = None;
+        entry.control = None;
+        entry.state = VmState::Stopped;
+        true
+    } else {
+        false
     }
-    entry.vm_handle = None;
-    entry.control = None;
-    entry.state = VmState::Stopped;
 }
 
 /// Pause a running VM
 pub fn pause_vm(entry: &mut VmEntry) {
     if let Some(ref control) = entry.control {
-        control.pause.store(true, Ordering::Relaxed);
+        control.request_pause();
     }
     entry.state = VmState::Paused;
 }
@@ -470,7 +467,7 @@ pub fn pause_vm(entry: &mut VmEntry) {
 /// Resume a paused VM
 pub fn resume_vm(entry: &mut VmEntry) {
     if let Some(ref control) = entry.control {
-        control.pause.store(false, Ordering::Relaxed);
+        control.request_resume();
     }
     entry.state = VmState::Running;
 }

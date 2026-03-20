@@ -13,6 +13,62 @@ use alloc::vec::Vec;
 use crate::error::Result;
 use crate::memory::mmio::MmioHandler;
 
+// ── Deferred I/O ────────────────────────────────────────────────────────────
+//
+// Disk I/O (pread/pwrite) can take 1-100ms. Holding AHCI_LOCK during this
+// time blocks all other vCPUs. Deferred I/O moves the disk operation outside
+// the lock:
+//   1. process_commands: parse command, clear CI bit, queue DeferredIo
+//   2. Caller releases AHCI_LOCK
+//   3. Caller executes pread/pwrite (no lock held)
+//   4. Caller re-acquires AHCI_LOCK, calls complete_io (brief state update)
+
+/// A disk I/O operation extracted from process_commands for lock-free execution.
+pub struct DeferredIo {
+    pub fd: i32,
+    pub disk_offset: u64,
+    pub buf: Vec<u8>,
+    pub is_write: bool,
+    pub is_flush: bool,
+    pub port_idx: usize,
+    pub slot: u32,
+    pub cmd_hdr_addr: u64,
+    pub prdt_base: u64,
+    pub prdtl: u32,
+    pub total: usize,
+}
+
+impl DeferredIo {
+    /// Execute the disk I/O. Call WITHOUT AHCI_LOCK held.
+    #[cfg(feature = "std")]
+    pub fn execute(&mut self) {
+        if self.fd < 0 { return; }
+        let file = unsafe { AhciDrive::borrow_file(self.fd) };
+        if self.is_flush {
+            let _ = file.sync_all();
+        } else if self.is_write {
+            use std::os::unix::fs::FileExt;
+            let _ = file.write_all_at(&self.buf, self.disk_offset);
+        } else {
+            use std::os::unix::fs::FileExt;
+            let mut done = 0usize;
+            while done < self.buf.len() {
+                match file.read_at(&mut self.buf[done..], self.disk_offset + done as u64) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => done += n,
+                }
+            }
+            if done < self.buf.len() { self.buf[done..].fill(0); }
+        }
+        core::mem::forget(file);
+    }
+
+    #[cfg(not(feature = "std"))]
+    pub fn execute(&mut self) {}
+}
+
+unsafe impl Send for DeferredIo {}
+
 // ── AHCI HBA Generic Host Control registers (offsets from ABAR) ──
 
 const HBA_CAP: u64 = 0x00;
@@ -252,12 +308,12 @@ impl AhciDrive {
         if self.disk_fd >= 0 {
             #[cfg(feature = "std")]
             {
-                use std::io::{Read, Seek, SeekFrom};
-                let mut file = unsafe { Self::borrow_file(self.disk_fd) };
-                let _ = file.seek(SeekFrom::Start(offset));
+                // Use pread (FileExt::read_at) for thread safety — no seek/read race.
+                use std::os::unix::fs::FileExt;
+                let file = unsafe { Self::borrow_file(self.disk_fd) };
                 let mut total = 0usize;
                 while total < buf.len() {
-                    match file.read(&mut buf[total..]) {
+                    match file.read_at(&mut buf[total..], offset + total as u64) {
                         Ok(0) => break,
                         Ok(n) => total += n,
                         Err(_) => break,
@@ -303,12 +359,10 @@ impl AhciDrive {
         if self.disk_fd >= 0 {
             #[cfg(feature = "std")]
             {
-                use std::io::{Write, Seek, SeekFrom};
-                let mut file = unsafe { Self::borrow_file(self.disk_fd) };
-                if let Err(_e) = file.seek(SeekFrom::Start(offset)) {
-                    eprintln!("[ahci] WRITE SEEK ERROR at offset=0x{:X}: {}", offset, _e);
-                }
-                if let Err(_e) = file.write_all(buf) {
+                // Use pwrite (FileExt::write_all_at) for thread safety.
+                use std::os::unix::fs::FileExt;
+                let file = unsafe { Self::borrow_file(self.disk_fd) };
+                if let Err(_e) = file.write_all_at(buf, offset) {
                     eprintln!("[ahci] WRITE ERROR at offset=0x{:X} len={}: {}", offset, buf.len(), _e);
                 }
                 core::mem::forget(file);
@@ -403,6 +457,10 @@ struct AhciPort {
     clb: u64, fb: u64,
     is: u32, ie: u32, cmd: u32, tfd: u32, sig: u32,
     ssts: u32, sctl: u32, serr: u32, sact: u32, ci: u32, sntf: u32, fbs: u32,
+    /// Bitmask of slots currently being processed by deferred I/O.
+    /// process_commands skips these to prevent double-processing.
+    /// CI stays SET (guest sees command pending); cleared by complete_io.
+    deferred_ci: u32,
     drive: AhciDrive,
 }
 
@@ -412,6 +470,7 @@ impl AhciPort {
             clb: 0, fb: 0, is: 0, ie: 0, cmd: 0,
             tfd: TFD_STS_DRDY | TFD_STS_DSC, sig: 0xFFFF_FFFF,
             ssts: 0, sctl: 0, serr: 0, sact: 0, ci: 0, sntf: 0, fbs: 0,
+            deferred_ci: 0,
             drive: AhciDrive::new(),
         }
     }
@@ -448,6 +507,14 @@ pub struct Ahci {
     /// Optional I/O activity callback: called with port index on every read/write.
     pub io_activity_cb: Option<fn(ctx: *mut (), port: u8)>,
     pub io_activity_ctx: *mut (),
+    /// Deferred I/O queue — filled by process_commands, drained by caller
+    /// outside AHCI_LOCK. CI bits are pre-cleared so no double-processing.
+    pending_io: Vec<DeferredIo>,
+    /// Diagnostic counters
+    pub diag_inline_cmds: u64,
+    pub diag_deferred_cmds: u64,
+    pub diag_completions: u64,
+    pub diag_irqs_delivered: u64,
 }
 
 unsafe impl Send for Ahci {}
@@ -478,6 +545,11 @@ impl Ahci {
             guest_mem_len: 0,
             io_activity_cb: None,
             io_activity_ctx: core::ptr::null_mut(),
+            pending_io: Vec::new(),
+            diag_inline_cmds: 0,
+            diag_deferred_cmds: 0,
+            diag_completions: 0,
+            diag_irqs_delivered: 0,
         }
     }
 
@@ -498,6 +570,70 @@ impl Ahci {
 
     pub fn irq_raised(&self) -> bool { self.irq_pending }
     pub fn clear_irq(&mut self) { self.irq_pending = false; }
+
+    /// Print periodic diagnostic heartbeat (call under AHCI_LOCK)
+    #[cfg(feature = "std")]
+    pub fn diag_heartbeat(&self) {
+        let p0 = &self.ports[0];
+        let p1 = if self.ports.len() > 1 { &self.ports[1] } else { p0 };
+        eprintln!("[ahci-hb] inline={} deferred={} completed={} irqs={} msi={} msi_addr=0x{:X} msi_data=0x{:X} | p0: ci=0x{:X} def_ci=0x{:X} is=0x{:X} ie=0x{:X} cmd=0x{:X} | p1: ci=0x{:X} def_ci=0x{:X} is=0x{:X} | ghc=0x{:X} hba_is=0x{:X} pend={}",
+            self.diag_inline_cmds, self.diag_deferred_cmds,
+            self.diag_completions, self.diag_irqs_delivered,
+            self.msi_enabled, self.msi_address, self.msi_data,
+            p0.ci, p0.deferred_ci, p0.is, p0.ie, p0.cmd,
+            p1.ci, p1.deferred_ci, p1.is,
+            self.ghc, self.is,
+            self.pending_io.len());
+    }
+
+    /// Drain pending I/O requests. Caller executes them outside AHCI_LOCK.
+    pub fn take_pending_io(&mut self) -> Vec<DeferredIo> {
+        core::mem::take(&mut self.pending_io)
+    }
+
+    /// Apply a completed deferred I/O. Must be called under AHCI_LOCK.
+    /// Only updates port state + posts FIS + raises IRQ. CI was pre-cleared.
+    pub fn complete_io(&mut self, io: &DeferredIo) {
+        if io.port_idx >= MAX_PORTS { return; }
+        let dma = self.dma();
+        let port = &mut self.ports[io.port_idx];
+
+        // Write read data to guest memory
+        if !io.is_write && io.prdtl > 0 {
+            dma.write_prdt(io.prdt_base, io.prdtl, &io.buf);
+        }
+        dma.write_u32(io.cmd_hdr_addr + 4, io.total as u32);
+
+        // Set completion status
+        port.tfd = TFD_STS_DRDY | TFD_STS_DSC;
+
+        // Post D2H FIS and set IS flag
+        port.is |= PORT_IS_DHRS;
+        if port.fb != 0 && port.cmd & PORT_CMD_FRE != 0 {
+            let mut d2h = [0u8; 20];
+            d2h[0] = FIS_TYPE_REG_D2H;
+            d2h[1] = 0x40;
+            d2h[2] = (port.tfd & 0xFF) as u8;
+            d2h[3] = ((port.tfd >> 8) & 0xFF) as u8;
+            dma.write_bytes(port.fb + 0x40, &d2h);
+        }
+
+        // Clear command slot (CI stays set until now so guest sees "busy")
+        port.ci &= !(1 << io.slot);
+        port.sact &= !(1 << io.slot);
+        port.deferred_ci &= !(1 << io.slot);
+
+        // Raise IRQ if enabled
+        if port.is & port.ie != 0 {
+            self.is |= 1 << io.port_idx;
+            if self.ghc & GHC_IE != 0 {
+                self.irq_pending = true;
+            }
+        }
+
+        self.diag_completions += 1;
+        if let Some(cb) = self.io_activity_cb { cb(self.io_activity_ctx, io.port_idx as u8); }
+    }
 
 
     pub fn set_guest_memory(&mut self, ptr: *mut u8, len: usize) {
@@ -551,6 +687,8 @@ impl Ahci {
 
         for slot in 0..32u32 {
             if ci & (1 << slot) == 0 { continue; }
+            // Skip slots already being processed by deferred I/O
+            if port.deferred_ci & (1 << slot) != 0 { continue; }
 
             let cmd_hdr_addr = port.clb + (slot as u64) * 32;
             let header = match dma.read_bytes(cmd_hdr_addr, 32) {
@@ -610,6 +748,8 @@ impl Ahci {
 
             let prdt_base = ctba + 0x80;
 
+            #[cfg(feature = "std")]
+            let cmd_start = std::time::Instant::now();
 
             match command {
                 ATA_CMD_IDENTIFY => {
@@ -645,6 +785,17 @@ impl Ahci {
                 | ATA_CMD_READ_SECTORS | ATA_CMD_READ_SECTORS_EXT => {
                     let ss = port.drive.sector_size();
                     let total = count as usize * ss;
+                    if port.drive.disk_fd >= 0 {
+                        // Mark slot as in-flight (CI stays set so guest sees "busy")
+                        port.deferred_ci |= 1 << slot;
+                        self.diag_deferred_cmds += 1;
+                        self.pending_io.push(DeferredIo {
+                            fd: port.drive.disk_fd, disk_offset: lba * ss as u64,
+                            buf: vec![0u8; total], is_write: false, is_flush: false,
+                            port_idx, slot, cmd_hdr_addr, prdt_base, prdtl, total,
+                        });
+                        continue; // Skip inline completion
+                    }
                     let mut buf = vec![0u8; total];
                     port.drive.read_at(lba * ss as u64, &mut buf);
                     if prdtl > 0 { dma.write_prdt(prdt_base, prdtl, &buf); }
@@ -659,6 +810,16 @@ impl Ahci {
                     let total = count as usize * ss;
                     let mut buf = vec![0u8; total];
                     if prdtl > 0 { dma.read_prdt(prdt_base, prdtl, &mut buf); }
+                    if port.drive.disk_fd >= 0 {
+                        port.deferred_ci |= 1 << slot;
+                        self.diag_deferred_cmds += 1;
+                        self.pending_io.push(DeferredIo {
+                            fd: port.drive.disk_fd, disk_offset: lba * ss as u64,
+                            buf, is_write: true, is_flush: false,
+                            port_idx, slot, cmd_hdr_addr, prdt_base, prdtl, total,
+                        });
+                        continue;
+                    }
                     port.drive.write_at(lba * ss as u64, &buf);
                     dma.write_u32(cmd_hdr_addr + 4, total as u32);
                     port.tfd = TFD_STS_DRDY | TFD_STS_DSC;
@@ -666,15 +827,28 @@ impl Ahci {
                     if let Some(cb) = self.io_activity_cb { cb(self.io_activity_ctx, port_idx as u8); }
                 }
                 ATA_CMD_FLUSH | ATA_CMD_FLUSH_EXT => {
-                    // Flush write cache — call fsync on the host fd
+                    if port.drive.disk_fd >= 0 {
+                        port.deferred_ci |= 1 << slot;
+                        self.diag_deferred_cmds += 1;
+                        self.pending_io.push(DeferredIo {
+                            fd: port.drive.disk_fd, disk_offset: 0,
+                            buf: Vec::new(), is_write: false, is_flush: true,
+                            port_idx, slot, cmd_hdr_addr, prdt_base, prdtl, total: 0,
+                        });
+                        continue;
+                    }
                     port.tfd = TFD_STS_DRDY | TFD_STS_DSC;
                     port.is |= PORT_IS_DHRS;
-                    #[cfg(feature = "std")]
-                    if port.drive.disk_fd >= 0 {
-                        let file = unsafe { AhciDrive::borrow_file(port.drive.disk_fd) };
-                        let _ = file.sync_all();
-                        core::mem::forget(file);
-                    }
+                }
+                0x2F => {
+                    // READ LOG EXT — Windows NCQ error recovery / SATA log page.
+                    // Return an empty log page so the driver doesn't enter error recovery.
+                    let total = count as usize * 512;
+                    let buf = vec![0u8; total];
+                    if prdtl > 0 { dma.write_prdt(prdt_base, prdtl, &buf); }
+                    dma.write_u32(cmd_hdr_addr + 4, total as u32);
+                    port.tfd = TFD_STS_DRDY | TFD_STS_DSC;
+                    port.is |= PORT_IS_DHRS;
                 }
                 ATA_CMD_SET_FEATURES
                 | 0xF5 // SECURITY FREEZE LOCK — no-op for VMs
@@ -711,7 +885,12 @@ impl Ahci {
                         port.tfd = TFD_STS_DRDY | TFD_STS_DSC | (0x04 << 8) | 1; // ABRT
                         port.is |= PORT_IS_DHRS;
                     } else if let Some(acmd) = dma.read_bytes(ctba + 0x40, 16) {
-                        process_atapi(port, &dma, &acmd, prdt_base, prdtl, cmd_hdr_addr);
+                        if let Some(dio) = process_atapi(port, &dma, &acmd, prdt_base, prdtl, cmd_hdr_addr, port_idx, slot) {
+                            port.deferred_ci |= 1 << slot;
+                            self.diag_deferred_cmds += 1;
+                            self.pending_io.push(dio);
+                            continue;
+                        }
                         if let Some(cb) = self.io_activity_cb { cb(self.io_activity_ctx, port_idx as u8); }
                     } else {
                         port.tfd = TFD_STS_DRDY | TFD_STS_DSC | 1;
@@ -739,6 +918,29 @@ impl Ahci {
 
             port.ci &= !(1 << slot);
             port.sact &= !(1 << slot);
+            self.diag_inline_cmds += 1;
+
+            // Log slow commands (> 1ms)
+            #[cfg(feature = "std")]
+            {
+                let cmd_us = cmd_start.elapsed().as_micros() as u64;
+                if cmd_us > 1000 {
+                    static CMD_LOG_N: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+                    let n = CMD_LOG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 100 || n % 500 == 0 {
+                        let kind = match command {
+                            0xC8 | 0x25 | 0x20 | 0x24 => "READ",
+                            0xCA | 0x35 | 0x30 | 0x34 => "WRITE",
+                            0xE7 | 0xEA => "FLUSH",
+                            0xA0 => "ATAPI",
+                            0xEC => "IDENTIFY",
+                            _ => "OTHER",
+                        };
+                        eprintln!("[ahci-diag] {} port={} lba={} cnt={} {}us",
+                            kind, port_idx, lba, count, cmd_us);
+                    }
+                }
+            }
         }
 
         // Update global IS
@@ -898,7 +1100,10 @@ impl MmioHandler for Ahci {
 
 // ── ATAPI command processing (free function to avoid borrow issues) ──
 
-fn process_atapi(port: &mut AhciPort, dma: &GuestDma, acmd: &[u8], prdt_base: u64, prdtl: u32, cmd_hdr_addr: u64) {
+/// Returns Some(DeferredIo) for READ(10) on fd-backed drives.
+fn process_atapi(port: &mut AhciPort, dma: &GuestDma, acmd: &[u8], prdt_base: u64, prdtl: u32, cmd_hdr_addr: u64,
+    port_idx: usize, slot: u32,
+) -> Option<DeferredIo> {
     match acmd[0] {
         0x00 => { // TEST UNIT READY
             port.tfd = TFD_STS_DRDY | TFD_STS_DSC;
@@ -942,7 +1147,7 @@ fn process_atapi(port: &mut AhciPort, dma: &GuestDma, acmd: &[u8], prdt_base: u6
                         // Unsupported VPD page — return CHECK CONDITION
                         port.tfd = TFD_STS_DRDY | TFD_STS_DSC | 1;
                         port.is |= PORT_IS_DHRS;
-                        return;
+                        return None;
                     }
                 }
             } else {
@@ -975,6 +1180,13 @@ fn process_atapi(port: &mut AhciPort, dma: &GuestDma, acmd: &[u8], prdt_base: u6
             let cnt = (u16::from_be_bytes([acmd[7], acmd[8]]) as u32).min(256);
             let ss = port.drive.sector_size();
             let total = cnt as usize * ss;
+            if port.drive.disk_fd >= 0 {
+                return Some(DeferredIo {
+                    fd: port.drive.disk_fd, disk_offset: lba * ss as u64,
+                    buf: vec![0u8; total], is_write: false, is_flush: false,
+                    port_idx, slot, cmd_hdr_addr, prdt_base, prdtl, total,
+                });
+            }
             let mut buf = vec![0u8; total];
             port.drive.read_at(lba * ss as u64, &mut buf);
             if prdtl > 0 { dma.write_prdt(prdt_base, prdtl, &buf); }
@@ -1123,6 +1335,7 @@ fn process_atapi(port: &mut AhciPort, dma: &GuestDma, acmd: &[u8], prdt_base: u6
             port.is |= PORT_IS_DHRS | PORT_IS_TFES;
         }
     }
+    None
 }
 
 // ── Helpers ──
@@ -1155,7 +1368,12 @@ pub fn create_ahci_pci_device(mmio_base: u32) -> crate::devices::bus::PciDevice 
     dev.set_subsystem(0x8086, 0x2922);
     dev.set_interrupt(11, 1);
     dev.set_bar(5, mmio_base, 0x1000, true);
-    // Add MSI capability at offset 0x80 (standard for Intel AHCI controllers)
-    dev.add_msi_capability(AHCI_MSI_CAP_OFFSET);
+    // No MSI capability — force legacy level-triggered IRQ 11.
+    //
+    // MSI with Lowest Priority delivery mode is unreliable on SMP:
+    // KVM delivers the edge-triggered MSI to the vCPU with lowest TPR,
+    // but if that vCPU has IF=0, the MSI is silently lost. Windows then
+    // waits ~1 second for the timeout before retrying each AHCI command.
+    // Legacy level-triggered IRQ stays asserted until acknowledged.
     dev
 }

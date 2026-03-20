@@ -87,6 +87,9 @@ pub struct Vm {
     /// Set when the guest writes to port 0xCF9 requesting a system reset.
     pub cf9_reset_pending: bool,
 
+    /// Pointer to ACPI PM device for shutdown detection.
+    pub acpi_pm_ptr: *mut crate::devices::acpi::AcpiPm,
+
     /// VRAM size in MiB (0 = default 16). Set before setup_standard_devices().
     pub vram_mb: u32,
 
@@ -215,6 +218,7 @@ impl Vm {
             virtio_gpu_irq_asserted: false,
             virtio_net_irq_asserted: false,
             cf9_reset_pending: false,
+            acpi_pm_ptr: core::ptr::null_mut(),
             vram_mb: 0,
             cpu_count: 1,
             #[cfg(feature = "std")]
@@ -309,7 +313,9 @@ impl Vm {
         self.io.register(0x402, 1, dbg);
 
         // ACPI PM at PMBASE 0xB000 (matches FADT PM1a_EVT_BLK in SeaBIOS ACPI tables)
-        self.io.register(0xB000, 0x40, Box::new(AcpiPm::new()));
+        let acpi_pm = Box::new(AcpiPm::new());
+        self.acpi_pm_ptr = &*acpi_pm as *const AcpiPm as *mut AcpiPm;
+        self.io.register(0xB000, 0x40, acpi_pm);
         // ACPI PM also at 0x600 — OVMF/UEFI sets ICH9 LPC PMBASE to 0x600
         self.io.register(0x600, 0x40, Box::new(AcpiPm::new()));
 

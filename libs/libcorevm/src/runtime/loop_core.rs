@@ -429,6 +429,14 @@ pub(crate) fn bsp_loop(
             break;
         }
 
+        // ── ACPI shutdown check (guest wrote SLP_EN + S5) ────────────
+        if corevm_check_acpi_shutdown(handle) != 0 {
+            corevm_ahci_flush_caches(handle);
+            handler.on_event(VmEvent::Shutdown);
+            control.exited.store(true, Ordering::Relaxed);
+            break;
+        }
+
         // ── I/O draining ────────────────────────────────────────────────
 
         drain_serial(handle, handler);

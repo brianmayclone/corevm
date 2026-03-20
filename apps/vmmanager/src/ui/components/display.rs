@@ -418,6 +418,9 @@ pub struct DisplayWidget {
     /// deltas and keyboard events independent of the windowing system.
     #[cfg(target_os = "linux")]
     pub evdev_input: Option<EvdevInputReader>,
+    /// Timestamp when mouse was captured — used for grace period to ignore
+    /// spurious focus-loss events right after grabbing.
+    pub capture_time: Option<std::time::Instant>,
 }
 
 impl DisplayWidget {
@@ -442,6 +445,7 @@ impl DisplayWidget {
             abs_cursor_y: 16383, // center
             #[cfg(target_os = "linux")]
             evdev_input: EvdevInputReader::open(),
+            capture_time: None,
         }
     }
 
@@ -580,6 +584,7 @@ impl DisplayWidget {
     /// `use_evdev`: whether to use evdev raw capture (from preferences).
     fn capture_mouse(&mut self, ctx: &egui::Context, use_evdev: bool) {
         self.mouse_captured = true;
+        self.capture_time = Some(std::time::Instant::now());
         self.last_mouse_pos = None;
         self.mouse_accum_x = 0.0;
         self.mouse_accum_y = 0.0;
@@ -602,7 +607,7 @@ impl DisplayWidget {
         }
         // When evdev is disabled, no cursor lock — mouse stays free (USB tablet mode).
         ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(false));
-        eprintln!("[mouse] Captured (Locked + evdev) — Ctrl+Alt+G/F to release");
+        eprintln!("[mouse] Captured — Ctrl+Alt+G/F to release");
     }
 
     /// Check all release mechanisms. Returns true if the mouse should be released.
@@ -669,11 +674,22 @@ impl DisplayWidget {
         //     return true;
         // }
 
-        // 5. Window focus lost — auto release
-        let has_focus = ctx.input(|i| i.focused);
-        if !has_focus {
-            eprintln!("[mouse] Release via focus loss");
-            return true;
+        // 5. Window focus lost — auto release.
+        //    On Linux, CursorGrab::Locked is unreliable across WMs and may cause
+        //    false focus-loss reports.  Only release on focus loss when evdev is NOT
+        //    available (non-Linux or no evdev reader).
+        #[cfg(target_os = "linux")]
+        let has_evdev = self.evdev_input.as_ref()
+            .map_or(false, |e| e.is_running());
+        #[cfg(not(target_os = "linux"))]
+        let has_evdev = false;
+
+        if !has_evdev {
+            let has_focus = ctx.input(|i| i.focused);
+            if !has_focus {
+                eprintln!("[mouse] Release via focus loss");
+                return true;
+            }
         }
 
         false
@@ -682,6 +698,7 @@ impl DisplayWidget {
     /// Release the mouse: show cursor, ungrab, and stop evdev reader.
     pub fn release_mouse(&mut self, ctx: &egui::Context) {
         self.mouse_captured = false;
+        self.capture_time = None;
         self.last_mouse_pos = None;
         self.right_click_start = None;
         self.escape_presses.clear();
@@ -699,8 +716,8 @@ impl DisplayWidget {
     }
 
     /// Handle mouse input over the display area and inject PS/2 events into the VM.
-    fn handle_mouse_input(&mut self, ui: &egui::Ui, ctx: &egui::Context, display_rect: egui::Rect, vm_handle: u64, response: &egui::Response) {
-        // Read current button state
+    fn handle_mouse_input(&mut self, ui: &egui::Ui, ctx: &egui::Context, display_rect: egui::Rect, vm_handle: u64, _response: &egui::Response) {
+        // Read button state from egui (always available).
         let buttons = ui.input(|i| {
             let mut b = 0u8;
             if i.pointer.button_down(egui::PointerButton::Primary) { b |= 1; }
@@ -721,7 +738,7 @@ impl DisplayWidget {
         // but skip PS/2 relative mouse and evdev.
         if !self.mouse_captured {
             if self.usb_tablet_mode {
-                if let Some(hover_pos) = response.hover_pos() {
+                if let Some(hover_pos) = _response.hover_pos() {
                     let rel_x = ((hover_pos.x - display_rect.min.x) / display_rect.width()).clamp(0.0, 1.0);
                     let rel_y = ((hover_pos.y - display_rect.min.y) / display_rect.height()).clamp(0.0, 1.0);
                     let abs_x = (rel_x * 32767.0) as u16;
@@ -764,17 +781,26 @@ impl DisplayWidget {
             return;
         }
 
-        // Get raw mouse deltas from evdev (Linux) or fallback to egui pointer
+        // Get raw mouse deltas: try evdev first (Linux), fall back to egui pointer.
         let (evdev_dx, evdev_dy, evdev_wheel): (i32, i32, i32);
 
+        // Try evdev deltas (Linux only)
+        let mut got_evdev = false;
         #[cfg(target_os = "linux")]
         {
             if let Some(ref evdev) = self.evdev_input {
-                if evdev.is_running() {
+                if evdev.is_running() && evdev.has_mouse() {
                     let (dx, dy, w) = evdev.take_mouse_deltas();
-                    evdev_dx = dx;
-                    evdev_dy = dy;
-                    evdev_wheel = w;
+                    if dx != 0 || dy != 0 || w != 0 {
+                        evdev_dx = dx;
+                        evdev_dy = dy;
+                        evdev_wheel = w;
+                        got_evdev = true;
+                    } else {
+                        evdev_dx = 0;
+                        evdev_dy = 0;
+                        evdev_wheel = 0;
+                    }
                 } else {
                     evdev_dx = 0;
                     evdev_dy = 0;
@@ -786,19 +812,25 @@ impl DisplayWidget {
                 evdev_wheel = 0;
             }
         }
-
         #[cfg(not(target_os = "linux"))]
         {
-            // Fallback: use egui pointer delta (may not work on all platforms)
-            let d = ui.input(|i| i.pointer.delta());
-            evdev_dx = d.x as i32;
-            evdev_dy = d.y as i32;
+            evdev_dx = 0;
+            evdev_dy = 0;
             evdev_wheel = 0;
         }
 
-        // evdev deltas: +X = right, +Y = down (screen coordinates)
-        let ps2_dx = evdev_dx as i16;
-        let ps2_dy = -(evdev_dy as i16); // PS/2: positive Y = UP
+        // Fallback: egui pointer.delta() when evdev provided nothing.
+        // Works on some WMs with CursorGrab::Locked.
+        let (final_dx, final_dy) = if got_evdev {
+            (evdev_dx, evdev_dy)
+        } else {
+            let d = ui.input(|i| i.pointer.delta());
+            (d.x as i32, d.y as i32)
+        };
+
+        // Deltas: +X = right, +Y = down (screen coordinates)
+        let ps2_dx = final_dx as i16;
+        let ps2_dy = -(final_dy as i16); // PS/2: positive Y = UP
 
         // Use evdev wheel if available, otherwise egui scroll
         let final_wheel: i8 = if evdev_wheel != 0 {
@@ -810,8 +842,9 @@ impl DisplayWidget {
         // Send PS/2 relative mouse events (with scroll wheel)
         if ps2_dx != 0 || ps2_dy != 0 || final_wheel != 0 {
             if self.mouse_debug_counter % 60 == 0 {
-                eprintln!("[mouse-evdev] dx={} dy={} wheel={} abs=({},{})",
-                    ps2_dx, ps2_dy, final_wheel, self.abs_cursor_x, self.abs_cursor_y);
+                eprintln!("[mouse] dx={} dy={} wheel={} abs=({},{}) src={}",
+                    ps2_dx, ps2_dy, final_wheel, self.abs_cursor_x, self.abs_cursor_y,
+                    if got_evdev { "evdev" } else { "egui" });
             }
             libcorevm::ffi::corevm_ps2_mouse_move_wheel(vm_handle, ps2_dx, ps2_dy, buttons, final_wheel);
         } else if buttons != self.last_mouse_buttons {
@@ -820,12 +853,12 @@ impl DisplayWidget {
 
         // For USB tablet / VirtIO: also send absolute coordinates.
         // Track a virtual cursor position from accumulated deltas.
-        if evdev_dx != 0 || evdev_dy != 0 || buttons != self.last_mouse_buttons || final_wheel != 0 {
+        if final_dx != 0 || final_dy != 0 || buttons != self.last_mouse_buttons || final_wheel != 0 {
             let scale_x = 32767.0 / display_rect.width();
             let scale_y = 32767.0 / display_rect.height();
-            let new_x = (self.abs_cursor_x as f32 + evdev_dx as f32 * scale_x)
+            let new_x = (self.abs_cursor_x as f32 + final_dx as f32 * scale_x)
                 .clamp(0.0, 32767.0) as u16;
-            let new_y = (self.abs_cursor_y as f32 + evdev_dy as f32 * scale_y)
+            let new_y = (self.abs_cursor_y as f32 + final_dy as f32 * scale_y)
                 .clamp(0.0, 32767.0) as u16;
             self.abs_cursor_x = new_x;
             self.abs_cursor_y = new_y;

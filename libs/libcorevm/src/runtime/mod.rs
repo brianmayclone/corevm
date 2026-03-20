@@ -74,12 +74,14 @@
 
 pub mod config;
 pub mod event;
+mod control_handle;
 pub(crate) mod loop_core;
 pub(crate) mod smp;
 pub(crate) mod cancel;
 
 pub use config::{VmRuntimeConfig, InputEvent};
 pub use event::{EventHandler, VmEvent, NullEventHandler};
+pub use self::control_handle::VmControlHandle;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -150,6 +152,11 @@ impl VmRuntime {
         }
     }
 
+    /// Replace the event handler (must be called before [`start`](Self::start)).
+    pub fn set_handler(&mut self, handler: impl EventHandler) {
+        self.handler = Some(Box::new(handler));
+    }
+
     /// Start VM execution.
     ///
     /// Spawns the BSP thread (vCPU 0), AP threads (vCPU 1..N-1), and the
@@ -208,6 +215,19 @@ impl VmRuntime {
                 })
                 .expect("failed to spawn BSP thread"),
         );
+    }
+
+    /// Get a control handle for this runtime.
+    ///
+    /// The handle can be cloned and sent to other threads to stop/pause/resume
+    /// the VM and query its exit state.  Must be called **before** moving the
+    /// runtime into a worker thread.
+    pub fn control_handle(&self) -> VmControlHandle {
+        VmControlHandle::new(
+            self.control.clone(),
+            self.config.handle,
+            self.config.num_cpus,
+        )
     }
 
     // ── Lifecycle control ───────────────────────────────────────────────

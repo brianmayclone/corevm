@@ -16,36 +16,23 @@ use crate::backend::types::*;
 use crate::backend::VmBackend;
 use crate::backend::VmExitReason;
 
-// ── I/O dispatch spinlock ───────────────────────────────────────────────────
+// ── I/O dispatch lock ───────────────────────────────────────────────────────
 //
-// Multiple vCPU threads call handle_io_exit / handle_mmio_exit concurrently,
-// each obtaining `&mut Vm` via the unsafe global registry. Device handlers
-// (AHCI, PCI, serial, etc.) are NOT thread-safe, so concurrent access causes
-// data races (e.g., Windows Setup hangs at 1% with SMP).
+// Multiple vCPU threads call handle_io_exit / handle_mmio_exit concurrently.
+// Device handlers are NOT thread-safe, so access must be serialised.
 //
-// This spinlock serialises all I/O and MMIO dispatch. KVM_RUN itself is
-// per-vCPU (each thread has its own fd + kvm_run page) and does NOT need
-// the lock — only the userspace device handlers do.
-
-// I/O dispatch lock.
-//
-// Serialises access to device handlers from multiple vCPU threads.
-// Uses a hybrid approach: spin briefly (for the common uncontended case),
-// then yield the CPU (to avoid burning cycles when another vCPU holds the
-// lock during a long MMIO handler like AHCI DMA).
-//
-// A pure spinlock is catastrophic for SMP performance: if vCPU threads
-// share physical cores, a spinning waiter prevents the lock holder from
-// making progress, causing 100x slowdowns on disk I/O.
+// Spin briefly for the common uncontended case, then sleep to avoid burning
+// CPU cycles when another vCPU holds the lock (especially during AHCI DMA).
+// Using sleep(1μs) instead of yield_now() is critical: yield_now() calls
+// sched_yield() which doesn't actually sleep — it just moves the thread to
+// the end of the runqueue, wasting CPU time that the lock holder needs.
 static IO_LOCK: AtomicBool = AtomicBool::new(false);
 
 #[inline]
 fn io_lock() {
-    // Fast path: try to acquire immediately (uncontended case).
     if IO_LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
         return;
     }
-    // Slow path: spin briefly, then yield.
     io_lock_slow();
 }
 
@@ -60,10 +47,9 @@ fn io_lock_slow() {
         if spin_count < 64 {
             core::hint::spin_loop();
         } else {
-            // Yield the CPU so the lock holder can make progress.
-            // This is critical when vCPUs share physical cores.
+            // Sleep briefly so the lock holder can make progress.
             #[cfg(feature = "std")]
-            std::thread::yield_now();
+            std::thread::sleep(core::time::Duration::from_micros(1));
             #[cfg(not(feature = "std"))]
             core::hint::spin_loop();
             spin_count = 0;
@@ -74,6 +60,82 @@ fn io_lock_slow() {
 #[inline]
 fn io_unlock() {
     IO_LOCK.store(false, Ordering::Release);
+}
+
+// ── AHCI device lock ────────────────────────────────────────────────────────
+//
+// Dedicated lock for AHCI device state, separate from IO_LOCK so that
+// port I/O exits don't block on AHCI disk I/O and vice versa.
+// AHCI command processing does synchronous disk I/O (pread/pwrite)
+// which can block for milliseconds.
+static AHCI_LOCK: AtomicBool = AtomicBool::new(false);
+
+#[inline]
+pub(crate) fn ahci_lock() {
+    if AHCI_LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+        return;
+    }
+    ahci_lock_slow();
+}
+
+#[cold]
+fn ahci_lock_slow() {
+    #[cfg(feature = "std")]
+    let t0 = std::time::Instant::now();
+    let mut spin_count = 0u32;
+    let mut sleep_count = 0u32;
+    loop {
+        if AHCI_LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            #[cfg(feature = "std")]
+            {
+                let wait_us = t0.elapsed().as_micros() as u64;
+                if wait_us > 1000 {
+                    static CONTENTION_N: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+                    let n = CONTENTION_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 50 || n % 200 == 0 {
+                        eprintln!("[ahci-diag] LOCK contention: waited {}us (sleeps={}) #{}", wait_us, sleep_count, n);
+                    }
+                }
+            }
+            return;
+        }
+        spin_count += 1;
+        if spin_count < 64 {
+            core::hint::spin_loop();
+        } else {
+            #[cfg(feature = "std")]
+            std::thread::sleep(core::time::Duration::from_micros(1));
+            #[cfg(not(feature = "std"))]
+            core::hint::spin_loop();
+            spin_count = 0;
+            sleep_count += 1;
+        }
+    }
+}
+
+#[inline]
+pub(crate) fn ahci_unlock() {
+    AHCI_LOCK.store(false, Ordering::Release);
+}
+
+/// Try to acquire AHCI_LOCK without blocking. Returns true if acquired.
+#[inline]
+fn ahci_try_lock() -> bool {
+    AHCI_LOCK.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok()
+}
+
+// ── Per-vCPU I/O context ────────────────────────────────────────────────────
+//
+// Tracks which vCPU is currently executing a port I/O handler.
+// Protected by IO_LOCK (only one vCPU dispatches port I/O at a time).
+// Used by PciBus to maintain per-vCPU PCI config address latches,
+// preventing the 0xCF8/0xCFC TOCTOU race between vCPUs.
+use core::sync::atomic::AtomicU32;
+static CURRENT_IO_VCPU: AtomicU32 = AtomicU32::new(0);
+
+/// Returns the vCPU ID currently holding IO_LOCK.
+pub(crate) fn current_io_vcpu() -> u32 {
+    CURRENT_IO_VCPU.load(Ordering::Relaxed)
 }
 
 // ── Global VM registry ──────────────────────────────────────────────────────
@@ -682,7 +744,11 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
             }
 
             // AHCI IRQ → MSI (preferred) or legacy IRQ 11 (level-triggered)
-            if !vm.ahci_ptr.is_null() {
+            // Use try_lock: if an AP holds AHCI_LOCK (doing disk I/O), skip
+            // the AHCI IRQ check — the AP will deliver the IRQ itself via
+            // corevm_ahci_poll_irq() after the MMIO exit. This prevents the
+            // BSP from blocking on disk I/O and stalling timer/device polling.
+            if !vm.ahci_ptr.is_null() && ahci_try_lock() {
                 let ahci = unsafe { &mut *vm.ahci_ptr };
                 let want_asserted = ahci.irq_raised();
                 #[cfg(feature = "linux")]
@@ -740,6 +806,7 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         }
                     }
                 }
+                ahci_unlock();
             }
 
             // E1000 NIC — MSI or legacy IRQ 11
@@ -1070,9 +1137,29 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
 /// enabled MSI via the PCI capability registers.
 #[no_mangle]
 pub extern "C" fn corevm_ahci_poll_irq(handle: u64) {
-    // No io_lock: called only from BSP thread after MMIO exits.
+    // Called from BSP and AP threads after MMIO exits. AHCI_LOCK serialises
+    // access to AHCI device state and ahci_irq_asserted.
     let vm = match get_vm(handle) { Some(v) => v, None => { return } };
     if vm.ahci_ptr.is_null() { return; }
+    ahci_lock();
+
+    // Periodic heartbeat — print AHCI diagnostic summary every ~5 seconds
+    #[cfg(feature = "std")]
+    {
+        static LAST_HEARTBEAT: AtomicU64 = AtomicU64::new(0);
+        let now_ms = {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+        };
+        let last = LAST_HEARTBEAT.load(Ordering::Relaxed);
+        if last == 0 {
+            LAST_HEARTBEAT.store(now_ms, Ordering::Relaxed);
+        } else if now_ms.wrapping_sub(last) > 5000 {
+            LAST_HEARTBEAT.store(now_ms, Ordering::Relaxed);
+            let ahci_diag = unsafe { &*vm.ahci_ptr };
+            ahci_diag.diag_heartbeat();
+        }
+    }
 
     // Sync MSI state from PCI config space into AHCI struct.
     // AHCI is PCI device 00:03.0, MSI cap at offset 0x80.
@@ -1097,22 +1184,11 @@ pub extern "C" fn corevm_ahci_poll_irq(handle: u64) {
     #[cfg(feature = "linux")]
     {
         if ahci.msi_enabled {
-            // MSI mode: edge-triggered, fire once per interrupt then clear
+            // MSI mode — shouldn't happen since AHCI no longer advertises MSI
             if want_asserted {
-                match vm.backend.signal_msi(ahci.msi_address, ahci.msi_data) {
-                    Ok(_) => {},
-                    Err(e) => {
-                        eprintln!("[ahci] MSI SIGNAL FAILED: addr=0x{:X} data=0x{:X} err={:?}",
-                            ahci.msi_address, ahci.msi_data, e);
-                        // Fallback to legacy IRQ
-                        if !vm.ahci_irq_asserted {
-                            let _ = vm.backend.set_irq_line(11, true);
-                            vm.ahci_irq_asserted = true;
-                        }
-                    }
-                }
+                ahci.diag_irqs_delivered += 1;
+                let _ = vm.backend.signal_msi(ahci.msi_address, ahci.msi_data);
                 ahci.clear_irq();
-                // Deassert legacy IRQ line if it was still asserted
                 if vm.ahci_irq_asserted {
                     let _ = vm.backend.set_irq_line(11, false);
                     vm.ahci_irq_asserted = false;
@@ -1121,6 +1197,7 @@ pub extern "C" fn corevm_ahci_poll_irq(handle: u64) {
         } else {
             // Legacy level-triggered mode
             if want_asserted && !vm.ahci_irq_asserted {
+                ahci.diag_irqs_delivered += 1;
                 let _ = vm.backend.set_irq_line(11, true);
                 vm.ahci_irq_asserted = true;
             } else if !want_asserted && vm.ahci_irq_asserted {
@@ -1172,6 +1249,7 @@ pub extern "C" fn corevm_ahci_poll_irq(handle: u64) {
             }
         }
     }
+    ahci_unlock();
 }
 
 /// Check if the guest has requested a system reset (e.g. PS/2 0xFE, port 0xCF9).
@@ -1196,6 +1274,20 @@ pub extern "C" fn corevm_check_reset(handle: u64) -> i32 {
         }
         None => 0,
     }
+}
+
+/// Check if the guest has requested ACPI shutdown (SLP_EN + SLP_TYP=S5).
+/// Returns 1 if shutdown was requested (and clears the flag), 0 otherwise.
+#[no_mangle]
+pub extern "C" fn corevm_check_acpi_shutdown(handle: u64) -> i32 {
+    let vm = match get_vm(handle) { Some(v) => v, None => return 0 };
+    if vm.acpi_pm_ptr.is_null() { return 0; }
+    let acpi = unsafe { &mut *vm.acpi_pm_ptr };
+    if acpi.shutdown_requested {
+        acpi.shutdown_requested = false;
+        return 1;
+    }
+    0
 }
 
 /// Debug: return PIC master state as packed u32.
@@ -1382,6 +1474,7 @@ pub extern "C" fn corevm_handle_string_io_exit(
     step: i64, instr_len: u64, addr_size: u8, access_size: u8,
 ) -> i32 {
     io_lock();
+    CURRENT_IO_VCPU.store(vcpu_id, Ordering::Relaxed);
     let vm = match get_vm(handle) { Some(v) => v, None => { io_unlock(); return -1 } };
     vm.handle_string_io(vcpu_id, port, is_write != 0, count, gpa, step, instr_len, addr_size, access_size);
     io_unlock();
@@ -1395,6 +1488,7 @@ pub extern "C" fn corevm_handle_io_exit(
     handle: u64, vcpu_id: u32, port: u16, is_write: u8, size: u8, data: *mut u8,
 ) -> i32 {
     io_lock();
+    CURRENT_IO_VCPU.store(vcpu_id, Ordering::Relaxed);
     let vm = match get_vm(handle) { Some(v) => v, None => { io_unlock(); return -1 } };
     if data.is_null() { io_unlock(); return -1; }
     let buf = unsafe { core::slice::from_raw_parts_mut(data, size as usize) };
@@ -1435,6 +1529,7 @@ pub extern "C" fn corevm_complete_string_io(
     handle: u64, vcpu_id: u32, port: u16, is_write: u8, size: u8, count: u32,
 ) -> i32 {
     io_lock();
+    CURRENT_IO_VCPU.store(vcpu_id, Ordering::Relaxed);
     let vm = match get_vm(handle) { Some(v) => v, None => { io_unlock(); return -1 } };
     #[cfg(feature = "linux")]
     {
@@ -1463,16 +1558,19 @@ pub extern "C" fn corevm_handle_mmio_exit(
     handle: u64, vcpu_id: u32, addr: u64, is_write: u8, size: u8, data: *mut u8,
     dest_reg: u8, instr_len: u8,
 ) -> i32 {
-    // MMIO exits need the IO_LOCK because APs generate MMIO exits for
-    // PCI MMCONFIG accesses (address 0xB0000000+) which touch the shared
-    // PCI bus state. Without locking, concurrent BSP and AP MMIO accesses
-    // cause data races on device state, leading to Windows SMP boot hangs.
+    // MMIO exits do NOT take the global IO_LOCK.
     //
-    // Note: AHCI command processing (triggered by PORT_CI writes) performs
-    // synchronous disk I/O that can block for milliseconds. This is
-    // acceptable because only the BSP writes to AHCI registers in practice.
-    io_lock();
-    let vm = match get_vm(handle) { Some(v) => v, None => { io_unlock(); return -1 } };
+    // AHCI command processing (triggered by PORT_CI writes) performs
+    // synchronous disk I/O (pread/pwrite) which can block for milliseconds.
+    // Holding the global spinlock during disk I/O starves all AP vCPU threads,
+    // causing 10-100x disk throughput degradation with SMP.
+    //
+    // Instead, AHCI has its own dedicated AHCI_LOCK (acquired inside
+    // PciMmioRouter) that serialises only AHCI accesses. Other MMIO
+    // devices (VGA, E1000, VirtIO) are accessed only from the BSP and
+    // do not need locking. The IO_LOCK remains on port I/O exits to
+    // serialise PCI config space and other shared port-I/O devices.
+    let vm = match get_vm(handle) { Some(v) => v, None => { return -1 } };
     if data.is_null() { return -1; }
     let buf = unsafe { core::slice::from_raw_parts_mut(data, size as usize) };
     vm.handle_mmio(addr, is_write != 0, size, buf);
@@ -1518,7 +1616,6 @@ pub extern "C" fn corevm_handle_mmio_exit(
             }
         }
     }
-    io_unlock();
     0
 }
 
@@ -1674,8 +1771,10 @@ pub extern "C" fn corevm_ahci_set_cache(handle: u64, port: u32, cache_mb: u32, m
 pub extern "C" fn corevm_ahci_flush_caches(handle: u64) {
     let vm = match get_vm(handle) { Some(v) => v, None => return };
     if vm.ahci_ptr.is_null() { return; }
+    ahci_lock();
     let ahci = unsafe { &mut *vm.ahci_ptr };
     ahci.flush_caches();
+    ahci_unlock();
 }
 
 /// Check if any AHCI port has dirty cache blocks that need flushing.
@@ -1683,8 +1782,12 @@ pub extern "C" fn corevm_ahci_flush_caches(handle: u64) {
 pub extern "C" fn corevm_ahci_needs_flush(handle: u64) -> i32 {
     let vm = match get_vm(handle) { Some(v) => v, None => return 0 };
     if vm.ahci_ptr.is_null() { return 0; }
+    // Non-blocking: if AHCI_LOCK is held (AP doing disk I/O), skip the check.
+    if !ahci_try_lock() { return 0; }
     let ahci = unsafe { &*vm.ahci_ptr };
-    if ahci.any_cache_needs_flush() { 1 } else { 0 }
+    let result = if ahci.any_cache_needs_flush() { 1 } else { 0 };
+    ahci_unlock();
+    result
 }
 
 pub extern "C" fn corevm_setup_standard_devices(handle: u64) -> i32 {
@@ -2016,11 +2119,17 @@ impl crate::memory::mmio::MmioHandler for PciMmioRouter {
             }
         }
 
-        // Check AHCI BAR5 (4KB region)
+        // Check AHCI BAR5 (4KB region).
+        // Reads don't need AHCI_LOCK: port registers (is, ci, tfd, etc.)
+        // are plain u32 values, which are atomic on x86_64. Even during
+        // concurrent writes, reads get a consistent (old or new) value.
+        // This eliminates the worst SMP bottleneck: status polling from
+        // other vCPUs no longer blocks on multi-ms disk I/O.
         let ahci_base = self.ahci_bar5();
         if ahci_base != 0 && abs_addr >= ahci_base && abs_addr < ahci_base + 0x1000 {
             let ahci = unsafe { &mut *self.ahci };
-            return ahci.read(abs_addr - ahci_base, size);
+            let result = ahci.read(abs_addr - ahci_base, size);
+            return result;
         }
 
         // Check VGA BAR2 — Bochs VBE DISPI MMIO registers (4KB region).
@@ -2094,11 +2203,32 @@ impl crate::memory::mmio::MmioHandler for PciMmioRouter {
             }
         }
 
-        // Check AHCI BAR5 (4KB region)
+        // Check AHCI BAR5 (4KB region) — deferred I/O pattern:
+        // 1. ahci_lock → parse command, clear CI, queue I/O → ahci_unlock
+        // 2. Execute pread/pwrite WITHOUT lock (other vCPUs can access AHCI)
+        // 3. ahci_lock → apply completions (FIS, IS, IRQ) → ahci_unlock
         let ahci_base = self.ahci_bar5();
         if ahci_base != 0 && abs_addr >= ahci_base && abs_addr < ahci_base + 0x1000 {
+            ahci_lock();
             let ahci = unsafe { &mut *self.ahci };
-            return ahci.write(abs_addr - ahci_base, size, val);
+            let result = ahci.write(abs_addr - ahci_base, size, val);
+            let mut pending = ahci.take_pending_io();
+            ahci_unlock();
+
+            if !pending.is_empty() {
+                // Disk I/O without AHCI_LOCK — the critical optimization.
+                for req in &mut pending {
+                    req.execute();
+                }
+                // Apply completions (brief lock — only state updates)
+                ahci_lock();
+                let ahci = unsafe { &mut *self.ahci };
+                for req in &pending {
+                    ahci.complete_io(req);
+                }
+                ahci_unlock();
+            }
+            return result;
         }
 
         // Check VGA BAR2 — Bochs VBE DISPI MMIO registers (4KB region)

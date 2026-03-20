@@ -5,6 +5,7 @@
 
 pub mod about;
 pub mod add_disk;
+pub mod copy_vm;
 pub mod create_disk;
 pub mod create_vm;
 pub mod disk_pool;
@@ -49,6 +50,7 @@ pub fn button_row(ui: &mut egui::Ui, ok_label: &str) -> (bool, bool) {
 // Re-exports for convenient access
 pub use about::AboutDialog;
 pub use add_disk::{AddDiskDialog, AddDiskMode};
+pub use copy_vm::CopyVmDialog;
 pub use create_disk::CreateDiskDialog;
 pub use create_vm::CreateVmDialog;
 pub use disk_pool::DiskPoolDialog;

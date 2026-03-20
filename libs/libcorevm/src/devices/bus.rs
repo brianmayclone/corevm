@@ -270,8 +270,11 @@ impl PciDevice {
 
 /// PCI system bus holding registered devices.
 pub struct PciBus {
-    /// Last address written to the Configuration Address port (0xCF8).
-    pub config_address: u32,
+    /// Per-vCPU config address latches for port 0xCF8.
+    /// Each vCPU has its own latch so concurrent PCI config accesses
+    /// from different vCPUs don't interfere (0xCF8 write on vCPU A
+    /// won't corrupt the subsequent 0xCFC read on vCPU B).
+    config_address: [u32; 32],
     /// Registered PCI devices.
     pub devices: Vec<PciDevice>,
     /// Current MMCONFIG base address (updated when PCIEXBAR is written).
@@ -286,12 +289,26 @@ impl PciBus {
     /// Create a new empty PCI bus with no devices.
     pub fn new() -> Self {
         PciBus {
-            config_address: 0,
+            config_address: [0; 32],
             devices: Vec::new(),
             mmconfig_base: 0xB000_0000,
             mmconfig_prev: 0xB000_0000,
             memory_ptr: core::ptr::null(),
         }
+    }
+
+    /// Get the config address latch for the current vCPU.
+    #[inline]
+    fn latch(&self) -> u32 {
+        let cpu = crate::ffi::current_io_vcpu() as usize;
+        self.config_address[cpu.min(31)]
+    }
+
+    /// Set the config address latch for the current vCPU.
+    #[inline]
+    fn set_latch(&mut self, val: u32) {
+        let cpu = crate::ffi::current_io_vcpu() as usize;
+        self.config_address[cpu.min(31)] = val;
     }
 
     /// Register a PCI device on this bus.
@@ -441,15 +458,16 @@ impl PciBus {
     /// Read a dword from PCI configuration space for the currently
     /// addressed device.
     fn config_read(&mut self) -> u32 {
-        if self.config_address & 0x80000000 == 0 {
+        let addr = self.latch();
+        if addr & 0x80000000 == 0 {
             // Enable bit not set — return all-ones (no device).
             return 0xFFFFFFFF;
         }
 
-        let bus = ((self.config_address >> 16) & 0xFF) as u8;
-        let device = ((self.config_address >> 11) & 0x1F) as u8;
-        let function = ((self.config_address >> 8) & 0x07) as u8;
-        let register = (self.config_address & 0xFC) as usize;
+        let bus = ((addr >> 16) & 0xFF) as u8;
+        let device = ((addr >> 11) & 0x1F) as u8;
+        let function = ((addr >> 8) & 0x07) as u8;
+        let register = (addr & 0xFC) as usize;
 
         let result = if let Some(dev) = self.find_device(bus, device, function) {
             if register + 3 < dev.config_space.len() {
@@ -476,13 +494,14 @@ impl PciBus {
     /// Write a dword to PCI configuration space for the currently
     /// addressed device.
     fn config_write(&mut self, val: u32) {
-        if self.config_address & 0x80000000 == 0 {
+        let addr = self.latch();
+        if addr & 0x80000000 == 0 {
             return;
         }
-        let bus = ((self.config_address >> 16) & 0xFF) as u8;
-        let device_num = ((self.config_address >> 11) & 0x1F) as u8;
-        let function = ((self.config_address >> 8) & 0x07) as u8;
-        let register = (self.config_address & 0xFC) as usize;
+        let bus = ((addr >> 16) & 0xFF) as u8;
+        let device_num = ((addr >> 11) & 0x1F) as u8;
+        let function = ((addr >> 8) & 0x07) as u8;
+        let register = (addr & 0xFC) as usize;
 
         #[cfg(feature = "std")]
         eprintln!("[pci-wr] bus={} dev={} fn={} reg=0x{:02X} val=0x{:08X}", bus, device_num, function, register, val);
@@ -591,7 +610,7 @@ impl IoHandler for PciBus {
         let val = match port {
             0xCF8..=0xCFB => {
                 let byte_offset = (port - 0xCF8) as u32;
-                let shifted = self.config_address >> (byte_offset * 8);
+                let shifted = self.latch() >> (byte_offset * 8);
                 match size {
                     1 => shifted & 0xFF,
                     2 => shifted & 0xFFFF,
@@ -634,11 +653,11 @@ impl IoHandler for PciBus {
                     };
                     let shifted_mask = mask << (byte_offset * 8);
                     let shifted_val = (val & mask) << (byte_offset * 8);
-                    (self.config_address & !shifted_mask) | shifted_val
+                    (self.latch() & !shifted_mask) | shifted_val
                 };
 
                 // Bits 1:0 are reserved and read as zero in config-address.
-                self.config_address = new_addr & !0x3;
+                self.set_latch(new_addr & !0x3);
             }
             0xCFC..=0xCFF => {
                 // Read-modify-write for sub-dword accesses.

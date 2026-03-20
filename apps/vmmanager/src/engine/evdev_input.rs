@@ -24,11 +24,19 @@ const REL_X: u16 = 0x00;
 const REL_Y: u16 = 0x01;
 const REL_WHEEL: u16 = 0x08;
 
+// Mouse button codes (evdev)
+const BTN_LEFT: u16 = 0x110;
+const BTN_RIGHT: u16 = 0x111;
+const BTN_MIDDLE: u16 = 0x112;
+
 // ioctl constants for capability queries
 const EVIOCGBIT_EV: libc::c_ulong = 0x80084520;  // EVIOCGBIT(0, 32)
 const EVIOCGBIT_REL: libc::c_ulong = 0x80084522;  // EVIOCGBIT(EV_REL, 32)
 const EV_REL_BIT: u8 = 1 << EV_REL;
 const EV_KEY_BIT: u8 = 1 << EV_KEY;
+
+// ioctl for exclusive device grab/ungrab
+const EVIOCGRAB: libc::c_ulong = 0x40044590;
 
 /// A keyboard event from evdev: (scancode_ps2, is_extended, pressed)
 /// scancode_ps2 is the PS/2 Set 1 scancode (without E0 prefix).
@@ -83,6 +91,10 @@ struct EvdevAccum {
     dx: AtomicI32,
     dy: AtomicI32,
     wheel: AtomicI32,
+    // Mouse button state (tracked by mouse reader thread)
+    btn_left: AtomicBool,
+    btn_right: AtomicBool,
+    btn_middle: AtomicBool,
     // Keyboard events queue
     key_events: Mutex<Vec<KeyEvent>>,
     // Modifier state tracked by keyboard thread (for release combo detection)
@@ -92,6 +104,8 @@ struct EvdevAccum {
     release_combo: AtomicBool,
     // Thread control
     running: AtomicBool,
+    // Whether mouse is exclusively grabbed via EVIOCGRAB
+    mouse_grabbed: AtomicBool,
 }
 
 /// Combined evdev input reader for mouse and keyboard.
@@ -128,11 +142,15 @@ impl EvdevInputReader {
                 dx: AtomicI32::new(0),
                 dy: AtomicI32::new(0),
                 wheel: AtomicI32::new(0),
+                btn_left: AtomicBool::new(false),
+                btn_right: AtomicBool::new(false),
+                btn_middle: AtomicBool::new(false),
                 key_events: Mutex::new(Vec::new()),
                 ctrl_down: AtomicBool::new(false),
                 alt_down: AtomicBool::new(false),
                 release_combo: AtomicBool::new(false),
                 running: AtomicBool::new(false),
+                mouse_grabbed: AtomicBool::new(false),
             }),
             mouse_thread: None,
             kbd_thread: None,
@@ -150,11 +168,23 @@ impl EvdevInputReader {
         self.accum.dx.store(0, Ordering::Relaxed);
         self.accum.dy.store(0, Ordering::Relaxed);
         self.accum.wheel.store(0, Ordering::Relaxed);
+        self.accum.btn_left.store(false, Ordering::Relaxed);
+        self.accum.btn_right.store(false, Ordering::Relaxed);
+        self.accum.btn_middle.store(false, Ordering::Relaxed);
         self.accum.ctrl_down.store(false, Ordering::Relaxed);
         self.accum.alt_down.store(false, Ordering::Relaxed);
         self.accum.release_combo.store(false, Ordering::Relaxed);
         if let Ok(mut keys) = self.accum.key_events.lock() {
             keys.clear();
+        }
+
+        // Flush any buffered events that accumulated while the fd was open
+        // but no thread was reading. Prevents huge initial delta jumps.
+        if self.mouse_fd >= 0 {
+            flush_events(self.mouse_fd);
+        }
+        if self.kbd_fd >= 0 {
+            flush_events(self.kbd_fd);
         }
 
         if self.mouse_fd >= 0 {
@@ -222,11 +252,53 @@ impl EvdevInputReader {
     pub fn has_keyboard(&self) -> bool {
         self.kbd_fd >= 0
     }
+
+    /// Exclusively grab the mouse device via EVIOCGRAB.
+    /// When grabbed, only this process receives mouse events — the host cursor freezes.
+    /// Returns true if grab succeeded.
+    pub fn grab_mouse(&self) -> bool {
+        if self.mouse_fd < 0 {
+            return false;
+        }
+        let ret = unsafe { libc::ioctl(self.mouse_fd, EVIOCGRAB, 1 as libc::c_int) };
+        let ok = ret == 0;
+        self.accum.mouse_grabbed.store(ok, Ordering::Relaxed);
+        if ok {
+            eprintln!("[evdev] Mouse EVIOCGRAB acquired");
+        } else {
+            eprintln!("[evdev] Mouse EVIOCGRAB failed (errno={})", std::io::Error::last_os_error());
+        }
+        ok
+    }
+
+    /// Release the exclusive mouse grab.
+    pub fn ungrab_mouse(&self) {
+        if self.mouse_fd >= 0 && self.accum.mouse_grabbed.swap(false, Ordering::Relaxed) {
+            unsafe { libc::ioctl(self.mouse_fd, EVIOCGRAB, 0 as libc::c_int); }
+            eprintln!("[evdev] Mouse EVIOCGRAB released");
+        }
+    }
+
+    /// Get current mouse button state from evdev.
+    /// Returns a bitmask: bit 0 = left, bit 1 = right, bit 2 = middle.
+    pub fn get_buttons(&self) -> u8 {
+        let mut b = 0u8;
+        if self.accum.btn_left.load(Ordering::Relaxed) { b |= 1; }
+        if self.accum.btn_right.load(Ordering::Relaxed) { b |= 2; }
+        if self.accum.btn_middle.load(Ordering::Relaxed) { b |= 4; }
+        b
+    }
+
+    /// Check if the mouse is exclusively grabbed.
+    pub fn is_mouse_grabbed(&self) -> bool {
+        self.accum.mouse_grabbed.load(Ordering::Relaxed)
+    }
 }
 
 impl Drop for EvdevInputReader {
     fn drop(&mut self) {
         self.stop();
+        self.ungrab_mouse();
         if self.mouse_fd >= 0 {
             unsafe { libc::close(self.mouse_fd); }
         }
@@ -251,12 +323,15 @@ struct InputEvent {
 fn mouse_reader_loop(fd: i32, accum: &EvdevAccum) {
     let event_size = std::mem::size_of::<InputEvent>();
     let mut buf = vec![0u8; event_size * 64];
+    let mut event_count: u64 = 0;
 
     let mut pollfd = libc::pollfd {
         fd,
         events: libc::POLLIN,
         revents: 0,
     };
+
+    eprintln!("[evdev-mouse] reader thread started, fd={}", fd);
 
     while accum.running.load(Ordering::Relaxed) {
         let ret = unsafe { libc::poll(&mut pollfd, 1, 50) };
@@ -266,15 +341,29 @@ fn mouse_reader_loop(fd: i32, accum: &EvdevAccum) {
         if n <= 0 { continue; }
 
         let num_events = n as usize / event_size;
+        event_count += num_events as u64;
+        if event_count <= 5 || event_count % 500 == 0 {
+            eprintln!("[evdev-mouse] events read: {} (total={})", num_events, event_count);
+        }
         for i in 0..num_events {
             let event = unsafe { &*(buf.as_ptr().add(i * event_size) as *const InputEvent) };
-            if event.type_ == EV_REL {
-                match event.code {
+            match event.type_ {
+                EV_REL => match event.code {
                     REL_X => { accum.dx.fetch_add(event.value, Ordering::Relaxed); }
                     REL_Y => { accum.dy.fetch_add(event.value, Ordering::Relaxed); }
                     REL_WHEEL => { accum.wheel.fetch_add(event.value, Ordering::Relaxed); }
                     _ => {}
+                },
+                EV_KEY => {
+                    let pressed = event.value != 0;
+                    match event.code {
+                        BTN_LEFT => accum.btn_left.store(pressed, Ordering::Relaxed),
+                        BTN_RIGHT => accum.btn_right.store(pressed, Ordering::Relaxed),
+                        BTN_MIDDLE => accum.btn_middle.store(pressed, Ordering::Relaxed),
+                        _ => {}
+                    }
                 }
+                _ => {}
             }
         }
     }
@@ -285,6 +374,9 @@ fn mouse_reader_loop(fd: i32, accum: &EvdevAccum) {
 fn kbd_reader_loop(fd: i32, accum: &EvdevAccum) {
     let event_size = std::mem::size_of::<InputEvent>();
     let mut buf = vec![0u8; event_size * 64];
+    let mut event_count: u64 = 0;
+
+    eprintln!("[evdev-kbd] reader thread started, fd={}", fd);
 
     let mut pollfd = libc::pollfd {
         fd,
@@ -300,6 +392,7 @@ fn kbd_reader_loop(fd: i32, accum: &EvdevAccum) {
         if n <= 0 { continue; }
 
         let num_events = n as usize / event_size;
+        event_count += num_events as u64;
         let mut batch = Vec::new();
 
         for i in 0..num_events {
@@ -339,10 +432,24 @@ fn kbd_reader_loop(fd: i32, accum: &EvdevAccum) {
         }
 
         if !batch.is_empty() {
+            if event_count <= 10 || event_count % 200 == 0 {
+                eprintln!("[evdev-kbd] {} key events queued (total raw={})", batch.len(), event_count);
+            }
             if let Ok(mut keys) = accum.key_events.lock() {
                 keys.extend(batch);
             }
         }
+    }
+    eprintln!("[evdev-kbd] reader thread exiting");
+}
+
+/// Drain all buffered events from an evdev fd (non-blocking).
+fn flush_events(fd: i32) {
+    let event_size = std::mem::size_of::<InputEvent>();
+    let mut buf = vec![0u8; event_size * 64];
+    loop {
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        if n <= 0 { break; }
     }
 }
 

@@ -10,6 +10,7 @@ pub enum VmState {
     Stopped,
     Running,
     Paused,
+    Stopping,
 }
 
 pub struct FolderEntry {
@@ -48,6 +49,8 @@ pub enum SidebarAction {
     ScreenshotVm(String),
     /// Open VM settings
     ConfigureVm(String),
+    /// Request to copy/clone a VM
+    CopyVm(String),
 }
 
 pub struct SidebarLayout {
@@ -371,6 +374,7 @@ fn render_vm_entry(
             let dot_color = match state {
                 VmState::Running => theme::success_green(),
                 VmState::Paused => theme::warning_orange(),
+                VmState::Stopping => theme::warning_orange(),
                 VmState::Stopped => unreachable!(),
             };
             let dot_center = icon_rect.right_bottom() - egui::vec2(3.0, 3.0);
@@ -464,6 +468,10 @@ fn render_vm_entry(
             });
         }
 
+        if ui.button("\u{1F4CB} Copy VM...").clicked() {
+            actions.push(SidebarAction::CopyVm(uuid.to_string()));
+            ui.close_menu();
+        }
         ui.separator();
         if menu_item(ui, Some("\u{1F5D1}"), "Delete VM", true, icon_width, Some(theme::error_red())) {
             actions.push(SidebarAction::DeleteVm(uuid.to_string()));
