@@ -549,6 +549,7 @@ impl E1000 {
             msi_enabled: false,
             msi_address: 0,
             msi_data: 0,
+            mmio_access_count: 0,
             #[cfg(feature = "std")]
             irq_callback: None,
             irq_pending_assert: false,
@@ -696,8 +697,11 @@ impl E1000 {
             Some(p) => p,
             None => return false,
         };
-        if (gpa as usize) + buf.len() > self.guest_mem_len {
-            return false;
+        // Bounds check: ensure the end of the buffer is also within guest RAM.
+        // Use gpa_to_host on the last byte to validate the entire range.
+        if buf.len() > 1 {
+            let end_gpa = gpa + (buf.len() as u64) - 1;
+            if self.gpa_to_host(end_gpa).is_none() { return false; }
         }
         unsafe { core::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr(), buf.len()); }
         true
@@ -708,8 +712,10 @@ impl E1000 {
             Some(p) => p,
             None => return false,
         };
-        if (gpa as usize) + data.len() > self.guest_mem_len {
-            return false;
+        // Bounds check: ensure the end of the buffer is also within guest RAM.
+        if data.len() > 1 {
+            let end_gpa = gpa + (data.len() as u64) - 1;
+            if self.gpa_to_host(end_gpa).is_none() { return false; }
         }
         unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len()); }
         true
@@ -1523,6 +1529,7 @@ impl E1000 {
         let di = val & EECD_DI != 0;
         let rising_edge = sk && !self.ee_sk_prev;
 
+
         self.ee_cd = (val & (EECD_SK | EECD_CS | EECD_DI | EECD_REQ | EECD_FWE))
             | (self.ee_cd & EECD_DO)
             | EECD_PRES | EECD_GNT;
@@ -1808,7 +1815,8 @@ impl MmioHandler for E1000 {
             }
 
             REG_RDBAH => {
-                // 82540EM is 32-bit PCI.
+                // Windows 10 places descriptors above 4GB — store high bits.
+                self.regs[dword_offset] = new_val;
             }
 
             REG_RDT => {
@@ -1836,7 +1844,8 @@ impl MmioHandler for E1000 {
             }
 
             REG_TDBAH => {
-                // 82540EM is 32-bit PCI.
+                // Windows 10 places descriptors above 4GB — store high bits.
+                self.regs[dword_offset] = new_val;
             }
 
             REG_TDT => {
