@@ -1444,6 +1444,18 @@ impl E1000 {
         let delivered = head != self.regs[REG_RDH / 4];
         self.regs[REG_RDH / 4] = head;
 
+        #[cfg(feature = "std")]
+        {
+            static mut RX_DIAG_COUNT: u32 = 0;
+            unsafe { RX_DIAG_COUNT += 1; }
+            if unsafe { RX_DIAG_COUNT } % 500 == 0 {
+                let avail = if tail >= head { tail - head } else { num_descs - head + tail };
+                eprintln!("[e1000-rx] delivered={} pending={} head={} tail={} avail={} icr=0x{:X} ims=0x{:X}",
+                    delivered_count, self.rx_buffer.len(), head, tail, avail,
+                    self.regs[REG_ICR / 4], self.regs[REG_IMS / 4]);
+            }
+        }
+
         if delivered || !self.rx_buffer.is_empty() {
             self.raise_interrupt(ICR_RXT0);
         }

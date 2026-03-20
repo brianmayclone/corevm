@@ -99,7 +99,7 @@ fn vm_list() -> &'static mut Vec<Option<Vm>> {
     }
 }
 
-fn get_vm(handle: u64) -> Option<&'static mut Vm> {
+pub fn get_vm(handle: u64) -> Option<&'static mut Vm> {
     if handle == 0 {
         return None;
     }
@@ -2660,52 +2660,75 @@ pub extern "C" fn corevm_net_poll(handle: u64) -> i32 {
         let use_e1000 = !vm.e1000_ptr.is_null();
         let use_virtio_net = !vm.virtio_net_ptr.is_null();
 
-        // Take TX packets from the active NIC and send to backend.
-        let tx_packets = if use_virtio_net {
-            let vnet = unsafe { &mut *vm.virtio_net_ptr };
-            vnet.take_tx_packets()
-        } else if use_e1000 {
-            let e1000 = unsafe { &mut *vm.e1000_ptr };
-            e1000.take_tx_packets()
-        } else {
-            alloc::vec::Vec::new()
-        };
-
-        let backend = match &mut vm.net_backend {
-            Some(b) => b,
-            None => return 0,
-        };
-
-        for pkt in &tx_packets {
-            backend.send(pkt);
-        }
-
-        // Poll backend for periodic work (timers, TCP reads, etc.)
-        backend.poll();
-
-        // Receive packets from backend and inject into the active NIC.
-        let rx_packets = backend.recv();
-        let rx_count = rx_packets.len() as i32;
-
-        if !rx_packets.is_empty() {
-            if use_virtio_net {
+        // Run a TX→backend→RX loop. This allows ACKs from the guest to
+        // immediately trigger new data reads from host sockets within the
+        // same poll call, eliminating the 10ms+ round-trip latency that
+        // would otherwise occur between polls.
+        let mut total_rx: i32 = 0;
+        let mut total_tx: i32 = 0;
+        for round in 0..4 {
+            // Take TX packets from the active NIC and send to backend.
+            let tx_packets = if use_virtio_net {
                 let vnet = unsafe { &mut *vm.virtio_net_ptr };
-                for pkt in &rx_packets {
-                    vnet.receive_packet(pkt);
-                }
-                vnet.process_rx();
+                vnet.take_tx_packets()
             } else if use_e1000 {
                 let e1000 = unsafe { &mut *vm.e1000_ptr };
-                const RX_BUFFER_LIMIT: usize = 256;
-                for pkt in &rx_packets {
-                    if e1000.rx_buffer.len() >= RX_BUFFER_LIMIT { break; }
-                    e1000.receive_packet(pkt);
+                e1000.take_tx_packets()
+            } else {
+                alloc::vec::Vec::new()
+            };
+
+            let backend = match &mut vm.net_backend {
+                Some(b) => b,
+                None => return 0,
+            };
+
+            total_tx += tx_packets.len() as i32;
+            for pkt in &tx_packets {
+                backend.send(pkt);
+            }
+
+            // Poll backend for periodic work (timers, TCP reads, etc.)
+            backend.poll();
+
+            // Receive packets from backend and inject into the active NIC.
+            let rx_packets = backend.recv();
+            if rx_packets.is_empty() && tx_packets.is_empty() {
+                break; // Nothing happening — no need for more rounds
+            }
+            let rx_count = rx_packets.len() as i32;
+            total_rx += rx_count;
+
+            if !rx_packets.is_empty() {
+                if use_virtio_net {
+                    let vnet = unsafe { &mut *vm.virtio_net_ptr };
+                    for pkt in &rx_packets {
+                        vnet.receive_packet(pkt);
+                    }
+                    vnet.process_rx();
+                } else if use_e1000 {
+                    let e1000 = unsafe { &mut *vm.e1000_ptr };
+                    const RX_BUFFER_LIMIT: usize = 512;
+                    for pkt in &rx_packets {
+                        if e1000.rx_buffer.len() >= RX_BUFFER_LIMIT { break; }
+                        e1000.receive_packet(pkt);
+                    }
+                    e1000.process_rx_ring();
                 }
-                e1000.process_rx_ring();
+            }
+
+            // Log activity when packets flow
+            if total_tx > 0 || total_rx > 0 {
+                static mut NET_POLL_DIAG: u32 = 0;
+                unsafe { NET_POLL_DIAG += 1; }
+                if unsafe { NET_POLL_DIAG } % 200 == 0 {
+                    eprintln!("[net-poll] round={} tx={} rx={} total_tx={} total_rx={}",
+                        round, tx_packets.len(), rx_count, total_tx, total_rx);
+                }
             }
         }
 
-        rx_count
+        total_rx
     }
     #[cfg(not(feature = "std"))]
     { let _ = handle; 0 }

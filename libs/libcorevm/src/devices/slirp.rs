@@ -166,6 +166,8 @@ struct TcpConnection {
     retransmit_queue: Vec<(u32, Vec<u8>)>,
     /// Timestamp of last retransmit check.
     last_retransmit: Option<Instant>,
+    /// Consecutive duplicate ACK count (for fast retransmit, RFC 5681).
+    dup_ack_count: u32,
 }
 
 // ── UDP flow tracking ────────────────────────────────────────────────────────
@@ -755,9 +757,6 @@ impl SlirpNet {
 
             let our_seq: u32 = 0x1000_0000;
             let wscale = Self::parse_wscale(payload);
-            eprintln!("[slirp-tcp] SYN :{} → {}:{} wscale={} raw_win={}",
-                src_port, Ipv4Addr::new(dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3]),
-                dst_port, wscale, u16be(payload, 14));
             self.pending_connects.push((key, rx, seq, our_seq, wscale));
             // FTP ALG: track control connections (port 21).
             if dst_port == 21 {
@@ -772,6 +771,7 @@ impl SlirpNet {
         }
 
         // Existing connection — extract values to avoid borrow conflicts
+        let mut fast_retransmit: Option<(TcpFlowKey, u32, Vec<u8>, u32)> = None;
         {
             let conn = match self.tcp_conns.get_mut(&key) {
                 Some(c) => c,
@@ -788,8 +788,6 @@ impl SlirpNet {
                 conn.our_seq = conn.our_seq.wrapping_add(1); // SYN consumed
                 // Clear retransmit queue — SYN-ACK was acknowledged
                 conn.retransmit_queue.clear();
-                eprintln!("[slirp-tcp] ESTABLISHED :{} wscale={} window={}",
-                    key.guest_port, conn.guest_wscale, conn.guest_window);
             }
 
             // Process ACK: reduce unacked byte count and purge retransmit queue
@@ -799,11 +797,26 @@ impl SlirpNet {
                 let acked = ack_num.wrapping_sub(oldest_unacked);
                 if acked > 0 && acked <= conn.unacked {
                     conn.unacked -= acked;
+                    conn.dup_ack_count = 0;
                     // Remove ACKed segments from retransmit queue
                     conn.retransmit_queue.retain(|(seg_seq, seg_data)| {
                         let seg_end = seg_seq.wrapping_add(seg_data.len() as u32);
                         seg_end.wrapping_sub(ack_num) < 0x8000_0000 // seg_end > ack_num (wrapping)
                     });
+                } else if conn.unacked > 0 && acked == 0 && tcp_data.is_empty() {
+                    // Duplicate ACK: guest is re-requesting data starting at ack_num.
+                    // After 3 duplicate ACKs (RFC 5681), retransmit immediately.
+                    conn.dup_ack_count += 1;
+                    if conn.dup_ack_count >= 3 && !conn.retransmit_queue.is_empty() {
+                        // Fast retransmit: grab segment data, send after dropping borrow
+                        if let Some((seg_seq, seg_data)) = conn.retransmit_queue.iter()
+                            .find(|(s, _)| *s == ack_num || s.wrapping_sub(ack_num) < 0x8000_0000)
+                        {
+                            fast_retransmit = Some((key, *seg_seq, seg_data.clone(), conn.guest_seq));
+                        }
+                        conn.dup_ack_count = 0;
+                        conn.last_retransmit = Some(Instant::now());
+                    }
                 }
             }
 
@@ -891,6 +904,11 @@ impl SlirpNet {
                     c.state = TcpState::Closed;
                 }
             }
+        }
+
+        // Fast retransmit (outside borrow scope)
+        if let Some((fkey, seg_seq, seg_data, guest_seq)) = fast_retransmit {
+            self.send_tcp_flags(fkey, 0x18, seg_seq, guest_seq, &seg_data);
         }
     }
 
@@ -1009,6 +1027,7 @@ impl SlirpNet {
             guest_wscale: 0, // will be updated from SYN-ACK
             retransmit_queue: Vec::new(),
             last_retransmit: None,
+            dup_ack_count: 0,
         };
 
         self.tcp_conns.insert(key, conn);
@@ -1084,6 +1103,7 @@ impl SlirpNet {
                         guest_wscale: wscale,
                         retransmit_queue: Vec::new(),
                         last_retransmit: None,
+                        dup_ack_count: 0,
                     };
                     completed.push((key, conn, our_seq, guest_seq_raw));
                 }
@@ -1175,6 +1195,24 @@ impl SlirpNet {
             if let Some(conn) = self.tcp_conns.get(key) {
                 let ack = conn.guest_seq;
                 self.send_tcp_flags(*key, 0x18, *seg_seq, ack, data); // PSH+ACK
+            }
+        }
+
+        // Periodic summary of TCP state
+        {
+            static mut TCP_DIAG: u32 = 0;
+            let n_sent = data_to_send.len();
+            let n_retx = retransmits.len();
+            if n_sent > 0 || n_retx > 0 {
+                unsafe { TCP_DIAG += 1; }
+                if unsafe { TCP_DIAG } % 100 == 0 {
+                    let total_unacked: u32 = self.tcp_conns.values().map(|c| c.unacked).sum();
+                    let total_retransmit: usize = self.tcp_conns.values().map(|c| c.retransmit_queue.len()).sum();
+                    let established = self.tcp_conns.values().filter(|c| c.state == TcpState::Established).count();
+                    eprintln!("[slirp-tcp] conns={} sent={} retx={} total_unacked={} total_retx_q={} rxq={}",
+                        established, n_sent, n_retx,
+                        total_unacked, total_retransmit, self.rx_queue.len());
+                }
             }
         }
 
