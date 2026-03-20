@@ -755,6 +755,9 @@ impl SlirpNet {
 
             let our_seq: u32 = 0x1000_0000;
             let wscale = Self::parse_wscale(payload);
+            eprintln!("[slirp-tcp] SYN :{} → {}:{} wscale={} raw_win={}",
+                src_port, Ipv4Addr::new(dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3]),
+                dst_port, wscale, u16be(payload, 14));
             self.pending_connects.push((key, rx, seq, our_seq, wscale));
             // FTP ALG: track control connections (port 21).
             if dst_port == 21 {
@@ -777,6 +780,7 @@ impl SlirpNet {
 
             // Track guest window size for flow control (apply Window Scale from SYN)
             let raw_window = u16be(payload, 14) as u32;
+            let old_window = conn.guest_window;
             conn.guest_window = raw_window << conn.guest_wscale;
 
             if ack_flag && conn.state == TcpState::SynReceived {
@@ -784,6 +788,8 @@ impl SlirpNet {
                 conn.our_seq = conn.our_seq.wrapping_add(1); // SYN consumed
                 // Clear retransmit queue — SYN-ACK was acknowledged
                 conn.retransmit_queue.clear();
+                eprintln!("[slirp-tcp] ESTABLISHED :{} wscale={} window={}",
+                    key.guest_port, conn.guest_wscale, conn.guest_window);
             }
 
             // Process ACK: reduce unacked byte count and purge retransmit queue
@@ -1095,9 +1101,10 @@ impl SlirpNet {
         }
 
         const TCP_MSS: usize = 1460;
-        const MAX_UNACKED_CAP: u32 = 512 * 1024; // 512 KB — generous for scaled windows
-        const RETRANSMIT_TIMEOUT_MS: u128 = 200;
-        const MAX_SEGMENTS_PER_POLL: usize = 128;
+        const MAX_UNACKED_BYTES: u32 = 32 * 1024; // 32 KB — conservative to avoid flooding guest
+        const RETRANSMIT_TIMEOUT_MS: u128 = 500;
+        const MAX_SEGMENTS_PER_POLL: usize = 16;
+        const MAX_RETRANSMIT_QUEUE: usize = 32; // drop connection if retransmit queue gets too large
 
         let mut data_to_send: Vec<(TcpFlowKey, u32, Vec<u8>)> = Vec::new(); // (key, seq, data)
         let mut closed: Vec<TcpFlowKey> = Vec::new();
@@ -1108,8 +1115,21 @@ impl SlirpNet {
         for (key, conn) in &mut self.tcp_conns {
             if conn.state != TcpState::Established { continue; }
 
+            // Kill connections with hopelessly large retransmit queues — guest has
+            // clearly lost track and will never ACK these segments.
+            if conn.retransmit_queue.len() > MAX_RETRANSMIT_QUEUE {
+                eprintln!("[slirp-tcp] KILL :{} retransmit_q={} unacked={} — connection stalled",
+                    key.guest_port, conn.retransmit_queue.len(), conn.unacked);
+                closed.push(*key);
+                continue;
+            }
+
+            // Don't read new data while we still have significant unacked bytes.
+            // This is the PRIMARY flow control — wait for ACKs before sending more.
+            if conn.unacked >= MAX_UNACKED_BYTES { continue; }
+
             // Respect rx_queue backpressure — don't flood the E1000 ring
-            if self.rx_queue.len() > 1024 { break; }
+            if self.rx_queue.len() + data_to_send.len() > 128 { break; }
 
             // Non-blocking read: temporarily switch to non-blocking mode
             let _ = conn.stream.set_nonblocking(true);
@@ -1118,16 +1138,12 @@ impl SlirpNet {
             let mut segments_this_conn = 0;
             loop {
                 if segments_this_conn >= MAX_SEGMENTS_PER_POLL { break; }
-                if self.rx_queue.len() + data_to_send.len() > 1024 { break; }
+                if self.rx_queue.len() + data_to_send.len() > 128 { break; }
 
-                // Flow control: respect guest's advertised window (already scaled), with fallback
-                let guest_win = if conn.guest_window > 0 { conn.guest_window } else { 65535 };
-                let max_unacked = guest_win.min(MAX_UNACKED_CAP);
-                if conn.unacked >= max_unacked { break; }
+                // Stop if we've already buffered enough unacked data
+                if conn.unacked >= MAX_UNACKED_BYTES { break; }
 
-                let remaining_window = max_unacked.saturating_sub(conn.unacked) as usize;
-                let max_read = TCP_MSS.min(conn.read_buf.len()).min(remaining_window.max(TCP_MSS));
-                match conn.stream.read(&mut conn.read_buf[..max_read]) {
+                match conn.stream.read(&mut conn.read_buf[..TCP_MSS]) {
                     Ok(0) => { closed.push(*key); break; }
                     Ok(n) => {
                         let seg_data = conn.read_buf[..n].to_vec();
@@ -1146,6 +1162,10 @@ impl SlirpNet {
             let _ = conn.stream.set_nonblocking(false);
             if segments_this_conn > 0 {
                 conn.last_retransmit = Some(now);
+                eprintln!("[slirp-tcp] poll :{} read {} segs, unacked={} win={} rxq={} retransmit_q={}",
+                    key.guest_port, segments_this_conn, conn.unacked,
+                    conn.guest_window, self.rx_queue.len() + data_to_send.len(),
+                    conn.retransmit_queue.len());
             }
 
             // Retransmit check: if we have unacked segments and haven't
@@ -1158,8 +1178,12 @@ impl SlirpNet {
                 if should_retransmit {
                     // Retransmit the first (oldest) unacked segment
                     let (seg_seq, seg_data) = conn.retransmit_queue[0].clone();
+                    let seg_len = seg_data.len();
                     retransmits.push((*key, seg_seq, seg_data));
                     conn.last_retransmit = Some(now);
+                    eprintln!("[slirp-tcp] RETRANSMIT :{} seq={} len={} unacked={} retransmit_q={}",
+                        key.guest_port, seg_seq, seg_len, conn.unacked,
+                        conn.retransmit_queue.len());
                 }
             }
         }

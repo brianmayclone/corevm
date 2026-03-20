@@ -269,12 +269,17 @@ impl PciDevice {
 }
 
 /// PCI system bus holding registered devices.
-#[derive(Debug)]
 pub struct PciBus {
     /// Last address written to the Configuration Address port (0xCF8).
     pub config_address: u32,
     /// Registered PCI devices.
     pub devices: Vec<PciDevice>,
+    /// Current MMCONFIG base address (updated when PCIEXBAR is written).
+    pub mmconfig_base: u64,
+    /// Previous MMCONFIG base (to detect changes).
+    pub mmconfig_prev: u64,
+    /// Memory subsystem pointer for updating MMIO regions on PCIEXBAR relocation.
+    pub memory_ptr: *const crate::memory::GuestMemory,
 }
 
 impl PciBus {
@@ -283,6 +288,9 @@ impl PciBus {
         PciBus {
             config_address: 0,
             devices: Vec::new(),
+            mmconfig_base: 0xB000_0000,
+            mmconfig_prev: 0xB000_0000,
+            memory_ptr: core::ptr::null(),
         }
     }
 
@@ -395,8 +403,6 @@ impl PciBus {
             // Read-only field protection.
             match register {
                 0x00..=0x03 | 0x08..=0x0B => { /* Vendor/Device ID, Class: read-only */ }
-                // PCIEXBAR on host bridge: read-only (MMCONFIG handler is fixed)
-                0x60..=0x67 if device == 0 && bus == 0 => {}
                 _ => match size {
                     1 => {
                         if register < dev.config_space.len() {
@@ -416,6 +422,11 @@ impl PciBus {
                     _ => {}
                 },
             }
+        }
+
+        // Check if PCIEXBAR was written on MCH (device 0, bus 0)
+        if bus == 0 && device == 0 && (register == 0x60 || register == 0x64) {
+            self.update_pciexbar();
         }
     }
 
@@ -474,13 +485,7 @@ impl PciBus {
         let register = (self.config_address & 0xFC) as usize;
 
         #[cfg(feature = "std")]
-        {
-            static PCI_WR_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            let n = PCI_WR_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if n < 100 {
-                eprintln!("[pci-wr] bus={} dev={} fn={} reg=0x{:02X} val=0x{:08X}", bus, device_num, function, register, val);
-            }
-        }
+        eprintln!("[pci-wr] bus={} dev={} fn={} reg=0x{:02X} val=0x{:08X}", bus, device_num, function, register, val);
 
         if let Some(dev) = self.find_device(bus, device_num, function) {
             // Handle BAR writes: when the guest writes 0xFFFFFFFF to a BAR,
@@ -527,14 +532,50 @@ impl PciBus {
                 match register {
                     0x00..=0x03 => { /* Vendor/Device ID: read-only */ }
                     0x08..=0x0B => { /* Revision/Class: read-only */ }
-                    // PCIEXBAR (0x60-0x67) on host bridge (device 0): read-only.
-                    // OVMF tries to relocate PCIEXBAR, but our MMCONFIG handler
-                    // is fixed at the configured address. Ignore writes.
-                    0x60..=0x67 if device_num == 0 && bus == 0 => { /* PCIEXBAR: read-only */ }
                     _ => {
                         config_write_u32(&mut dev.config_space, register, val);
                     }
                 }
+            }
+        }
+
+        // Check if PCIEXBAR was written on MCH (device 0, bus 0)
+        if bus == 0 && device_num == 0 && register >= 0x60 && register <= 0x64 {
+            #[cfg(feature = "std")]
+            {
+                eprintln!("[pci] >>> PCIEXBAR write detected reg=0x{:02X}", register);
+                use std::io::Write;
+                let _ = std::io::stderr().flush();
+            }
+            self.update_pciexbar();
+        }
+    }
+
+    /// Check if PCIEXBAR changed and update the MMCONFIG MMIO region accordingly.
+    fn update_pciexbar(&mut self) {
+        #[cfg(feature = "std")]
+        eprintln!("[pci] update_pciexbar called, devices={}", self.devices.len());
+        if let Some(mch) = self.find_device(0, 0, 0) {
+            let lo = config_read_u32(&mch.config_space, 0x60) as u64;
+            let hi = config_read_u32(&mch.config_space, 0x64) as u64;
+            let enabled = (lo & 1) != 0;
+            let base = ((hi << 32) | lo) & 0xFFFF_FFFF_F000_0000;
+
+            #[cfg(feature = "std")]
+            eprintln!("[pci] PCIEXBAR check: lo=0x{:X} hi=0x{:X} enabled={} base=0x{:X} current=0x{:X}",
+                lo, hi, enabled, base, self.mmconfig_base);
+
+            if enabled && base != 0 && base != self.mmconfig_base {
+                let old = self.mmconfig_base;
+                #[cfg(feature = "std")]
+                eprintln!("[pci] PCIEXBAR relocated: 0x{:X} → 0x{:X}", old, base);
+
+                if !self.memory_ptr.is_null() {
+                    let mem = unsafe { &*self.memory_ptr };
+                    mem.update_mmio_base(old, base);
+                }
+                self.mmconfig_prev = old;
+                self.mmconfig_base = base;
             }
         }
     }

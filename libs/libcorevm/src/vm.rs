@@ -401,6 +401,8 @@ impl Vm {
             pci_bus.add_device(vga);
         }
 
+        // Set memory pointer so PCIEXBAR writes can relocate MMCONFIG MMIO
+        pci_bus.memory_ptr = &self.memory as *const crate::memory::GuestMemory;
         let pci_bus_ptr = &*pci_bus as *const PciBus as *mut PciBus;
         self.pci_bus_ptr = pci_bus_ptr;
         self.io.register(0xCF8, 8, pci_bus);

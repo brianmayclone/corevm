@@ -1281,7 +1281,7 @@ impl E1000 {
         let tu_offload = rxcsum & RXCSUM_TUOFLD != 0;
 
         let mut delivered_count = 0u32;
-        const MAX_RX_PER_POLL: u32 = 256;
+        const MAX_RX_PER_POLL: u32 = 128;
 
         while let Some(_pkt) = self.rx_buffer.front() {
             if delivered_count >= MAX_RX_PER_POLL { break; }
@@ -1297,9 +1297,9 @@ impl E1000 {
                     }
                 }
                 // No available descriptors — drop excess packets to prevent
-                // unbounded memory growth.  Keep at most 256 packets queued
+                // unbounded memory growth.  Keep at most 64 packets queued
                 // so the guest can recover when it replenishes descriptors.
-                while self.rx_buffer.len() > 256 {
+                while self.rx_buffer.len() > 64 {
                     self.rx_buffer.pop_front();
                     self.stat_inc(STAT_MPC); // Missed Packet Count
                 }
