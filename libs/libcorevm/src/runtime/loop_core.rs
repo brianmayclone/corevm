@@ -300,8 +300,16 @@ pub(crate) fn bsp_loop(
     let mut last_audio = Instant::now();
     let mut cache_flush_counter: u32 = 0;
     let mut consecutive_errors: u32 = 0;
+    let mut bsp_iterations: u64 = 0;
+    let mut bsp_halts: u64 = 0;
+    let mut last_diag = Instant::now();
 
     loop {
+        bsp_iterations += 1;
+        if last_diag.elapsed().as_secs() >= 5 {
+            eprintln!("[bsp] alive: {}s iters={} halts={}", start.elapsed().as_secs(), bsp_iterations, bsp_halts);
+            last_diag = Instant::now();
+        }
         // Check stop flag.
         if control.stop.load(Ordering::Relaxed) {
             break;
@@ -345,6 +353,7 @@ pub(crate) fn bsp_loop(
         match action {
             ExitAction::Continue => {}
             ExitAction::Halted => {
+                bsp_halts += 1;
                 // BSP: brief sleep so we don't busy-loop when the guest is idle.
                 // The cancel thread will kick us out for timer advancement.
                 std::thread::sleep(std::time::Duration::from_millis(1));

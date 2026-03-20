@@ -233,6 +233,9 @@ const KVM_SET_MP_STATE: u64 = 0x4004_AE99;
 const KVM_SET_MSRS: u64 = 0x4008_AE89;
 const KVM_SET_TSS_ADDR: u64 = 0xAE47;
 const KVM_SET_IDENTITY_MAP_ADDR: u64 = 0x4008_AE48;
+const KVM_GET_TSC_KHZ: u64 = 0xAEA3;
+const KVM_SET_TSC_KHZ: u64 = 0xAEA2;
+const KVM_CHECK_EXTENSION: u64 = 0xAE03;
 const KVM_GET_PIT2: u64 = 0x8070_AE9F;
 const KVM_SET_PIT2: u64 = 0x4070_AEA0;
 
@@ -713,6 +716,8 @@ pub struct KvmBackend {
     pub cpu_count: u32,
     /// Slot index into VM_SLOTS for per-VM cancel/PIT state.
     pub vm_slot: usize,
+    /// Fixed TSC frequency in kHz for all vCPUs (0 = not set).
+    tsc_khz: u32,
 }
 
 impl KvmBackend {
@@ -793,6 +798,11 @@ impl KvmBackend {
             }
 
             let slot = alloc_vm_slot();
+            // Query host TSC frequency via KVM_GET_TSC_KHZ (vCPU-level ioctl
+            // requires a vCPU — use KVM_CHECK_EXTENSION on the VM fd instead).
+            // KVM_CAP_GET_TSC_KHZ = 61
+            let has_tsc_khz = sys_ioctl(vm_fd, KVM_CHECK_EXTENSION, 61) > 0;
+
             let mut backend = Self {
                 kvm_fd,
                 vm_fd,
@@ -802,6 +812,7 @@ impl KvmBackend {
                 stored_cpuid: None,
                 cpu_count: 1,
                 vm_slot: slot,
+                tsc_khz: 0,
             };
 
             // Store VM fd in per-VM slot for PIT channel 2 gate sync
@@ -1245,6 +1256,38 @@ impl KvmBackend {
         Ok(())
     }
 
+    /// Synchronize TSC across all vCPUs.
+    ///
+    /// Sets IA32_TSC (MSR 0x10) and IA32_TSC_ADJUST (MSR 0x3B) to 0 on all
+    /// created vCPUs in a tight loop, minimizing the time skew between them.
+    /// Must be called just before starting the VM execution threads.
+    pub fn sync_tsc(&self) {
+        for (idx, slot) in self.vcpus.iter().enumerate() {
+            if let Some(vcpu) = slot {
+                // Build a KVM_SET_MSRS buffer for IA32_TSC=0, IA32_TSC_ADJUST=0
+                let mut buf = [0u8; 8 + 2 * 16]; // header + 2 entries
+                buf[0..4].copy_from_slice(&2u32.to_ne_bytes()); // nmsrs = 2
+                // Entry 0: IA32_TSC (0x10) = 0
+                buf[8..12].copy_from_slice(&0x10u32.to_ne_bytes());
+                // data at offset 16..24 is already 0
+                // Entry 1: IA32_TSC_ADJUST (0x3B) = 0
+                buf[24..28].copy_from_slice(&0x3Bu32.to_ne_bytes());
+                // data at offset 32..40 is already 0
+                unsafe {
+                    let ret = sys_ioctl(vcpu.fd, KVM_SET_MSRS, buf.as_ptr() as u64);
+                    if ret < 0 {
+                        eprintln!("[kvm] sync_tsc: KVM_SET_MSRS failed for vcpu {}: {}", idx, ret);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Return the fixed TSC frequency in kHz (0 if not detected).
+    pub fn tsc_khz(&self) -> u32 {
+        self.tsc_khz
+    }
+
     /// Inject an MSI interrupt into the guest via KVM_SIGNAL_MSI.
     /// `address`: MSI address (written by guest to MSI capability register)
     /// `data`: MSI data (written by guest to MSI capability register)
@@ -1471,6 +1514,24 @@ impl VmBackend for KvmBackend {
                     // LAPIC ID register is at offset 0x20, bits 31:24 = APIC ID
                     lapic_regs[0x23] = id as u8; // byte 3 of u32 at 0x20 = bits 31:24
                     sys_ioctl(vcpu_fd, KVM_SET_LAPIC, lapic_regs.as_ptr() as u64);
+                }
+            }
+
+            // Fix TSC frequency for SMP: read from first vCPU, set on all.
+            // Without a fixed TSC frequency, KVM inherits the host's current
+            // P-state frequency which can vary between cores. This causes
+            // Linux to report "Firmware Bug: TSC not synchronous" and Windows
+            // to hang in timer calibration loops.
+            {
+                if self.tsc_khz == 0 {
+                    // First vCPU: read the host TSC frequency
+                    let khz = sys_ioctl(vcpu_fd, KVM_GET_TSC_KHZ, 0);
+                    if khz > 0 {
+                        self.tsc_khz = khz as u32;
+                    }
+                }
+                if self.tsc_khz > 0 {
+                    sys_ioctl(vcpu_fd, KVM_SET_TSC_KHZ, self.tsc_khz as u64);
                 }
             }
 

@@ -169,6 +169,14 @@ impl VmRuntime {
         #[cfg(target_os = "linux")]
         crate::backend::kvm::install_sigusr1_handler();
 
+        // Synchronize TSC across all vCPUs before any thread starts running.
+        // This sets IA32_TSC=0 and IA32_TSC_ADJUST=0 on all vCPUs in a tight
+        // loop to minimize inter-core skew. Must happen after all vCPUs are
+        // created but before any KVM_RUN.
+        if num_cpus > 1 {
+            crate::ffi::corevm_sync_tsc(handle);
+        }
+
         // Spawn cancel timer thread.
         self.cancel_thread = Some(cancel::spawn_cancel_thread(
             handle,

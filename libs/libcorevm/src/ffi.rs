@@ -584,9 +584,9 @@ pub extern "C" fn corevm_cmos_advance(handle: u64, ticks_32768: u64) -> u32 {
 /// The in-kernel PIC/IOAPIC/LAPIC handles vector injection automatically.
 #[no_mangle]
 pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
-    // No io_lock: poll_irqs is only called from the BSP thread (bsp_loop).
-    // Taking the lock here would contend with AP I/O exits and block
-    // interrupt delivery during AHCI disk I/O.
+    // No io_lock: called only from BSP thread. MMIO exits now take the
+    // lock, but poll_irqs doesn't need it since the BSP serializes its
+    // own calls naturally (sequential within bsp_loop).
     let result = match get_vm(handle) {
         Some(vm) => {
             let mut injected = 0u32;
@@ -1070,7 +1070,7 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
 /// enabled MSI via the PCI capability registers.
 #[no_mangle]
 pub extern "C" fn corevm_ahci_poll_irq(handle: u64) {
-    // No io_lock: called only from BSP thread, immediately after MMIO exits.
+    // No io_lock: called only from BSP thread after MMIO exits.
     let vm = match get_vm(handle) { Some(v) => v, None => { return } };
     if vm.ahci_ptr.is_null() { return; }
 
@@ -1463,20 +1463,16 @@ pub extern "C" fn corevm_handle_mmio_exit(
     handle: u64, vcpu_id: u32, addr: u64, is_write: u8, size: u8, data: *mut u8,
     dest_reg: u8, instr_len: u8,
 ) -> i32 {
-    // MMIO exits do NOT take the IO_LOCK.
+    // MMIO exits need the IO_LOCK because APs generate MMIO exits for
+    // PCI MMCONFIG accesses (address 0xB0000000+) which touch the shared
+    // PCI bus state. Without locking, concurrent BSP and AP MMIO accesses
+    // cause data races on device state, leading to Windows SMP boot hangs.
     //
-    // AHCI command processing (triggered by PORT_CI writes) performs
-    // synchronous disk I/O (pread/pwrite) which can block for milliseconds.
-    // Holding the global spinlock during disk I/O starves all AP vCPU threads,
-    // causing 10-100x disk throughput degradation with SMP.
-    //
-    // Safety: MMIO exits are almost exclusively from the BSP (vCPU 0) which
-    // accesses AHCI, E1000, VGA, and VirtIO registers. APs rarely generate
-    // MMIO exits (only for LAPIC/IOAPIC which are handled in-kernel on KVM).
-    // The BSP runs single-threaded within bsp_loop, so no lock is needed
-    // for its MMIO accesses. The IO_LOCK remains on port I/O exits to
-    // serialise PCI config space and other shared port-I/O devices.
-    let vm = match get_vm(handle) { Some(v) => v, None => { return -1 } };
+    // Note: AHCI command processing (triggered by PORT_CI writes) performs
+    // synchronous disk I/O that can block for milliseconds. This is
+    // acceptable because only the BSP writes to AHCI registers in practice.
+    io_lock();
+    let vm = match get_vm(handle) { Some(v) => v, None => { io_unlock(); return -1 } };
     if data.is_null() { return -1; }
     let buf = unsafe { core::slice::from_raw_parts_mut(data, size as usize) };
     vm.handle_mmio(addr, is_write != 0, size, buf);
@@ -1522,6 +1518,7 @@ pub extern "C" fn corevm_handle_mmio_exit(
             }
         }
     }
+    io_unlock();
     0
 }
 
@@ -1582,6 +1579,33 @@ pub extern "C" fn corevm_set_mp_state(handle: u64, vcpu_id: u32, state: u32) -> 
             }
             #[cfg(not(feature = "linux"))]
             { let _ = (vcpu_id, state); 0 }
+        }
+        None => -1,
+    }
+}
+
+/// Synchronize TSC across all vCPUs just before starting VM execution.
+///
+/// Sets IA32_TSC and IA32_TSC_ADJUST to 0 on all vCPUs in a tight loop
+/// to minimize inter-core TSC skew. Also sets a fixed TSC frequency via
+/// KVM_SET_TSC_KHZ so all cores run at the same rate regardless of host
+/// P-state changes.
+///
+/// Without this, guest OSes detect TSC desynchronization:
+/// - Linux reports "Firmware Bug: TSC not synchronous to P0"
+/// - Windows hangs in APIC timer calibration loops
+///
+/// Must be called AFTER all vCPUs are created and BEFORE any vCPU thread
+/// starts running.
+#[unsafe(no_mangle)]
+pub extern "C" fn corevm_sync_tsc(handle: u64) -> i32 {
+    match get_vm(handle) {
+        Some(vm) => {
+            #[cfg(feature = "linux")]
+            {
+                vm.backend.sync_tsc();
+            }
+            0
         }
         None => -1,
     }
