@@ -153,3 +153,38 @@ pub async fn force_stop(auth: AuthUser, State(state): State<Arc<AppState>>, Path
     tracing::info!("VM {} force-stopped", vm_id);
     Ok(Json(serde_json::json!({"ok": true, "state": "stopped"})))
 }
+
+/// GET /api/vms/:id/screenshot — current framebuffer as PNG.
+pub async fn screenshot(
+    _auth: AuthUser,
+    State(state): State<Arc<AppState>>,
+    Path(vm_id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let vm = state.vms.get(&vm_id)
+        .ok_or_else(|| AppError(StatusCode::NOT_FOUND, "VM not found".into()))?;
+    let fb = vm.framebuffer.as_ref()
+        .ok_or_else(|| AppError(StatusCode::CONFLICT, "VM is not running".into()))?
+        .clone();
+    drop(vm);
+
+    let fb_lock = fb.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "Lock error".into()))?;
+    if fb_lock.width == 0 || fb_lock.height == 0 || fb_lock.pixels.is_empty() {
+        return Err(AppError(StatusCode::NO_CONTENT, "No framebuffer data".into()));
+    }
+
+    // Encode as PNG
+    let w = fb_lock.width;
+    let h = fb_lock.height;
+    let mut png_buf: Vec<u8> = Vec::new();
+    {
+        use image::ImageEncoder;
+        let encoder = image::codecs::png::PngEncoder::new(&mut png_buf);
+        encoder.write_image(&fb_lock.pixels, w, h, image::ExtendedColorType::Rgba8)
+            .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, format!("PNG encode: {}", e)))?;
+    }
+
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "image/png")],
+        png_buf,
+    ))
+}

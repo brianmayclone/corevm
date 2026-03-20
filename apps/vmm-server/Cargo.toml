@@ -39,7 +39,7 @@ serde_json = "1"
 toml = "0.8"
 
 # Image encoding (framebuffer -> JPEG)
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
