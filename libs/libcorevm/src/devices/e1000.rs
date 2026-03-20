@@ -958,8 +958,47 @@ impl E1000 {
             (sum & 0xFFFF) == 0xFFFF
         };
 
-        // Trust packets from our backend (slirp) are correct.
-        let tcp_ok = true;
+        // Verify TCP/UDP checksum over pseudo-header + transport segment.
+        let proto = frame[ip_start + 9];
+        let transport_start = ip_start + ihl;
+        let ip_total_len = ((frame[ip_start + 2] as usize) << 8) | frame[ip_start + 3] as usize;
+        let transport_len = if ip_total_len > ihl { ip_total_len - ihl } else { 0 };
+        let transport_end = transport_start + transport_len;
+
+        let tcp_ok = if (proto == 6 || proto == 17) && transport_end <= frame.len() && transport_len >= 8 {
+            // Build pseudo-header checksum: src_ip + dst_ip + zero + proto + transport_len
+            let mut sum: u32 = 0;
+            // Source IP (4 bytes at ip_start+12)
+            sum += ((frame[ip_start + 12] as u32) << 8) | frame[ip_start + 13] as u32;
+            sum += ((frame[ip_start + 14] as u32) << 8) | frame[ip_start + 15] as u32;
+            // Destination IP (4 bytes at ip_start+16)
+            sum += ((frame[ip_start + 16] as u32) << 8) | frame[ip_start + 17] as u32;
+            sum += ((frame[ip_start + 18] as u32) << 8) | frame[ip_start + 19] as u32;
+            // Zero + Protocol + Transport length
+            sum += proto as u32;
+            sum += transport_len as u32;
+            // Transport header + data
+            let mut i = transport_start;
+            while i + 1 < transport_end {
+                sum += ((frame[i] as u32) << 8) | frame[i + 1] as u32;
+                i += 2;
+            }
+            if i < transport_end {
+                sum += (frame[i] as u32) << 8;
+            }
+            while sum > 0xFFFF {
+                sum = (sum & 0xFFFF) + (sum >> 16);
+            }
+            // UDP with checksum 0 means "not computed" — treat as valid
+            if proto == 17 {
+                let udp_cksum = ((frame[transport_start + 6] as u16) << 8) | frame[transport_start + 7] as u16;
+                if udp_cksum == 0 { true } else { (sum & 0xFFFF) == 0xFFFF }
+            } else {
+                (sum & 0xFFFF) == 0xFFFF
+            }
+        } else {
+            true // non-TCP/UDP or truncated — assume ok
+        };
 
         (ip_ok, tcp_ok)
     }
@@ -1391,7 +1430,17 @@ impl E1000 {
                 }
                 if tu_offload {
                     status |= RXD_STA_TCPCS;
-                    if !tcp_ok { errors |= RXD_ERR_TCPE; }
+                    if !tcp_ok {
+                        errors |= RXD_ERR_TCPE;
+                        #[cfg(feature = "std")]
+                        {
+                            static mut CKSUM_FAIL: u32 = 0;
+                            unsafe { CKSUM_FAIL += 1; }
+                            if unsafe { CKSUM_FAIL } <= 5 {
+                                eprintln!("[e1000] TCP CHECKSUM FAIL: pkt len={}", pkt.len());
+                            }
+                        }
+                    }
                 }
             }
 

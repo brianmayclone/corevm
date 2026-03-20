@@ -1121,9 +1121,9 @@ impl SlirpNet {
         }
 
         const TCP_MSS: usize = 1460;
-        const MAX_UNACKED_CAP: u32 = 64 * 1024; // 64 KB max in-flight per connection
-        const RETRANSMIT_TIMEOUT_MS: u128 = 200;
-        const MAX_SEGMENTS_PER_POLL: usize = 32;
+        const MAX_UNACKED_CAP: u32 = 16 * 1460;
+        const RETRANSMIT_TIMEOUT_MS: u128 = 50;
+        const MAX_SEGMENTS_PER_POLL: usize = 16;
 
         let mut data_to_send: Vec<(TcpFlowKey, u32, Vec<u8>)> = Vec::new(); // (key, seq, data)
         let mut closed: Vec<TcpFlowKey> = Vec::new();
@@ -1140,7 +1140,6 @@ impl SlirpNet {
             // Non-blocking read: temporarily switch to non-blocking mode
             let _ = conn.stream.set_nonblocking(true);
 
-            // Read multiple segments per poll to improve throughput.
             let mut segments_this_conn = 0;
             loop {
                 if segments_this_conn >= MAX_SEGMENTS_PER_POLL { break; }
@@ -1172,15 +1171,13 @@ impl SlirpNet {
                 conn.last_retransmit = Some(now);
             }
 
-            // Retransmit check: if we have unacked segments and haven't
-            // heard back in a while, retransmit the oldest segment.
+            // Retransmit check
             if conn.unacked > 0 && !conn.retransmit_queue.is_empty() {
                 let should_retransmit = match conn.last_retransmit {
                     Some(last) => now.duration_since(last).as_millis() >= RETRANSMIT_TIMEOUT_MS,
                     None => true,
                 };
                 if should_retransmit {
-                    // Retransmit the first (oldest) unacked segment
                     let (seg_seq, seg_data) = conn.retransmit_queue[0].clone();
                     retransmits.push((*key, seg_seq, seg_data));
                     conn.last_retransmit = Some(now);
@@ -1189,8 +1186,6 @@ impl SlirpNet {
         }
 
         // Send each chunk as a single TCP segment.
-        // Sequence numbers and unacked counters were already updated in the
-        // read loop above — here we just build and queue the actual packets.
         for (key, seg_seq, data) in &data_to_send {
             if let Some(conn) = self.tcp_conns.get(key) {
                 let ack = conn.guest_seq;
@@ -1198,29 +1193,11 @@ impl SlirpNet {
             }
         }
 
-        // Periodic summary of TCP state
-        {
-            static mut TCP_DIAG: u32 = 0;
-            let n_sent = data_to_send.len();
-            let n_retx = retransmits.len();
-            if n_sent > 0 || n_retx > 0 {
-                unsafe { TCP_DIAG += 1; }
-                if unsafe { TCP_DIAG } % 100 == 0 {
-                    let total_unacked: u32 = self.tcp_conns.values().map(|c| c.unacked).sum();
-                    let total_retransmit: usize = self.tcp_conns.values().map(|c| c.retransmit_queue.len()).sum();
-                    let established = self.tcp_conns.values().filter(|c| c.state == TcpState::Established).count();
-                    eprintln!("[slirp-tcp] conns={} sent={} retx={} total_unacked={} total_retx_q={} rxq={}",
-                        established, n_sent, n_retx,
-                        total_unacked, total_retransmit, self.rx_queue.len());
-                }
-            }
-        }
-
         // Send retransmits
         for (key, seg_seq, seg_data) in retransmits {
             if let Some(conn) = self.tcp_conns.get(&key) {
                 let ack = conn.guest_seq;
-                self.send_tcp_flags(key, 0x18, seg_seq, ack, &seg_data); // PSH+ACK retransmit
+                self.send_tcp_flags(key, 0x18, seg_seq, ack, &seg_data);
             }
         }
 
@@ -1230,22 +1207,18 @@ impl SlirpNet {
                 let ack = conn.guest_seq;
                 self.send_tcp_flags(key, 0x11, seq, ack, &[]); // FIN+ACK
             }
-            // Move to FinWait instead of removing — wait for guest's FIN/ACK.
             if let Some(conn) = self.tcp_conns.get_mut(&key) {
                 conn.state = TcpState::FinWait;
-                conn.our_seq = conn.our_seq.wrapping_add(1); // FIN consumes one seq
+                conn.our_seq = conn.our_seq.wrapping_add(1);
             }
         }
 
-        // Only remove connections that have been fully closed (both sides FIN'd)
-        // or that have been in FinWait for too long (>10s timeout).
         self.tcp_conns.retain(|key, conn| {
             let remove = if conn.state == TcpState::Closed { true }
                 else if conn.state == TcpState::FinWait {
                     conn.last_retransmit.map_or(false, |last| now.duration_since(last).as_secs() > 10)
                 } else { false };
             if remove {
-                // Clean up FTP ALG state for closed connections.
                 self.ftp_control.remove(key);
             }
             !remove
