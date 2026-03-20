@@ -1008,6 +1008,10 @@ impl eframe::App for CoreVmApp {
                     self.layout.move_vm(&vm_uuid, target_folder);
                     let _ = self.layout.save(&platform::layout_dir().join("layout.conf"));
                 }
+                SidebarAction::ReorderVm { vm_uuid, folder, insert_index } => {
+                    self.layout.reorder_vm(&vm_uuid, folder, insert_index);
+                    let _ = self.layout.save(&platform::layout_dir().join("layout.conf"));
+                }
                 SidebarAction::CreateVm => {
                     self.create_vm_dialog = Some(CreateVmDialog::new());
                 }
@@ -1028,6 +1032,36 @@ impl eframe::App for CoreVmApp {
                             self.layout.root_vms.extend(orphans);
                         }
                         let _ = self.layout.save(&platform::layout_dir().join("layout.conf"));
+                    }
+                }
+                SidebarAction::StartVm(uuid) => {
+                    self.selected_vm = Some(uuid);
+                    deferred_action = Some(ToolbarAction::Start);
+                }
+                SidebarAction::StopVm(uuid) => {
+                    self.selected_vm = Some(uuid);
+                    deferred_action = Some(ToolbarAction::Stop);
+                }
+                SidebarAction::PauseVm(uuid) => {
+                    self.selected_vm = Some(uuid);
+                    deferred_action = Some(ToolbarAction::Pause);
+                }
+                SidebarAction::ResumeVm(uuid) => {
+                    self.selected_vm = Some(uuid);
+                    deferred_action = Some(ToolbarAction::Start);
+                }
+                SidebarAction::SnapshotVm(uuid) => {
+                    self.selected_vm = Some(uuid);
+                    deferred_action = Some(ToolbarAction::Snapshot);
+                }
+                SidebarAction::ScreenshotVm(uuid) => {
+                    self.selected_vm = Some(uuid);
+                    deferred_action = Some(ToolbarAction::Screenshot);
+                }
+                SidebarAction::ConfigureVm(uuid) => {
+                    self.selected_vm = Some(uuid.clone());
+                    if let Some(entry) = self.find_vm(&uuid) {
+                        self.settings_dialog = Some(SettingsDialog::new(&entry.config));
                     }
                 }
                 SidebarAction::DeleteVm(uuid) => {
@@ -1051,8 +1085,19 @@ impl eframe::App for CoreVmApp {
             }
         }
 
-        // Central panel
-        egui::CentralPanel::default().show(ctx, |ui| {
+        // Central panel — black background when VM is running, normal otherwise
+        let vm_is_running = self.selected_vm.as_ref()
+            .and_then(|uuid| self.find_vm(uuid))
+            .map_or(false, |vm| vm.state == VmState::Running || vm.state == VmState::Paused);
+
+        let central_panel = egui::CentralPanel::default();
+        let central_panel = if vm_is_running {
+            central_panel.frame(egui::Frame::new().fill(egui::Color32::BLACK))
+        } else {
+            central_panel
+        };
+
+        central_panel.show(ctx, |ui| {
             if let Some(uuid) = &self.selected_vm.clone() {
                 // Extract state and data from vm without holding borrow on self
                 let vm_info = self.find_vm(uuid).map(|vm| {

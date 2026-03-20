@@ -22,6 +22,8 @@ pub struct FolderEntry {
 pub enum SidebarAction {
     /// A VM is being dragged to a folder (vm_uuid, target_folder_index or None for root)
     MoveVm { vm_uuid: String, target_folder: Option<usize> },
+    /// Reorder a VM within a folder (or root) by inserting before another VM
+    ReorderVm { vm_uuid: String, folder: Option<usize>, insert_index: usize },
     /// Request to create a new VM
     CreateVm,
     /// Request to create a new folder
@@ -32,6 +34,20 @@ pub enum SidebarAction {
     DeleteFolder(usize),
     /// Request to delete a VM
     DeleteVm(String),
+    /// Power on a VM
+    StartVm(String),
+    /// Power off a VM
+    StopVm(String),
+    /// Pause a VM
+    PauseVm(String),
+    /// Resume a paused VM
+    ResumeVm(String),
+    /// Take a snapshot
+    SnapshotVm(String),
+    /// Take a screenshot
+    ScreenshotVm(String),
+    /// Open VM settings
+    ConfigureVm(String),
 }
 
 pub struct SidebarLayout {
@@ -149,6 +165,28 @@ impl SidebarLayout {
         }
     }
 
+    /// Reorder a VM within a folder (or root) by moving it to `insert_index`
+    pub fn reorder_vm(&mut self, uuid: &str, folder: Option<usize>, insert_index: usize) {
+        // Remove from everywhere first
+        for f in &mut self.folders {
+            f.vm_uuids.retain(|u| u != uuid);
+        }
+        self.root_vms.retain(|u| u != uuid);
+
+        // Insert at the target position
+        match folder {
+            Some(idx) if idx < self.folders.len() => {
+                let list = &mut self.folders[idx].vm_uuids;
+                let pos = insert_index.min(list.len());
+                list.insert(pos, uuid.to_string());
+            }
+            _ => {
+                let pos = insert_index.min(self.root_vms.len());
+                self.root_vms.insert(pos, uuid.to_string());
+            }
+        }
+    }
+
     /// Remove a VM from the layout entirely
     pub fn remove_vm(&mut self, uuid: &str) {
         for folder in &mut self.folders {
@@ -182,16 +220,58 @@ impl SidebarLayout {
     }
 }
 
-/// Render a single VM entry. Returns a drag source ID if dragging.
+/// Style a context menu UI to remove button frames (call at the start of a context_menu closure).
+fn style_context_menu(ui: &mut egui::Ui) {
+    ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+    ui.style_mut().visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+    ui.style_mut().visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
+}
+
+/// Render a context menu item with an optional icon in a fixed-width left column.
+/// If `icon` is None, the space is left blank for alignment.
+fn menu_item(
+    ui: &mut egui::Ui,
+    icon: Option<&str>,
+    label: &str,
+    enabled: bool,
+    icon_width: f32,
+    text_color: Option<Color32>,
+) -> bool {
+    let mut clicked = false;
+    ui.add_enabled_ui(enabled, |ui| {
+        let resp = ui.horizontal(|ui| {
+            let icon_text = icon.unwrap_or("");
+            ui.add_sized(
+                [icon_width, ui.spacing().interact_size.y],
+                egui::Label::new(egui::RichText::new(icon_text).size(13.0)),
+            );
+            let mut rt = egui::RichText::new(label);
+            if let Some(color) = text_color {
+                if enabled {
+                    rt = rt.color(color);
+                }
+            }
+            ui.add(egui::Button::new(rt).frame(false))
+        });
+        if resp.inner.clicked() {
+            clicked = true;
+        }
+    });
+    clicked
+}
+
+/// Render a single VM entry with drag&drop reordering support.
 fn render_vm_entry(
     ui: &mut egui::Ui,
     uuid: &str,
+    vm_index: usize,
     vm_names: &HashMap<String, String>,
     vm_states: &HashMap<String, VmState>,
     vm_icons: &HashMap<String, egui::TextureId>,
     vm_errors: &HashMap<String, Vec<String>>,
     selected: &mut Option<String>,
     drag_vm: &mut Option<String>,
+    drop_target: &mut Option<(Option<usize>, usize)>, // (folder, insert_index)
     actions: &mut Vec<SidebarAction>,
     folder_names: &[String],
     current_folder: Option<usize>,
@@ -220,15 +300,38 @@ fn render_vm_entry(
 
     let row_height = icon_size.max(galley.size().y) + padding.y * 2.0;
     let desired_size = egui::vec2(ui.available_width(), row_height);
-    let (rect, resp) = ui.allocate_exact_size(desired_size, egui::Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(desired_size, egui::Sense::click_and_drag());
 
     if resp.clicked() {
         *selected = Some(uuid.to_string());
     }
 
+    // Drop target indicator: show a line above or below this entry when another VM is dragged over it
+    if drag_vm.is_some() && drag_vm.as_deref() != Some(uuid) {
+        if let Some(pointer_pos) = ui.ctx().pointer_latest_pos() {
+            if rect.contains(pointer_pos) {
+                let insert_above = pointer_pos.y < rect.center().y;
+                let insert_idx = if insert_above { vm_index } else { vm_index + 1 };
+                *drop_target = Some((current_folder, insert_idx));
+
+                // Draw insertion indicator line
+                let line_y = if insert_above { rect.top() } else { rect.bottom() };
+                let line_rect = egui::Rect::from_min_max(
+                    egui::pos2(rect.left() + 4.0, line_y - 1.0),
+                    egui::pos2(rect.right() - 4.0, line_y + 1.0),
+                );
+                ui.painter().rect_filled(line_rect, egui::CornerRadius::same(1), theme::accent_blue());
+            }
+        }
+    }
+
     // Paint background with rounded corners
+    let is_being_dragged = drag_vm.as_deref() == Some(uuid);
     let visuals = ui.style().interact_selectable(&resp, is_selected);
-    if is_selected || resp.hovered() {
+    if is_being_dragged {
+        // Semi-transparent when being dragged
+        ui.painter().rect_filled(rect, egui::CornerRadius::same(6), visuals.bg_fill.gamma_multiply(0.5));
+    } else if is_selected || resp.hovered() {
         ui.painter().rect_filled(rect, egui::CornerRadius::same(6), visuals.bg_fill);
     }
 
@@ -292,42 +395,92 @@ fn render_vm_entry(
 
     // Context menu
     inner_resp.context_menu(|ui| {
+        let icon_width = 20.0; // consistent left column for icons
+
         ui.label(egui::RichText::new(name).strong());
         ui.separator();
 
+        // Power actions — enabled/disabled based on state
+        let is_stopped = state == VmState::Stopped;
+        let is_running = state == VmState::Running;
+        let is_paused = state == VmState::Paused;
+
+        if menu_item(ui, Some("\u{25B6}"), "Start", is_stopped, icon_width, None) {
+            actions.push(SidebarAction::StartVm(uuid.to_string()));
+            ui.close_menu();
+        }
+        if menu_item(ui, Some("\u{23F8}"), "Pause", is_running, icon_width, None) {
+            actions.push(SidebarAction::PauseVm(uuid.to_string()));
+            ui.close_menu();
+        }
+        if menu_item(ui, Some("\u{25B6}"), "Resume", is_paused, icon_width, None) {
+            actions.push(SidebarAction::ResumeVm(uuid.to_string()));
+            ui.close_menu();
+        }
+        if menu_item(ui, Some("\u{23FB}"), "Power Off", !is_stopped, icon_width, None) {
+            actions.push(SidebarAction::StopVm(uuid.to_string()));
+            ui.close_menu();
+        }
+
+        ui.separator();
+
+        // Snapshot & Screenshot — only when running
+        if menu_item(ui, Some("\u{1F4BE}"), "Take Snapshot", is_running, icon_width, None) {
+            actions.push(SidebarAction::SnapshotVm(uuid.to_string()));
+            ui.close_menu();
+        }
+        if menu_item(ui, Some("\u{1F4F7}"), "Take Screenshot", is_running, icon_width, None) {
+            actions.push(SidebarAction::ScreenshotVm(uuid.to_string()));
+            ui.close_menu();
+        }
+
+        ui.separator();
+
+        // Configuration
+        if menu_item(ui, Some("\u{2699}"), "Settings...", is_stopped, icon_width, None) {
+            actions.push(SidebarAction::ConfigureVm(uuid.to_string()));
+            ui.close_menu();
+        }
+
         // "Move to" submenu
         if folder_names.len() > 1 || current_folder.is_none() {
-            ui.menu_button("Move to...", |ui| {
-                for (i, fname) in folder_names.iter().enumerate() {
-                    if Some(i) == current_folder {
-                        continue; // skip current folder
+            ui.horizontal(|ui| {
+                ui.add_sized([icon_width, ui.spacing().interact_size.y],
+                    egui::Label::new(egui::RichText::new("\u{1F4C1}").size(13.0)));
+                ui.menu_button("Move to...", |ui| {
+                    for (i, fname) in folder_names.iter().enumerate() {
+                        if Some(i) == current_folder {
+                            continue;
+                        }
+                        if ui.button(fname).clicked() {
+                            actions.push(SidebarAction::MoveVm {
+                                vm_uuid: uuid.to_string(),
+                                target_folder: Some(i),
+                            });
+                            ui.close_menu();
+                        }
                     }
-                    if ui.button(fname).clicked() {
-                        actions.push(SidebarAction::MoveVm {
-                            vm_uuid: uuid.to_string(),
-                            target_folder: Some(i),
-                        });
-                        ui.close_menu();
-                    }
-                }
+                });
             });
         }
 
         ui.separator();
-        if ui.button("\u{1F5D1} Delete VM").clicked() {
+        if menu_item(ui, Some("\u{1F5D1}"), "Delete VM", true, icon_width, Some(theme::error_red())) {
             actions.push(SidebarAction::DeleteVm(uuid.to_string()));
             ui.close_menu();
         }
     });
 }
 
-/// Sidebar state for rename dialog
+/// Sidebar state for rename dialog and drag&drop
 pub struct SidebarState {
     pub rename_folder_idx: Option<usize>,
     pub rename_buffer: String,
     pub show_new_folder: bool,
     pub new_folder_name: String,
     pub confirm_delete_vm: Option<String>,
+    /// Currently dragged VM UUID (persisted across frames)
+    pub dragging_vm: Option<String>,
 }
 
 impl Default for SidebarState {
@@ -338,6 +491,7 @@ impl Default for SidebarState {
             show_new_folder: false,
             new_folder_name: String::new(),
             confirm_delete_vm: None,
+            dragging_vm: None,
         }
     }
 }
@@ -353,7 +507,7 @@ pub fn render_sidebar(
     sidebar_state: &mut SidebarState,
 ) -> Vec<SidebarAction> {
     let mut actions = Vec::new();
-    let mut drag_vm: Option<String> = None;
+    let mut drop_target: Option<(Option<usize>, usize)> = None;
     let folder_names: Vec<String> = layout.folders.iter().map(|f| f.name.clone()).collect();
 
     egui::SidePanel::left("sidebar")
@@ -361,40 +515,79 @@ pub fn render_sidebar(
         .frame(
             egui::Frame::new()
                 .fill(theme::sidebar_bg())
-                .inner_margin(egui::Margin::symmetric(10, 12)),
+                .inner_margin(egui::Margin::ZERO),
         )
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing.y = 3.0;
 
-            // Header
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new("Machines")
-                        .size(13.0)
-                        .strong()
-                        .color(theme::text_secondary()),
+            // Sidebar toolbar — edge-to-edge, no margin
+            {
+                let toolbar_height = 26.0;
+                let (toolbar_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), toolbar_height),
+                    egui::Sense::hover(),
                 );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add(
-                        egui::Button::new(egui::RichText::new("\u{1F4C1}").size(13.0))
-                            .fill(theme::button_bg())
-                            .corner_radius(egui::CornerRadius::same(6))
-                            .min_size(egui::vec2(24.0, 24.0)),
-                    ).on_hover_text("New folder").clicked() {
-                        sidebar_state.show_new_folder = true;
-                        sidebar_state.new_folder_name = "New Folder".to_string();
-                    }
-                    if ui.add(
-                        egui::Button::new(egui::RichText::new("\u{1F5A5}+").size(13.0).color(theme::text_on_accent()))
-                            .fill(theme::accent_blue())
-                            .corner_radius(egui::CornerRadius::same(6))
-                            .min_size(egui::vec2(24.0, 24.0)),
-                    ).on_hover_text("New VM").clicked() {
-                        actions.push(SidebarAction::CreateVm);
-                    }
+                ui.painter().rect_filled(
+                    toolbar_rect,
+                    egui::CornerRadius::ZERO,
+                    theme::widget_bg_inactive(),
+                );
+
+                let inner = toolbar_rect.shrink2(egui::vec2(8.0, 2.0));
+                let mut toolbar_ui = ui.new_child(egui::UiBuilder::new().max_rect(inner));
+                toolbar_ui.horizontal_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new("Machines")
+                            .size(11.0)
+                            .strong()
+                            .color(theme::text_secondary()),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().button_padding = egui::vec2(8.0, 1.0);
+                        let add_btn = ui.add(
+                            egui::Button::new(egui::RichText::new("+").size(11.0).strong().color(theme::text_on_accent()))
+                                .fill(theme::accent_blue())
+                                .corner_radius(egui::CornerRadius::same(3)),
+                        ).on_hover_text("New...");
+                        let menu_id = add_btn.id.with("add_menu");
+                        if add_btn.clicked() {
+                            ui.memory_mut(|mem| mem.toggle_popup(menu_id));
+                        }
+                        if ui.memory(|mem| mem.is_popup_open(menu_id)) {
+                            let area_resp = egui::Area::new(menu_id)
+                                .order(egui::Order::Foreground)
+                                .fixed_pos(add_btn.rect.left_bottom())
+                                .show(ui.ctx(), |ui| {
+                                    egui::Frame::menu(ui.style()).show(ui, |ui| {
+                                        ui.set_min_width(180.0);
+                                        ui.style_mut().visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+                                        ui.style_mut().visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+                                        ui.style_mut().visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
+                                        if ui.add(egui::Button::new("\u{1F4C1}  Create Folder...").frame(false)).clicked() {
+                                            sidebar_state.show_new_folder = true;
+                                            sidebar_state.new_folder_name = "New Folder".to_string();
+                                            ui.memory_mut(|mem| mem.close_popup());
+                                        }
+                                        ui.separator();
+                                        if ui.add(egui::Button::new("\u{1F5A5}  Create Virtual Machine").frame(false)).clicked() {
+                                            actions.push(SidebarAction::CreateVm);
+                                            ui.memory_mut(|mem| mem.close_popup());
+                                        }
+                                    });
+                                });
+                            // Close on click outside, but not on the button itself (toggle handles that)
+                            if area_resp.response.clicked_elsewhere() && !add_btn.rect.contains(ui.ctx().pointer_latest_pos().unwrap_or_default()) {
+                                ui.memory_mut(|mem| mem.close_popup());
+                            }
+                        }
+                    });
                 });
-            });
-            ui.add_space(6.0);
+            }
+            ui.add_space(4.0);
+
+            // Content area with padding
+            let content_margin = egui::Margin::symmetric(10, 0);
+            egui::Frame::new().inner_margin(content_margin).show(ui, |ui| {
 
             // New folder inline editor
             if sidebar_state.show_new_folder {
@@ -458,10 +651,10 @@ pub fn render_sidebar(
                     .default_open(folder_expanded)
                     .show(ui, |ui| {
                         let vm_uuids: Vec<String> = layout.folders[fi].vm_uuids.clone();
-                        for uuid in &vm_uuids {
+                        for (vi, uuid) in vm_uuids.iter().enumerate() {
                             render_vm_entry(
-                                ui, uuid, vm_names, vm_states, vm_icons, vm_errors, selected,
-                                &mut drag_vm, &mut actions, &folder_names, Some(fi),
+                                ui, uuid, vi, vm_names, vm_states, vm_icons, vm_errors, selected,
+                                &mut sidebar_state.dragging_vm, &mut drop_target, &mut actions, &folder_names, Some(fi),
                             );
                         }
                         if vm_uuids.is_empty() {
@@ -493,10 +686,10 @@ pub fn render_sidebar(
                 });
 
                 // Drop target: if dragging a VM over this folder header
-                if drag_vm.is_some() {
+                if sidebar_state.dragging_vm.is_some() {
                     let drop_resp = header.header_response.clone();
                     if drop_resp.hovered() && ui.input(|i| i.pointer.any_released()) {
-                        if let Some(vm_uuid) = drag_vm.take() {
+                        if let Some(vm_uuid) = sidebar_state.dragging_vm.take() {
                             actions.push(SidebarAction::MoveVm {
                                 vm_uuid,
                                 target_folder: Some(fi),
@@ -513,14 +706,29 @@ pub fn render_sidebar(
                 ui.add_space(2.0);
                 ui.colored_label(theme::text_tertiary(), egui::RichText::new("Unsorted").size(12.0));
                 let root_uuids = layout.root_vms.clone();
-                for uuid in &root_uuids {
+                for (vi, uuid) in root_uuids.iter().enumerate() {
                     render_vm_entry(
-                        ui, uuid, vm_names, vm_states, vm_icons, vm_errors, selected,
-                        &mut drag_vm, &mut actions, &folder_names, None,
+                        ui, uuid, vi, vm_names, vm_states, vm_icons, vm_errors, selected,
+                        &mut sidebar_state.dragging_vm, &mut drop_target, &mut actions, &folder_names, None,
                     );
                 }
             }
+            }); // close content Frame
         });
+
+    // Handle drag&drop reorder: when mouse released while dragging a VM
+    if let Some(vm_uuid) = sidebar_state.dragging_vm.clone() {
+        if ctx.input(|i| i.pointer.any_released()) {
+            if let Some((folder, insert_index)) = drop_target {
+                actions.push(SidebarAction::ReorderVm {
+                    vm_uuid,
+                    folder,
+                    insert_index,
+                });
+            }
+            sidebar_state.dragging_vm = None;
+        }
+    }
 
     actions
 }

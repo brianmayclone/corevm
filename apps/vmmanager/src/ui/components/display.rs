@@ -510,8 +510,13 @@ impl DisplayWidget {
 
                 let size = egui::vec2(disp_w, disp_h);
 
-                // Allocate interactive area for the display (click_and_drag for mouse)
-                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+                // Center the display in the available area
+                let centered_rect = egui::Rect::from_center_size(
+                    ui.max_rect().center(),
+                    size,
+                );
+                let response = ui.allocate_rect(centered_rect, egui::Sense::click_and_drag());
+                let rect = centered_rect;
 
                 // Hide host cursor only when captured (locked mode hides it,
                 // but set_cursor_icon as extra safety). Show normal cursor otherwise.
