@@ -234,3 +234,156 @@ export interface NetworkStats {
   total_rx_bytes: number
   total_tx_bytes: number
 }
+
+// ── Cluster Mode ────────────────────────────────────────────────────────
+
+export type BackendMode = 'standalone' | 'managed' | 'cluster'
+
+/** Extended SystemInfo returned when connected to vmm-cluster or managed node. */
+export interface SystemInfoExtended extends SystemInfo {
+  mode: BackendMode
+  hostname?: string
+  cluster_url?: string
+  cluster_name?: string
+  total_hosts?: number
+  online_hosts?: number
+}
+
+export interface Host {
+  id: string
+  hostname: string
+  address: string
+  cluster_id: string
+  cpu_model: string
+  cpu_cores: number
+  cpu_threads: number
+  total_ram_mb: number
+  free_ram_mb: number
+  cpu_usage_pct: number
+  hw_virtualization: boolean
+  status: 'online' | 'offline' | 'maintenance' | 'connecting' | 'error'
+  maintenance_mode: boolean
+  connection_state: string
+  last_heartbeat: string | null
+  version: string
+  vm_count: number
+  registered_at: string
+}
+
+export interface Cluster {
+  id: string
+  name: string
+  description: string
+  drs_enabled: boolean
+  ha_enabled: boolean
+  ha_vm_restart_priority: string
+  ha_admission_control: boolean
+  ha_failover_hosts: number
+  host_count: number
+  vm_count: number
+  total_ram_mb: number
+  free_ram_mb: number
+  created_at: string
+}
+
+export interface Datastore {
+  id: string
+  name: string
+  store_type: string
+  mount_source: string
+  mount_opts: string
+  mount_path: string
+  cluster_id: string
+  total_bytes: number
+  free_bytes: number
+  status: string
+  host_mounts: DatastoreHostMount[]
+  created_at: string
+}
+
+export interface DatastoreHostMount {
+  host_id: string
+  hostname: string
+  mounted: boolean
+  mount_status: string
+  total_bytes: number
+  free_bytes: number
+}
+
+export interface ClusterVmSummary extends VmSummary {
+  host_id?: string
+  host_name?: string
+  cluster_id?: string
+  ha_protected?: boolean
+  ha_restart_priority?: string
+  drs_automation?: string
+}
+
+export interface ClusterStats {
+  total_hosts: number
+  online_hosts: number
+  maintenance_hosts: number
+  offline_hosts: number
+  total_vms: number
+  running_vms: number
+  stopped_vms: number
+  total_ram_mb: number
+  used_ram_mb: number
+  total_disk_bytes: number
+  used_disk_bytes: number
+  ha_protected_vms: number
+}
+
+export interface Task {
+  id: string
+  task_type: string
+  status: string
+  progress_pct: number
+  target_type: string
+  target_id: string
+  initiated_by: number | null
+  error: string | null
+  created_at: string
+  started_at: string | null
+  completed_at: string | null
+}
+
+export interface ClusterEvent {
+  id: number
+  severity: 'info' | 'warning' | 'error' | 'critical'
+  category: string
+  message: string
+  target_type: string | null
+  target_id: string | null
+  host_id: string | null
+  created_at: string
+}
+
+export interface DrsRecommendation {
+  id: number
+  cluster_id: string
+  vm_id: string
+  vm_name: string
+  source_host_id: string
+  source_host_name: string
+  target_host_id: string
+  target_host_name: string
+  reason: string
+  priority: string
+  status: string
+  created_at: string
+}
+
+export interface Alarm {
+  id: number
+  name: string
+  target_type: string
+  target_id: string
+  condition_type: string
+  threshold: number | null
+  severity: string
+  triggered: boolean
+  acknowledged: boolean
+  created_at: string
+  triggered_at: string | null
+}

@@ -75,10 +75,10 @@ async fn bridge_console(client_ws: WebSocket, host_address: String, agent_token:
         _ = async {
             while let Some(Ok(msg)) = client_recv.next().await {
                 let tungstenite_msg = match msg {
-                    Message::Text(t) => tokio_tungstenite::tungstenite::Message::Text(t),
-                    Message::Binary(b) => tokio_tungstenite::tungstenite::Message::Binary(b.into()),
-                    Message::Ping(p) => tokio_tungstenite::tungstenite::Message::Ping(p.into()),
-                    Message::Pong(p) => tokio_tungstenite::tungstenite::Message::Pong(p.into()),
+                    Message::Text(t) => tokio_tungstenite::tungstenite::Message::Text(t.to_string().into()),
+                    Message::Binary(b) => tokio_tungstenite::tungstenite::Message::Binary(b.to_vec().into()),
+                    Message::Ping(p) => tokio_tungstenite::tungstenite::Message::Ping(p.to_vec().into()),
+                    Message::Pong(p) => tokio_tungstenite::tungstenite::Message::Pong(p.to_vec().into()),
                     Message::Close(_) => break,
                 };
                 if node_send.send(tungstenite_msg).await.is_err() { break; }
@@ -88,7 +88,7 @@ async fn bridge_console(client_ws: WebSocket, host_address: String, agent_token:
         _ = async {
             while let Some(Ok(msg)) = node_recv.next().await {
                 let axum_msg = match msg {
-                    tokio_tungstenite::tungstenite::Message::Text(t) => Message::Text(t),
+                    tokio_tungstenite::tungstenite::Message::Text(t) => Message::Text(t.to_string().into()),
                     tokio_tungstenite::tungstenite::Message::Binary(b) => Message::Binary(b.to_vec().into()),
                     tokio_tungstenite::tungstenite::Message::Ping(p) => Message::Ping(p.to_vec().into()),
                     tokio_tungstenite::tungstenite::Message::Pong(p) => Message::Pong(p.to_vec().into()),

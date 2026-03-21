@@ -1,7 +1,8 @@
 import { useState } from 'react'
-import { NavLink, useLocation } from 'react-router-dom'
+import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useUiStore } from '../stores/uiStore'
-import { Monitor, HardDrive, Network, Settings, Zap, LifeBuoy, FileText, ChevronDown, Cable, Layers, Globe, Unplug, Database, Share2, Gauge, Disc, Palette, Users, Clock, Server, Shield, LayoutDashboard, List, FolderOpen } from 'lucide-react'
+import { useClusterStore } from '../stores/clusterStore'
+import { Monitor, HardDrive, Network, Settings, Zap, LifeBuoy, FileText, ChevronDown, Cable, Layers, Globe, Unplug, Database, Share2, Gauge, Disc, Palette, Users, Clock, Server, Shield, LayoutDashboard, List, FolderOpen, Activity, Bell, CheckSquare, Workflow } from 'lucide-react'
 
 interface NavItem {
   to: string
@@ -10,7 +11,8 @@ interface NavItem {
   children?: { to: string; icon: React.ElementType; label: string }[]
 }
 
-const navItems: NavItem[] = [
+/** Navigation items for standalone vmm-server mode */
+const standaloneNavItems: NavItem[] = [
   {
     to: '/machines', icon: Monitor, label: 'Machines',
     children: [
@@ -51,13 +53,78 @@ const navItems: NavItem[] = [
   },
 ]
 
+/** Additional navigation items when connected to vmm-cluster */
+const clusterNavItems: NavItem[] = [
+  {
+    to: '/cluster', icon: Workflow, label: 'Cluster',
+    children: [
+      { to: '/cluster/hosts', icon: Server, label: 'Hosts' },
+      { to: '/cluster/settings', icon: Settings, label: 'Clusters' },
+      { to: '/cluster/drs', icon: Activity, label: 'DRS' },
+      { to: '/cluster/datastores', icon: Database, label: 'Datastores' },
+    ],
+  },
+  {
+    to: '/machines', icon: Monitor, label: 'Machines',
+    children: [
+      { to: '/machines/overview', icon: LayoutDashboard, label: 'Dashboard' },
+      { to: '/machines/list', icon: List, label: 'All Machines' },
+      { to: '/machines/resource-groups', icon: FolderOpen, label: 'Resource Groups' },
+    ],
+  },
+  {
+    to: '/storage', icon: HardDrive, label: 'Storage',
+    children: [
+      { to: '/storage/overview', icon: HardDrive, label: 'Overview' },
+      { to: '/storage/local', icon: Database, label: 'Local Storage' },
+      { to: '/storage/shared', icon: Share2, label: 'Shared Storage' },
+      { to: '/storage/disks', icon: Disc, label: 'Disk Management' },
+      { to: '/storage/qos', icon: Gauge, label: 'QoS Policies' },
+    ],
+  },
+  {
+    to: '/networks', icon: Network, label: 'Networks',
+    children: [
+      { to: '/networks/overview', icon: Network, label: 'Overview' },
+      { to: '/networks/nat', icon: Globe, label: 'NAT Bridges' },
+      { to: '/networks/host-only', icon: Unplug, label: 'Host-Only' },
+      { to: '/networks/adapters', icon: Cable, label: 'Adapter Bindings' },
+      { to: '/networks/vlans', icon: Layers, label: 'VLAN Config' },
+    ],
+  },
+  {
+    to: '/operations', icon: Activity, label: 'Operations',
+    children: [
+      { to: '/operations/tasks', icon: CheckSquare, label: 'Tasks' },
+      { to: '/operations/events', icon: Bell, label: 'Events' },
+      { to: '/operations/alarms', icon: Bell, label: 'Alarms' },
+    ],
+  },
+  {
+    to: '/settings', icon: Settings, label: 'Settings',
+    children: [
+      { to: '/settings/ui', icon: Palette, label: 'UI & Branding' },
+      { to: '/settings/users', icon: Users, label: 'Users' },
+      { to: '/settings/groups', icon: Shield, label: 'Groups & Roles' },
+      { to: '/settings/time', icon: Clock, label: 'Date & Time' },
+      { to: '/settings/server', icon: Server, label: 'Server' },
+    ],
+  },
+]
+
 interface SidebarProps {
   onNavigate?: () => void
 }
 
 export default function Sidebar({ onNavigate }: SidebarProps) {
   const location = useLocation()
+  const navigate = useNavigate()
   const { brandName, brandSubtitle } = useUiStore()
+  const { backendMode } = useClusterStore()
+
+  const isClusterMode = backendMode === 'cluster'
+  const navItems = isClusterMode ? clusterNavItems : standaloneNavItems
+
   const [expandedSections, setExpandedSections] = useState<Set<string>>(
     () => new Set(navItems.filter(i => i.children && (location.pathname.startsWith(i.to + '/') || location.pathname === i.to)).map(i => i.to))
   )
@@ -71,7 +138,18 @@ export default function Sidebar({ onNavigate }: SidebarProps) {
     })
   }
 
-  const isNetworkActive = location.pathname.startsWith('/networks')
+  const handleUpgradeCluster = () => {
+    // Navigate to cluster setup / connect to running vmm-cluster
+    const clusterUrl = prompt(
+      'Enter the URL of the running vmm-cluster instance:\n\n(e.g. http://localhost:9443)',
+      'http://localhost:9443'
+    )
+    if (!clusterUrl) return
+
+    // Switch the API base URL to the cluster
+    // This reloads the page pointing to the cluster
+    window.location.href = clusterUrl
+  }
 
   return (
     <aside className="w-56 bg-vmm-sidebar border-r border-vmm-border flex flex-col h-full">
@@ -79,17 +157,19 @@ export default function Sidebar({ onNavigate }: SidebarProps) {
       <div className="px-5 pt-5 pb-4">
         <div className="flex items-center gap-2.5">
           <div className="w-8 h-8 rounded-lg bg-vmm-accent/20 flex items-center justify-center">
-            <Monitor size={16} className="text-vmm-accent" />
+            {isClusterMode ? <Workflow size={16} className="text-vmm-accent" /> : <Monitor size={16} className="text-vmm-accent" />}
           </div>
           <div>
             <div className="text-sm font-bold text-vmm-text">{brandName}</div>
-            <div className="text-[10px] text-vmm-text-muted font-mono tracking-wider">{brandSubtitle}</div>
+            <div className="text-[10px] text-vmm-text-muted font-mono tracking-wider">
+              {isClusterMode ? 'CLUSTER' : brandSubtitle}
+            </div>
           </div>
         </div>
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 px-3 space-y-0.5">
+      <nav className="flex-1 px-3 space-y-0.5 overflow-y-auto">
         {navItems.map((item) => {
           const Icon = item.icon
           const hasChildren = !!item.children
@@ -99,7 +179,6 @@ export default function Sidebar({ onNavigate }: SidebarProps) {
           if (hasChildren) {
             return (
               <div key={item.to}>
-                {/* Parent with expand toggle */}
                 <button
                   onClick={() => toggleSection(item.to)}
                   className={`w-full flex items-center justify-between gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer
@@ -118,7 +197,6 @@ export default function Sidebar({ onNavigate }: SidebarProps) {
                   />
                 </button>
 
-                {/* Children */}
                 {isExpanded && (
                   <div className="mt-0.5 ml-4 pl-3 border-l border-vmm-border space-y-0.5">
                     {item.children!.map((child) => {
@@ -168,15 +246,20 @@ export default function Sidebar({ onNavigate }: SidebarProps) {
         })}
       </nav>
 
-      {/* Upgrade banner */}
-      <div className="px-3 pb-3">
-        <button className="w-full flex items-center justify-center gap-2 px-4 py-2.5
-          bg-vmm-accent/10 hover:bg-vmm-accent/20 border border-vmm-accent/30
-          rounded-lg text-sm font-medium text-vmm-accent transition-colors cursor-pointer">
-          <Zap size={14} />
-          Upgrade Cluster
-        </button>
-      </div>
+      {/* Upgrade banner — only shown in standalone mode */}
+      {!isClusterMode && (
+        <div className="px-3 pb-3">
+          <button
+            onClick={handleUpgradeCluster}
+            className="w-full flex items-center justify-center gap-2 px-4 py-2.5
+              bg-vmm-accent/10 hover:bg-vmm-accent/20 border border-vmm-accent/30
+              rounded-lg text-sm font-medium text-vmm-accent transition-colors cursor-pointer"
+          >
+            <Zap size={14} />
+            Upgrade Cluster
+          </button>
+        </div>
+      )}
 
       {/* Footer links */}
       <div className="border-t border-vmm-border px-4 py-3 space-y-1">

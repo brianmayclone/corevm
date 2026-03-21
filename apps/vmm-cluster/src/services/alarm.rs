@@ -16,49 +16,55 @@ impl AlarmService {
             Err(_) => return,
         };
 
-        let alarms: Vec<(i64, String, Option<f64>, String, String, bool)> = stmt.query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get::<_, i32>(5)? != 0))
-        }).unwrap_or_else(|_| Box::new(std::iter::empty()))
-        .filter_map(|r| r.ok())
-        .collect();
+        struct AlarmRow { id: i64, condition: String, threshold: Option<f64>, target_type: String, target_id: String, triggered: bool }
+        let alarms: Vec<AlarmRow> = match stmt.query_map([], |row| {
+            Ok(AlarmRow {
+                id: row.get(0)?, condition: row.get(1)?, threshold: row.get(2)?,
+                target_type: row.get(3)?, target_id: row.get(4)?,
+                triggered: row.get::<_, i32>(5)? != 0,
+            })
+        }) {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(_) => return,
+        };
 
-        for (id, condition, threshold, target_type, target_id, was_triggered) in alarms {
-            let threshold = match threshold {
+        for alarm in alarms {
+            let threshold = match alarm.threshold {
                 Some(t) => t,
                 None => continue,
             };
 
-            let current_value = match (condition.as_str(), target_type.as_str()) {
+            let current_value = match (alarm.condition.as_str(), alarm.target_type.as_str()) {
                 ("cpu_usage", "host") => {
                     db.query_row("SELECT cpu_usage_pct FROM hosts WHERE id = ?1",
-                        rusqlite::params![&target_id], |r| r.get::<_, f64>(0)).ok()
+                        rusqlite::params![&alarm.target_id], |r| r.get::<_, f64>(0)).ok()
                 }
                 ("ram_usage", "host") => {
                     db.query_row(
                         "SELECT CASE WHEN total_ram_mb > 0 THEN (1.0 - CAST(free_ram_mb AS REAL)/total_ram_mb) * 100 ELSE 0 END \
                          FROM hosts WHERE id = ?1",
-                        rusqlite::params![&target_id], |r| r.get::<_, f64>(0)).ok()
+                        rusqlite::params![&alarm.target_id], |r| r.get::<_, f64>(0)).ok()
                 }
                 ("disk_usage", "datastore") => {
                     db.query_row(
                         "SELECT CASE WHEN total_bytes > 0 THEN (1.0 - CAST(free_bytes AS REAL)/total_bytes) * 100 ELSE 0 END \
                          FROM datastores WHERE id = ?1",
-                        rusqlite::params![&target_id], |r| r.get::<_, f64>(0)).ok()
+                        rusqlite::params![&alarm.target_id], |r| r.get::<_, f64>(0)).ok()
                 }
                 _ => None,
             };
 
             if let Some(value) = current_value {
                 let should_trigger = value >= threshold;
-                if should_trigger && !was_triggered {
+                if should_trigger && !alarm.triggered {
                     let _ = db.execute(
                         "UPDATE alarms SET triggered = 1, triggered_at = datetime('now') WHERE id = ?1",
-                        rusqlite::params![id],
+                        rusqlite::params![alarm.id],
                     );
-                } else if !should_trigger && was_triggered {
+                } else if !should_trigger && alarm.triggered {
                     let _ = db.execute(
                         "UPDATE alarms SET triggered = 0, triggered_at = NULL WHERE id = ?1",
-                        rusqlite::params![id],
+                        rusqlite::params![alarm.id],
                     );
                 }
             }

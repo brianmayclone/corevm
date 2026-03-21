@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { useEffect } from 'react'
 import { useAuthStore } from './stores/authStore'
 import { useUiStore } from './stores/uiStore'
+import { useClusterStore } from './stores/clusterStore'
 import Layout from './components/Layout'
 import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
@@ -30,6 +31,16 @@ import SettingsGroups from './pages/SettingsGroups'
 import SettingsTime from './pages/SettingsTime'
 import SettingsServer from './pages/SettingsServer'
 import TerminalPage from './pages/TerminalPage'
+import ManagedModePage from './pages/ManagedModePage'
+// Cluster-mode pages
+import HostsList from './pages/HostsList'
+import HostDetail from './pages/HostDetail'
+import AddHost from './pages/AddHost'
+import ClusterSettings from './pages/ClusterSettings'
+import DatastoresList from './pages/DatastoresList'
+import TasksList from './pages/TasksList'
+import EventsList from './pages/EventsList'
+import DrsPage from './pages/DrsPage'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore()
@@ -40,7 +51,25 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 export default function App() {
   const { loadFromStorage } = useAuthStore()
   const { loadFromStorage: loadUi } = useUiStore()
-  useEffect(() => { loadFromStorage(); loadUi() }, [])
+  const { backendMode, detectBackend } = useClusterStore()
+
+  useEffect(() => {
+    loadFromStorage()
+    loadUi()
+    detectBackend()
+  }, [])
+
+  // If this node is managed by a cluster, show full-screen notice
+  if (backendMode === 'managed') {
+    return (
+      <BrowserRouter>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="*" element={<ManagedModePage />} />
+        </Routes>
+      </BrowserRouter>
+    )
+  }
 
   return (
     <BrowserRouter>
@@ -79,9 +108,17 @@ export default function App() {
             <Route path="time" element={<SettingsTime />} />
             <Route path="server" element={<SettingsServer />} />
           </Route>
+          {/* ── Cluster-mode routes (only functional when mode === 'cluster') ── */}
+          <Route path="cluster/hosts" element={<HostsList />} />
+          <Route path="cluster/hosts/add" element={<AddHost />} />
+          <Route path="cluster/hosts/:id" element={<HostDetail />} />
+          <Route path="cluster/settings" element={<ClusterSettings />} />
+          <Route path="cluster/datastores" element={<DatastoresList />} />
+          <Route path="cluster/drs" element={<DrsPage />} />
+          <Route path="operations/tasks" element={<TasksList />} />
+          <Route path="operations/events" element={<EventsList />} />
         </Route>
       </Routes>
     </BrowserRouter>
   )
 }
-
