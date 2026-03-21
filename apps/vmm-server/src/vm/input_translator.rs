@@ -26,6 +26,8 @@ pub enum ConsoleInput {
 }
 
 /// Inject a console input event into the VM.
+/// Sends to both USB tablet (absolute) and PS/2 (relative) —
+/// the VM ignores whichever device isn't configured.
 pub fn inject_input(handle: u64, input: &ConsoleInput, fb_width: u32, fb_height: u32) {
     use libcorevm::ffi::*;
 
@@ -38,6 +40,7 @@ pub fn inject_input(handle: u64, input: &ConsoleInput, fb_width: u32, fb_height:
             }
         }
         ConsoleInput::MouseMove { x, y, buttons } => {
+            // Try USB tablet (absolute positioning) — works if UHCI is enabled
             if fb_width > 0 && fb_height > 0 {
                 let abs_x = ((*x as u64) * 32767 / fb_width as u64) as u16;
                 let abs_y = ((*y as u64) * 32767 / fb_height as u64) as u16;
@@ -45,16 +48,17 @@ pub fn inject_input(handle: u64, input: &ConsoleInput, fb_width: u32, fb_height:
             }
         }
         ConsoleInput::MouseRel { dx, dy, buttons } => {
+            // PS/2 relative mouse — always works
             corevm_ps2_mouse_move(handle, *dx as i16, *dy as i16, *buttons);
         }
         ConsoleInput::MouseWheel { delta } => {
-            // Use USB tablet wheel — PS/2 mouse doesn't have a separate wheel function
+            // Try USB tablet wheel first, then PS/2 with wheel
             corevm_usb_tablet_move_wheel(handle, 0, 0, 0, *delta as i8);
         }
         ConsoleInput::CtrlAltDel => {
-            corevm_ps2_key_press(handle, 0x1D);  // Left Ctrl
-            corevm_ps2_key_press(handle, 0x38);  // Left Alt
-            corevm_ps2_key_press(handle, 0x53);  // Delete
+            corevm_ps2_key_press(handle, 0x1D);
+            corevm_ps2_key_press(handle, 0x38);
+            corevm_ps2_key_press(handle, 0x53);
             corevm_ps2_key_release(handle, 0x53);
             corevm_ps2_key_release(handle, 0x38);
             corevm_ps2_key_release(handle, 0x1D);

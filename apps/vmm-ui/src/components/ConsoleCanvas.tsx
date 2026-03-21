@@ -84,9 +84,9 @@ export default function ConsoleCanvas({ vmId, captureKeyboard = false }: Props) 
         if (aliveRef.current) reconnectTimer = setTimeout(connect, 2000)
       }
 
-      ws.onerror = (ev) => {
-        console.error('[console] error', ev)
-        ws.close()
+      ws.onerror = () => {
+        // Suppress error on intentional close (React StrictMode double-mount)
+        if (aliveRef.current) ws.close()
       }
 
       ws.onmessage = (ev) => {
@@ -169,7 +169,9 @@ export default function ConsoleCanvas({ vmId, captureKeyboard = false }: Props) 
     }
   }, [captureKeyboard, focused])
 
-  // Mouse input
+  // Mouse input — send both absolute (USB tablet) and relative (PS/2)
+  const lastMouseRef = useRef<{ x: number; y: number } | null>(null)
+
   const sendMouse = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current
     if (!canvas || !wsRef.current) return
@@ -177,7 +179,20 @@ export default function ConsoleCanvas({ vmId, captureKeyboard = false }: Props) 
     const x = Math.round(((e.clientX - rect.left) / rect.width) * canvas.width)
     const y = Math.round(((e.clientY - rect.top) / rect.height) * canvas.height)
     const buttons = e.buttons & 0x07
+
+    // Send absolute position (for USB tablet mode)
     wsRef.current.send(JSON.stringify({ type: 'mouse_move', x, y, buttons }))
+
+    // Also send relative delta (for PS/2 mouse mode)
+    const last = lastMouseRef.current
+    if (last) {
+      const dx = x - last.x
+      const dy = -(y - last.y)  // PS/2: positive Y = up, browser: positive Y = down
+      if (dx !== 0 || dy !== 0) {
+        wsRef.current.send(JSON.stringify({ type: 'mouse_rel', dx, dy, buttons }))
+      }
+    }
+    lastMouseRef.current = { x, y }
   }, [])
 
   const sendWheel = useCallback((e: React.WheelEvent) => {
