@@ -10,6 +10,7 @@ pub mod users;
 pub mod vms;
 pub mod storage;
 pub mod network;
+pub mod settings;
 
 /// Build the complete API router.
 pub fn router() -> Router<Arc<AppState>> {
@@ -49,6 +50,13 @@ pub fn router() -> Router<Arc<AppState>> {
         // Network
         .route("/api/network/interfaces", get(network::list_interfaces))
         .route("/api/network/stats", get(network::network_stats))
+        // Settings
+        .route("/api/settings/server", get(settings::get_server))
+        .route("/api/settings/time", get(settings::get_time))
+        .route("/api/settings/time/timezone", put(settings::set_timezone))
+        .route("/api/settings/security", get(settings::get_security))
+        .route("/api/settings/groups", get(settings::list_groups).post(settings::create_group))
+        .route("/api/settings/groups/{id}", delete(settings::delete_group))
         // WebSocket console
         .route("/ws/console/{vm_id}", get(crate::ws::console::handler))
 }

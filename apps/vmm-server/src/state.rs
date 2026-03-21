@@ -19,6 +19,8 @@ pub struct AppState {
     pub config: ServerConfig,
     /// JWT signing secret.
     pub jwt_secret: String,
+    /// Server start time (for uptime).
+    pub started_at: std::time::Instant,
 }
 
 /// Runtime state for a single VM.

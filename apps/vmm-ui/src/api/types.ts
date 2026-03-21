@@ -151,6 +151,42 @@ export interface PoolFile {
   is_dir: boolean
 }
 
+// ── Settings ─────────────────────────────────────────────────────────────
+
+export interface ServerSettings {
+  bind: string
+  port: number
+  session_timeout_hours: number
+  max_disk_size_gb: number
+  log_level: string
+  version: string
+  uptime_secs: number
+}
+
+export interface TimeSettings {
+  current_time: string
+  timezone: string
+  ntp_enabled: boolean
+  ntp_servers: string[]
+}
+
+export interface SecuritySettings {
+  max_login_attempts: number
+  lockout_duration_secs: number
+  password_min_length: number
+  require_uppercase: boolean
+  require_numbers: boolean
+  api_keys_enabled: boolean
+}
+
+export interface Group {
+  id: number
+  name: string
+  role: string
+  description: string
+  member_count: number
+}
+
 // ── Network ──────────────────────────────────────────────────────────────
 
 export interface NetworkInterface {

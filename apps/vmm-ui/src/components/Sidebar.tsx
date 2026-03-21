@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
-import { Monitor, HardDrive, Network, Settings, Zap, LifeBuoy, FileText, ChevronDown, Cable, Layers, Globe, Unplug, Database, Share2, Gauge, Disc } from 'lucide-react'
+import { useUiStore } from '../stores/uiStore'
+import { Monitor, HardDrive, Network, Settings, Zap, LifeBuoy, FileText, ChevronDown, Cable, Layers, Globe, Unplug, Database, Share2, Gauge, Disc, Palette, Users, Clock, Server, Shield } from 'lucide-react'
 
 interface NavItem {
   to: string
@@ -31,11 +32,21 @@ const navItems: NavItem[] = [
       { to: '/networks/vlans', icon: Layers, label: 'VLAN Config' },
     ],
   },
-  { to: '/settings', icon: Settings, label: 'Settings' },
+  {
+    to: '/settings', icon: Settings, label: 'Settings',
+    children: [
+      { to: '/settings/ui', icon: Palette, label: 'UI & Branding' },
+      { to: '/settings/users', icon: Users, label: 'Users' },
+      { to: '/settings/groups', icon: Shield, label: 'Groups & Roles' },
+      { to: '/settings/time', icon: Clock, label: 'Date & Time' },
+      { to: '/settings/server', icon: Server, label: 'Server' },
+    ],
+  },
 ]
 
 export default function Sidebar() {
   const location = useLocation()
+  const { brandName, brandSubtitle } = useUiStore()
   const [expandedSections, setExpandedSections] = useState<Set<string>>(
     () => new Set(navItems.filter(i => i.children && (location.pathname.startsWith(i.to + '/') || location.pathname === i.to)).map(i => i.to))
   )
@@ -60,8 +71,8 @@ export default function Sidebar() {
             <Monitor size={16} className="text-vmm-accent" />
           </div>
           <div>
-            <div className="text-sm font-bold text-vmm-text">CoreVM</div>
-            <div className="text-[10px] text-vmm-text-muted font-mono tracking-wider">V2.4.0-ENTERPRISE</div>
+            <div className="text-sm font-bold text-vmm-text">{brandName}</div>
+            <div className="text-[10px] text-vmm-text-muted font-mono tracking-wider">{brandSubtitle}</div>
           </div>
         </div>
       </div>

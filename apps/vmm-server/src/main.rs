@@ -142,6 +142,7 @@ async fn main() {
         db: Mutex::new(conn),
         jwt_secret,
         config: cfg,
+        started_at: std::time::Instant::now(),
     });
 
     // Build router

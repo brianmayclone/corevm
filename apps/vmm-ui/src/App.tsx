@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { useEffect } from 'react'
 import { useAuthStore } from './stores/authStore'
+import { useUiStore } from './stores/uiStore'
 import Layout from './components/Layout'
 import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
@@ -19,6 +20,12 @@ import NetworkNat from './pages/NetworkNat'
 import NetworkHostOnly from './pages/NetworkHostOnly'
 import NetworkAdapters from './pages/NetworkAdapters'
 import NetworkVlans from './pages/NetworkVlans'
+import Settings from './pages/Settings'
+import SettingsUi from './pages/SettingsUi'
+import SettingsUsers from './pages/SettingsUsers'
+import SettingsGroups from './pages/SettingsGroups'
+import SettingsTime from './pages/SettingsTime'
+import SettingsServer from './pages/SettingsServer'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore()
@@ -28,7 +35,8 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
 export default function App() {
   const { loadFromStorage } = useAuthStore()
-  useEffect(() => { loadFromStorage() }, [])
+  const { loadFromStorage: loadUi } = useUiStore()
+  useEffect(() => { loadFromStorage(); loadUi() }, [])
 
   return (
     <BrowserRouter>
@@ -54,17 +62,16 @@ export default function App() {
             <Route path="adapters" element={<NetworkAdapters />} />
             <Route path="vlans" element={<NetworkVlans />} />
           </Route>
-          <Route path="settings" element={<Placeholder title="Settings" />} />
+          <Route path="settings" element={<Settings />}>
+            <Route path="ui" element={<SettingsUi />} />
+            <Route path="users" element={<SettingsUsers />} />
+            <Route path="groups" element={<SettingsGroups />} />
+            <Route path="time" element={<SettingsTime />} />
+            <Route path="server" element={<SettingsServer />} />
+          </Route>
         </Route>
       </Routes>
     </BrowserRouter>
   )
 }
 
-function Placeholder({ title }: { title: string }) {
-  return (
-    <div className="text-vmm-text-muted text-sm py-12 text-center">
-      {title} management — coming soon
-    </div>
-  )
-}

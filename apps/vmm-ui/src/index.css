@@ -24,6 +24,26 @@
   --color-vmm-console-bg: #0A0E17;
 }
 
+/* Light theme overrides */
+[data-theme="light"] {
+  --color-vmm-bg: #F8FAFC;
+  --color-vmm-bg-alt: #F1F5F9;
+  --color-vmm-surface: #FFFFFF;
+  --color-vmm-surface-hover: #F1F5F9;
+  --color-vmm-border: #E2E8F0;
+  --color-vmm-border-light: #CBD5E1;
+  --color-vmm-success: #059669;
+  --color-vmm-warning: #D97706;
+  --color-vmm-danger: #DC2626;
+  --color-vmm-danger-hover: #B91C1C;
+  --color-vmm-text: #1E293B;
+  --color-vmm-text-dim: #475569;
+  --color-vmm-text-muted: #94A3B8;
+  --color-vmm-sidebar: #F1F5F9;
+  --color-vmm-sidebar-active: #DBEAFE;
+  --color-vmm-console-bg: #1E293B;
+}
+
 body {
   margin: 0;
   background-color: var(--color-vmm-bg);

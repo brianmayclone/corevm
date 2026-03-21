@@ -9,6 +9,7 @@ import VmPriorityCard from '../components/VmPriorityCard'
 import Card from '../components/Card'
 import SectionLabel from '../components/SectionLabel'
 import { formatBytes, formatRam } from '../utils/format'
+import { useUiStore } from '../stores/uiStore'
 
 /** Format audit entry into human-readable log line. */
 function formatLogEntry(a: AuditEntry): string {
@@ -41,6 +42,7 @@ export default function Dashboard() {
   const [netStats, setNetStats] = useState<NetworkStats | null>(null)
   const [activities, setActivities] = useState<AuditEntry[]>([])
   const navigate = useNavigate()
+  const { dashboardRefreshSecs } = useUiStore()
 
   const refresh = () => {
     fetchVms()
@@ -51,7 +53,7 @@ export default function Dashboard() {
 
   useEffect(() => {
     refresh()
-    const interval = setInterval(refresh, 10000)
+    const interval = setInterval(refresh, dashboardRefreshSecs * 1000)
     return () => clearInterval(interval)
   }, [])
 
