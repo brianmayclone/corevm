@@ -1,5 +1,6 @@
 # Build artifacts
 target/
+dist/
 Cargo.lock
 
 # BIOS build output (binary, generated from .asm sources)
