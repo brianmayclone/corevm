@@ -20,6 +20,7 @@ pub mod drs;
 pub mod migration;
 pub mod alarms;
 pub mod activity;
+pub mod notifications;
 
 pub fn router() -> Router<Arc<ClusterState>> {
     Router::new()
@@ -95,6 +96,14 @@ pub fn router() -> Router<Arc<ClusterState>> {
         // ── Alarms ──────────────────────────────────────
         .route("/api/alarms", get(alarms::list))
         .route("/api/alarms/{id}/acknowledge", post(alarms::acknowledge))
+
+        // ── Notifications ──────────────────────────────
+        .route("/api/notifications/channels", get(notifications::list_channels).post(notifications::create_channel))
+        .route("/api/notifications/channels/{id}", put(notifications::update_channel).delete(notifications::delete_channel))
+        .route("/api/notifications/channels/{id}/test", post(notifications::test_channel))
+        .route("/api/notifications/rules", get(notifications::list_rules).post(notifications::create_rule))
+        .route("/api/notifications/rules/{id}", put(notifications::update_rule).delete(notifications::delete_rule))
+        .route("/api/notifications/log", get(notifications::notification_log))
 
         // ── WebSocket ───────────────────────────────────
         .route("/ws/console/{vm_id}", get(crate::ws::console_bridge::handler))

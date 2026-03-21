@@ -87,6 +87,7 @@ const clusterNavItems: NavItem[] = [
       { to: '/operations/tasks', icon: CheckSquare, label: 'Tasks' },
       { to: '/operations/events', icon: Bell, label: 'Events' },
       { to: '/operations/alarms', icon: Bell, label: 'Alarms' },
+      { to: '/operations/notifications', icon: Bell, label: 'Notifications' },
     ],
   },
   {

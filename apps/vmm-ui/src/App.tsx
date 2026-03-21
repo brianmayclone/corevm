@@ -44,6 +44,7 @@ import TasksList from './pages/TasksList'
 import EventsList from './pages/EventsList'
 import DrsPage from './pages/DrsPage'
 import AlarmsList from './pages/AlarmsList'
+import NotificationsPage from './pages/NotificationsPage'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore()
@@ -122,6 +123,7 @@ export default function App() {
           <Route path="operations/tasks" element={<TasksList />} />
           <Route path="operations/events" element={<EventsList />} />
           <Route path="operations/alarms" element={<AlarmsList />} />
+          <Route path="operations/notifications" element={<NotificationsPage />} />
         </Route>
       </Routes>
     </BrowserRouter>
