@@ -21,6 +21,8 @@ pub struct AppState {
     pub jwt_secret: String,
     /// Server start time (for uptime).
     pub started_at: std::time::Instant,
+    /// Managed-mode config (set when registered with a cluster).
+    pub managed_config: Mutex<Option<vmm_core::cluster::ManagedNodeConfig>>,
 }
 
 /// Runtime state for a single VM.

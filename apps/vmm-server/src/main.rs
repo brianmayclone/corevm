@@ -11,6 +11,7 @@ mod services;
 mod api;
 mod vm;
 mod ws;
+mod agent;
 
 use std::sync::{Arc, Mutex};
 use tower_http::cors::CorsLayer;
@@ -170,12 +171,34 @@ async fn main() {
         }
     }
 
+    // Load managed-mode config (if this node was previously registered with a cluster)
+    let managed_config = {
+        let cluster_json_path = cfg.vms.config_dir.join("cluster.json");
+        if cluster_json_path.exists() {
+            match std::fs::read_to_string(&cluster_json_path) {
+                Ok(content) => {
+                    match serde_json::from_str::<vmm_core::cluster::ManagedNodeConfig>(&content) {
+                        Ok(config) if config.managed => {
+                            tracing::info!("Managed mode: registered with cluster {}", config.cluster_url);
+                            Some(config)
+                        }
+                        _ => None,
+                    }
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
+        }
+    };
+
     let state = Arc::new(AppState {
         vms: vms_map,
         db: Mutex::new(conn),
         jwt_secret,
         config: cfg,
         started_at: std::time::Instant::now(),
+        managed_config: Mutex::new(managed_config),
     });
 
     // Build router

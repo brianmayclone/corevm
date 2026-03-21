@@ -13,10 +13,15 @@ pub mod network;
 pub mod settings;
 pub mod resource_groups;
 
-/// Build the complete API router.
+/// Build the complete API router (regular API + agent API).
 pub fn router() -> Router<Arc<AppState>> {
+    // Agent API routes (always mounted, but agent auth required)
+    let agent_routes = crate::agent::router();
+
     Router::new()
-        // System
+        // Agent routes (no managed-mode guard — these MUST work when managed)
+        .merge(agent_routes)
+        // System info always available (so UI can detect managed mode)
         .route("/api/system/info", get(system::info))
         .route("/api/system/stats", get(system::stats))
         .route("/api/system/activity", get(system::activity))

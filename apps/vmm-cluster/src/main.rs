@@ -1,0 +1,142 @@
+//! vmm-cluster — CoreVM cluster orchestration server.
+//!
+//! Central authority managing multiple vmm-server nodes, analogous to VMware vCenter.
+//! The cluster owns all state (VMs, storage, users, permissions) and pushes
+//! commands to nodes via the Agent API.
+
+mod config;
+mod state;
+mod db;
+mod auth;
+mod api;
+mod services;
+mod engine;
+mod node_client;
+mod ws;
+
+use std::sync::{Arc, Mutex};
+use config::ClusterConfig;
+use state::{ClusterState, NodeConnection, NodeStatus};
+use dashmap::DashMap;
+use tokio::net::TcpListener;
+use tower_http::cors::CorsLayer;
+use tower_http::trace::TraceLayer;
+
+#[tokio::main]
+async fn main() {
+    // ── Parse CLI args ──────────────────────────────────────────────
+    let config_path = std::env::args()
+        .skip_while(|a| a != "--config")
+        .nth(1)
+        .unwrap_or_else(|| "/etc/vmm/vmm-cluster.toml".to_string());
+
+    // ── Load configuration ──────────────────────────────────────────
+    let config = ClusterConfig::load(std::path::Path::new(&config_path))
+        .unwrap_or_else(|e| {
+            eprintln!("Config error: {}", e);
+            std::process::exit(1);
+        });
+
+    // ── Initialize logging ──────────────────────────────────────────
+    let log_filter = config.logging.level.clone();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&log_filter))
+        )
+        .init();
+
+    tracing::info!("vmm-cluster v{} starting...", env!("CARGO_PKG_VERSION"));
+
+    // ── Create data directory ───────────────────────────────────────
+    let data_dir = &config.data.data_dir;
+    if !data_dir.exists() {
+        std::fs::create_dir_all(data_dir).unwrap_or_else(|e| {
+            tracing::warn!("Cannot create data directory {}: {}", data_dir.display(), e);
+        });
+    }
+
+    // ── Initialize database ─────────────────────────────────────────
+    let db_path = data_dir.join("vmm-cluster.db");
+    tracing::info!("Database: {}", db_path.display());
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap_or_else(|e| {
+        eprintln!("Cannot open database: {}", e);
+        std::process::exit(1);
+    });
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+        .expect("Failed to set PRAGMA");
+
+    db::init(&conn).unwrap_or_else(|e| {
+        eprintln!("Database init failed: {}", e);
+        std::process::exit(1);
+    });
+
+    // ── Load existing hosts into memory ─────────────────────────────
+    let nodes: DashMap<String, NodeConnection> = DashMap::new();
+    {
+        let hosts = services::host::HostService::list(&conn).unwrap_or_default();
+        for host in hosts {
+            let agent_token = services::host::HostService::get_agent_token(&conn, &host.id)
+                .unwrap_or_default();
+            nodes.insert(host.id.clone(), NodeConnection {
+                node_id: host.id,
+                hostname: host.hostname,
+                address: host.address,
+                agent_token,
+                status: NodeStatus::Connecting,
+                missed_heartbeats: 0,
+            });
+        }
+        tracing::info!("Loaded {} registered hosts", nodes.len());
+    }
+
+    // ── Build application state ─────────────────────────────────────
+    let jwt_secret = config.auth.jwt_secret.clone();
+    let bind = config.server.bind.clone();
+    let port = config.server.port;
+
+    let state = Arc::new(ClusterState {
+        nodes,
+        db: Mutex::new(conn),
+        jwt_secret,
+        config,
+        started_at: std::time::Instant::now(),
+    });
+
+    // ── Start background engines ────────────────────────────────────
+    engine::heartbeat::spawn(Arc::clone(&state));
+    tracing::info!("Heartbeat monitor started (10s interval)");
+
+    // TODO: Phase 4 — engine::ha::spawn(Arc::clone(&state));
+    // TODO: Phase 5 — engine::drs::spawn(Arc::clone(&state));
+
+    // ── Build router ────────────────────────────────────────────────
+    let app = api::router()
+        .layer(CorsLayer::permissive())
+        .layer(TraceLayer::new_for_http())
+        .with_state(state);
+
+    // ── Start server ────────────────────────────────────────────────
+    let addr = format!("{}:{}", bind, port);
+    tracing::info!("Listening on {}", addr);
+
+    let listener = TcpListener::bind(&addr).await.unwrap_or_else(|e| {
+        eprintln!("Cannot bind to {}: {}", addr, e);
+        std::process::exit(1);
+    });
+
+    // Graceful shutdown on Ctrl+C
+    let shutdown = async {
+        tokio::signal::ctrl_c().await.ok();
+        tracing::info!("Shutting down...");
+    };
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("Server error: {}", e);
+            std::process::exit(1);
+        });
+}

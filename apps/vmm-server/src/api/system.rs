@@ -11,29 +11,50 @@ pub struct SystemInfo {
     pub version: &'static str,
     pub platform: &'static str,
     pub arch: &'static str,
+    pub hostname: String,
     pub hw_virtualization: bool,
     pub cpu_count: usize,
     pub total_ram_mb: u64,
     pub free_ram_mb: u64,
     pub total_disk_bytes: u64,
     pub free_disk_bytes: u64,
+    /// Backend mode: "standalone" or "managed" (by cluster)
+    pub mode: String,
+    /// URL of the managing cluster (only when mode == "managed")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cluster_url: Option<String>,
 }
 
 /// GET /api/system/info
-pub async fn info() -> Json<SystemInfo> {
+pub async fn info(State(state): State<Arc<AppState>>) -> Json<SystemInfo> {
     let hw_virt = libcorevm::ffi::corevm_has_hw_support() != 0;
     let (total_ram, free_ram) = get_host_memory();
     let (total_disk, free_disk) = get_host_disk();
+
+    let (mode, cluster_url) = {
+        let managed = state.managed_config.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref config) = *managed {
+            ("managed".to_string(), Some(config.cluster_url.clone()))
+        } else {
+            ("standalone".to_string(), None)
+        }
+    };
+
+    let hostname = gethostname::gethostname().to_string_lossy().to_string();
+
     Json(SystemInfo {
         version: env!("CARGO_PKG_VERSION"),
         platform: std::env::consts::OS,
         arch: std::env::consts::ARCH,
+        hostname,
         hw_virtualization: hw_virt,
         cpu_count: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
         total_ram_mb: total_ram,
         free_ram_mb: free_ram,
         total_disk_bytes: total_disk,
         free_disk_bytes: free_disk,
+        mode,
+        cluster_url,
     })
 }
 
