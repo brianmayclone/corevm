@@ -66,6 +66,14 @@ pub fn router() -> Router<Arc<ClusterState>> {
 
         // ── Resource Groups (compat) ────────────────────
         .route("/api/resource-groups", get(activity::list_resource_groups))
+        .route("/api/resource-groups/permissions-list", get(activity::resource_group_permissions_list))
+
+        // ── Settings (compat) ─────────────────────────
+        .route("/api/settings/server", get(activity::settings_server))
+        .route("/api/settings/time", get(activity::settings_time))
+        .route("/api/settings/security", get(activity::settings_security))
+        .route("/api/settings/groups", get(activity::list_settings_groups).post(activity::create_settings_group))
+        .route("/api/settings/groups/{id}", delete(activity::delete_settings_group))
 
         // ── Network (compat stubs) ──────────────────────
         .route("/api/network/interfaces", get(activity::network_interfaces))

@@ -55,10 +55,8 @@ export default function ConsoleCanvas({ vmId, captureKeyboard = false }: Props) 
     const token = localStorage.getItem('vmm_token')
     if (!token || !vmId) return
 
-    // In dev mode, connect directly to the backend (port 8443).
-    // In production, use the same host.
-    const isDev = window.location.port === '5173'
-    const wsHost = isDev ? `${window.location.hostname}:8443` : window.location.host
+    // In dev mode Vite proxies /ws/* to the backend, so always use the current host
+    const wsHost = window.location.host
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
     const url = `${proto}://${wsHost}/ws/console/${vmId}?token=${token}`
 
