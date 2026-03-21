@@ -4,8 +4,12 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # This file is a self-extracting archive. Run it to install vmm-server.
 #
-# Automatically detects the init system (systemd, OpenRC, SysVinit, runit)
-# and installs the appropriate service configuration.
+# Supported platforms:
+#   - Native Linux (systemd, OpenRC, SysVinit, runit)
+#   - WSL2 (with or without systemd)
+#
+# Automatically detects the init system and WSL2 environment, then installs
+# the appropriate service configuration.
 #
 # Usage:
 #   sudo ./vmm-server-installer.sh              # Install
@@ -25,11 +29,26 @@ DATA_DIR="/var/lib/vmm"
 SERVICE_NAME="vmm-server"
 LOG_DIR="/var/log"
 
+# ── WSL2 detection ───────────────────────────────────────────────────────────
+IS_WSL=false
+WSL_SYSTEMD=false
+if grep -qi microsoft /proc/version 2>/dev/null; then
+    IS_WSL=true
+fi
+
 # ── Init system detection ────────────────────────────────────────────────────
 detect_init_system() {
     if [ -d /run/systemd/system ] && command -v systemctl &>/dev/null; then
-        echo "systemd"
-    elif command -v rc-service &>/dev/null && [ -d /etc/init.d ]; then
+        # Verify systemd is actually functional (not just present)
+        if systemctl is-system-running &>/dev/null || systemctl is-system-running 2>&1 | grep -qE "running|degraded|starting|initializing"; then
+            if [ "$IS_WSL" = true ]; then
+                WSL_SYSTEMD=true
+            fi
+            echo "systemd"
+            return
+        fi
+    fi
+    if command -v rc-service &>/dev/null && [ -d /etc/init.d ]; then
         echo "openrc"
     elif command -v sv &>/dev/null && [ -d /etc/sv ]; then
         echo "runit"
@@ -72,7 +91,6 @@ stop_service() {
             fi
             ;;
         *)
-            # Try killing by pidfile
             if [ -f "/var/run/${SERVICE_NAME}.pid" ]; then
                 kill "$(cat "/var/run/${SERVICE_NAME}.pid")" 2>/dev/null || true
                 rm -f "/var/run/${SERVICE_NAME}.pid"
@@ -97,16 +115,16 @@ remove_service_files() {
         sysvinit)
             rm -f "/etc/init.d/$SERVICE_NAME"
             ;;
-        *)
-            rm -f "$INSTALL_DIR/run.sh"
-            ;;
     esac
+    # Always clean up fallback script (might exist from WSL without systemd)
+    rm -f "$INSTALL_DIR/run.sh"
 }
 
 # ── Uninstall mode ───────────────────────────────────────────────────────────
 if [ "$1" = "--uninstall" ]; then
     echo -e "${CYAN}=== Uninstalling vmm-server ===${NC}"
-    echo -e "Detected init system: ${CYAN}${INIT_SYSTEM}${NC}"
+    echo -e "  Platform:    ${CYAN}$([ "$IS_WSL" = true ] && echo "WSL2" || echo "Native Linux")${NC}"
+    echo -e "  Init system: ${CYAN}${INIT_SYSTEM}${NC}"
     stop_service
     remove_service_files
     rm -rf "$INSTALL_DIR"
@@ -123,7 +141,18 @@ echo -e "${CYAN}║           VMM-Server Installer                   ║${NC}"
 echo -e "${CYAN}║           CoreVM Web Management Server           ║${NC}"
 echo -e "${CYAN}╚═══════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "  Detected init system: ${CYAN}${INIT_SYSTEM}${NC}"
+if [ "$IS_WSL" = true ]; then
+    echo -e "  Platform:    ${CYAN}WSL2${NC}"
+    if [ "$WSL_SYSTEMD" = true ]; then
+        echo -e "  Init system: ${CYAN}systemd (WSL2 systemd mode)${NC}"
+    else
+        echo -e "  Init system: ${CYAN}${INIT_SYSTEM}${NC}"
+        echo -e "  ${YELLOW}systemd not active — will install manual start script${NC}"
+    fi
+else
+    echo -e "  Platform:    ${CYAN}Native Linux${NC}"
+    echo -e "  Init system: ${CYAN}${INIT_SYSTEM}${NC}"
+fi
 echo ""
 
 # ── Find payload offset ─────────────────────────────────────────────────────
@@ -247,7 +276,6 @@ depend() {
     after firewall
 }
 INITEOF
-    # Replace placeholders
     sed -i "s|INSTALL_DIR_PLACEHOLDER|$INSTALL_DIR|g" "/etc/init.d/$SERVICE_NAME"
     sed -i "s|CONFIG_DIR_PLACEHOLDER|$CONFIG_DIR|g" "/etc/init.d/$SERVICE_NAME"
     sed -i "s|LOG_DIR_PLACEHOLDER|$LOG_DIR|g" "/etc/init.d/$SERVICE_NAME"
@@ -313,12 +341,10 @@ case "$1" in
         ;;
 esac
 INITEOF
-    # Replace placeholders
     sed -i "s|INSTALL_DIR_PLACEHOLDER|$INSTALL_DIR|g" "/etc/init.d/$SERVICE_NAME"
     sed -i "s|CONFIG_DIR_PLACEHOLDER|$CONFIG_DIR|g" "/etc/init.d/$SERVICE_NAME"
     sed -i "s|LOG_DIR_PLACEHOLDER|$LOG_DIR|g" "/etc/init.d/$SERVICE_NAME"
     chmod 755 "/etc/init.d/$SERVICE_NAME"
-    # Register with system
     if command -v update-rc.d &>/dev/null; then
         update-rc.d "$SERVICE_NAME" defaults
     elif command -v chkconfig &>/dev/null; then
@@ -340,7 +366,6 @@ exec svlogd -tt $LOG_DIR/vmm-server/
 EOF
     chmod 755 "$SV_DIR/run" "$SV_DIR/log/run"
     mkdir -p "$LOG_DIR/vmm-server"
-    # Symlink to activate
     ln -sf "$SV_DIR" /var/service/ 2>/dev/null || \
     ln -sf "$SV_DIR" /service/ 2>/dev/null || true
     echo -e "${GREEN}✓ runit service created${NC}"
@@ -349,7 +374,7 @@ EOF
 install_fallback_script() {
     cat > "$INSTALL_DIR/run.sh" << EOF
 #!/bin/bash
-# Manual start/stop script for vmm-server
+# Start/stop script for vmm-server
 # Usage: $INSTALL_DIR/run.sh {start|stop|restart|status}
 
 PIDFILE="/var/run/vmm-server.pid"
@@ -397,16 +422,26 @@ case "\$1" in
 esac
 EOF
     chmod 755 "$INSTALL_DIR/run.sh"
-    echo -e "${GREEN}✓ Fallback start/stop script created at $INSTALL_DIR/run.sh${NC}"
+    echo -e "${GREEN}✓ Start/stop script created at $INSTALL_DIR/run.sh${NC}"
 }
 
-case "$INIT_SYSTEM" in
-    systemd)  install_systemd ;;
-    openrc)   install_openrc ;;
-    sysvinit) install_sysvinit ;;
-    runit)    install_runit ;;
-    *)        install_fallback_script ;;
-esac
+# On WSL2 without systemd, always use fallback script
+if [ "$IS_WSL" = true ] && [ "$INIT_SYSTEM" != "systemd" ]; then
+    install_fallback_script
+else
+    case "$INIT_SYSTEM" in
+        systemd)  install_systemd ;;
+        openrc)   install_openrc ;;
+        sysvinit) install_sysvinit ;;
+        runit)    install_runit ;;
+        *)        install_fallback_script ;;
+    esac
+fi
+
+# On WSL2 with systemd, also install the fallback script as convenience
+if [ "$IS_WSL" = true ] && [ "$INIT_SYSTEM" = "systemd" ]; then
+    install_fallback_script
+fi
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 echo ""
@@ -420,34 +455,86 @@ echo -e "  Data:         $DATA_DIR/"
 echo -e "  Init system:  $INIT_SYSTEM"
 echo ""
 
-case "$INIT_SYSTEM" in
-    systemd)
-        echo -e "  ${CYAN}Start:${NC}    sudo systemctl enable --now $SERVICE_NAME"
-        echo -e "  ${CYAN}Status:${NC}   sudo systemctl status $SERVICE_NAME"
-        echo -e "  ${CYAN}Logs:${NC}     sudo journalctl -u $SERVICE_NAME -f"
-        ;;
-    openrc)
-        echo -e "  ${CYAN}Start:${NC}    sudo rc-update add $SERVICE_NAME default && sudo rc-service $SERVICE_NAME start"
-        echo -e "  ${CYAN}Status:${NC}   sudo rc-service $SERVICE_NAME status"
-        echo -e "  ${CYAN}Logs:${NC}     tail -f $LOG_DIR/vmm-server.log"
-        ;;
-    sysvinit)
-        echo -e "  ${CYAN}Start:${NC}    sudo /etc/init.d/$SERVICE_NAME start"
-        echo -e "  ${CYAN}Status:${NC}   sudo /etc/init.d/$SERVICE_NAME status"
-        echo -e "  ${CYAN}Logs:${NC}     tail -f $LOG_DIR/vmm-server.log"
-        ;;
-    runit)
-        echo -e "  ${CYAN}Start:${NC}    sudo sv start $SERVICE_NAME"
-        echo -e "  ${CYAN}Status:${NC}   sudo sv status $SERVICE_NAME"
-        echo -e "  ${CYAN}Logs:${NC}     tail -f $LOG_DIR/vmm-server/"
-        ;;
-    *)
-        echo -e "  ${YELLOW}No known init system detected.${NC}"
+# ── WSL2-specific hints ─────────────────────────────────────────────────────
+if [ "$IS_WSL" = true ]; then
+    WSL_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+    # Try to get the Windows host IP (gateway from WSL's perspective)
+    WIN_HOST_IP=$(ip route show default 2>/dev/null | awk '{print $3}' || echo "")
+
+    if [ "$WSL_SYSTEMD" = true ]; then
+        echo -e "  ${CYAN}Start (systemd):${NC}"
+        echo -e "    sudo systemctl enable --now $SERVICE_NAME"
+        echo -e ""
+        echo -e "  ${CYAN}Alternative (manual):${NC}"
+        echo -e "    sudo $INSTALL_DIR/run.sh start"
+    else
         echo -e "  ${CYAN}Start:${NC}    sudo $INSTALL_DIR/run.sh start"
         echo -e "  ${CYAN}Status:${NC}   sudo $INSTALL_DIR/run.sh status"
-        echo -e "  ${CYAN}Logs:${NC}     tail -f $LOG_DIR/vmm-server.log"
-        ;;
-esac
+        echo -e "  ${CYAN}Stop:${NC}     sudo $INSTALL_DIR/run.sh stop"
+    fi
+
+    echo ""
+    echo -e "  ${CYAN}Logs:${NC}     tail -f $LOG_DIR/vmm-server.log"
+    echo ""
+    echo -e "  ${YELLOW}── WSL2 Notes ──────────────────────────────────────${NC}"
+    echo ""
+    echo -e "  The service listens on the WSL2 virtual network."
+    echo -e "  From inside WSL2:    ${CYAN}http://localhost:8443${NC}"
+    if [ -n "$WSL_IP" ]; then
+        echo -e "  WSL2 IP:             ${CYAN}http://${WSL_IP}:8443${NC}"
+    fi
+    echo ""
+    echo -e "  ${CYAN}Access from Windows:${NC}"
+    echo -e "    Modern WSL2 (mirrored networking): http://localhost:8443"
+    echo -e "    Classic WSL2 (NAT networking):     http://${WSL_IP:-<WSL_IP>}:8443"
+    echo ""
+    echo -e "  To enable mirrored networking (recommended), add to"
+    echo -e "  ${CYAN}%USERPROFILE%\\.wslconfig${NC} on Windows:"
+    echo -e ""
+    echo -e "    [wsl2]"
+    echo -e "    networkingMode=mirrored"
+    echo ""
+    echo -e "  Then restart WSL: ${CYAN}wsl --shutdown${NC}"
+    echo ""
+    if [ "$WSL_SYSTEMD" != true ]; then
+        echo -e "  ${CYAN}Autostart on WSL launch:${NC}"
+        echo -e "    Add to /etc/wsl.conf:"
+        echo -e ""
+        echo -e "      [boot]"
+        echo -e "      command = $INSTALL_DIR/run.sh start"
+        echo ""
+    fi
+else
+    # Native Linux hints
+    case "$INIT_SYSTEM" in
+        systemd)
+            echo -e "  ${CYAN}Start:${NC}    sudo systemctl enable --now $SERVICE_NAME"
+            echo -e "  ${CYAN}Status:${NC}   sudo systemctl status $SERVICE_NAME"
+            echo -e "  ${CYAN}Logs:${NC}     sudo journalctl -u $SERVICE_NAME -f"
+            ;;
+        openrc)
+            echo -e "  ${CYAN}Start:${NC}    sudo rc-update add $SERVICE_NAME default && sudo rc-service $SERVICE_NAME start"
+            echo -e "  ${CYAN}Status:${NC}   sudo rc-service $SERVICE_NAME status"
+            echo -e "  ${CYAN}Logs:${NC}     tail -f $LOG_DIR/vmm-server.log"
+            ;;
+        sysvinit)
+            echo -e "  ${CYAN}Start:${NC}    sudo /etc/init.d/$SERVICE_NAME start"
+            echo -e "  ${CYAN}Status:${NC}   sudo /etc/init.d/$SERVICE_NAME status"
+            echo -e "  ${CYAN}Logs:${NC}     tail -f $LOG_DIR/vmm-server.log"
+            ;;
+        runit)
+            echo -e "  ${CYAN}Start:${NC}    sudo sv start $SERVICE_NAME"
+            echo -e "  ${CYAN}Status:${NC}   sudo sv status $SERVICE_NAME"
+            echo -e "  ${CYAN}Logs:${NC}     tail -f $LOG_DIR/vmm-server/"
+            ;;
+        *)
+            echo -e "  ${YELLOW}No known init system detected.${NC}"
+            echo -e "  ${CYAN}Start:${NC}    sudo $INSTALL_DIR/run.sh start"
+            echo -e "  ${CYAN}Status:${NC}   sudo $INSTALL_DIR/run.sh status"
+            echo -e "  ${CYAN}Logs:${NC}     tail -f $LOG_DIR/vmm-server.log"
+            ;;
+    esac
+fi
 
 echo ""
 echo -e "  ${CYAN}Web UI:${NC}  http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'localhost'):8443"

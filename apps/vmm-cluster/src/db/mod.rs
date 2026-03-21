@@ -256,6 +256,74 @@ CREATE TABLE IF NOT EXISTS alarms (
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     triggered_at    TEXT
 );
+
+-- DRS rules — configurable thresholds and behavior for the DRS engine
+CREATE TABLE IF NOT EXISTS drs_rules (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    cluster_id      TEXT NOT NULL REFERENCES clusters(id) ON DELETE CASCADE,
+    name            TEXT NOT NULL,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    -- Trigger condition
+    metric          TEXT NOT NULL DEFAULT 'cpu_usage',
+                    -- cpu_usage, ram_usage, vm_count_imbalance
+    threshold       REAL NOT NULL DEFAULT 80.0,
+                    -- Percentage threshold to trigger (e.g. 80 = 80%)
+    -- Action
+    action          TEXT NOT NULL DEFAULT 'recommend',
+                    -- recommend (manual), auto_migrate
+    -- Cooldown: minimum seconds between recommendations for the same VM
+    cooldown_secs   INTEGER NOT NULL DEFAULT 3600,
+    -- Priority of generated recommendations
+    priority        TEXT NOT NULL DEFAULT 'medium',
+                    -- low, medium, high, critical
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ═══════════════════════════════════════════════════════════════
+-- NOTIFICATION SYSTEM
+-- ═══════════════════════════════════════════════════════════════
+
+-- Notification channels — delivery targets (email, webhook, log)
+CREATE TABLE IF NOT EXISTS notification_channels (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL UNIQUE,
+    channel_type    TEXT NOT NULL,           -- email, webhook, log
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    -- Config (JSON) — type-specific settings:
+    --   email:   { "smtp_host", "smtp_port", "smtp_user", "smtp_pass", "from", "to" }
+    --   webhook: { "url", "method", "headers", "secret" }
+    --   log:     { "level" }  (writes to cluster event log)
+    config_json     TEXT NOT NULL DEFAULT '{}',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Notification rules — which events trigger which channels
+CREATE TABLE IF NOT EXISTS notification_rules (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    -- Trigger conditions
+    event_category  TEXT NOT NULL DEFAULT '*',   -- ha, drs, host, vm, datastore, alarm, task, * (all)
+    min_severity    TEXT NOT NULL DEFAULT 'warning', -- info, warning, error, critical
+    -- Target channel
+    channel_id      INTEGER NOT NULL REFERENCES notification_channels(id) ON DELETE CASCADE,
+    -- Throttle: minimum seconds between notifications for the same event source
+    cooldown_secs   INTEGER NOT NULL DEFAULT 300,
+    -- Optional: filter to specific cluster
+    cluster_id      TEXT REFERENCES clusters(id) ON DELETE CASCADE,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Notification log — history of sent notifications
+CREATE TABLE IF NOT EXISTS notification_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id         INTEGER REFERENCES notification_rules(id),
+    channel_id      INTEGER REFERENCES notification_channels(id),
+    event_id        INTEGER,
+    status          TEXT NOT NULL DEFAULT 'sent',  -- sent, failed, throttled
+    error           TEXT,
+    sent_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
 "#;
 
 /// Initialize the database: create tables and seed default data.

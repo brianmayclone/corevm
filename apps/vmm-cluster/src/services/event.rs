@@ -18,7 +18,7 @@ pub struct Event {
 }
 
 impl EventService {
-    /// Log a cluster event.
+    /// Log a cluster event and dispatch notifications to matching channels.
     pub fn log(
         db: &Connection,
         severity: &str,
@@ -33,6 +33,12 @@ impl EventService {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![severity, category, message, target_type, target_id, host_id],
         );
+
+        // Get the inserted event ID for notification log
+        let event_id = db.last_insert_rowid();
+
+        // Dispatch to notification channels
+        crate::services::notification::NotificationService::dispatch(db, severity, category, message, Some(event_id));
     }
 
     /// Get recent events (newest first), optionally filtered by category.

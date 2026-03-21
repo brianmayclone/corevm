@@ -178,31 +178,51 @@ pub async fn deregister(
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
+#[derive(Deserialize)]
+pub struct MaintenanceRequest {
+    /// "migrate" = move VMs to other hosts (cold migration), "shutdown" = just stop VMs
+    #[serde(default = "default_maintenance_mode")]
+    pub mode: String,
+}
+fn default_maintenance_mode() -> String { "migrate".into() }
+
 pub async fn enter_maintenance(
     State(state): State<Arc<ClusterState>>,
     user: AuthUser,
     Path(id): Path<String>,
+    body: Option<Json<MaintenanceRequest>>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_admin(&user)?;
+    let mode = body.map(|b| b.mode.clone()).unwrap_or_else(|| "migrate".into());
+
     let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock error".into()))?;
     HostService::set_maintenance(&db, &id, true).map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
-    AuditService::log(&db, user.id, "host.maintenance.enter", "host", &id, None);
-    EventService::log(&db, "warning", "host", "Host entering maintenance mode",
+    AuditService::log(&db, user.id, "host.maintenance.enter", "host", &id, Some(&format!("mode: {}", mode)));
+    EventService::log(&db, "warning", "host",
+        &format!("Host entering maintenance mode ({})", mode),
         Some("host"), Some(&id), Some(&id));
+    drop(db);
 
     // Update in-memory status
     if let Some(mut node) = state.nodes.get_mut(&id) {
         node.status = NodeStatus::Maintenance;
     }
 
-    // Trigger evacuation in background
+    // Trigger evacuation or shutdown in background
     let state_evac = state.clone();
     let host_evac = id.clone();
-    tokio::spawn(async move {
-        crate::engine::maintenance::evacuate_host(&state_evac, &host_evac).await;
-    });
+    if mode == "migrate" {
+        tokio::spawn(async move {
+            crate::engine::maintenance::evacuate_host(&state_evac, &host_evac).await;
+        });
+    } else {
+        // Shutdown mode: just stop all running VMs on this host
+        tokio::spawn(async move {
+            crate::engine::maintenance::shutdown_host_vms(&state_evac, &host_evac).await;
+        });
+    }
 
-    Ok(Json(serde_json::json!({"ok": true})))
+    Ok(Json(serde_json::json!({"ok": true, "mode": mode})))
 }
 
 pub async fn exit_maintenance(

@@ -89,6 +89,8 @@ pub fn router() -> Router<Arc<ClusterState>> {
         .route("/api/drs/recommendations", get(drs::list))
         .route("/api/drs/{id}/apply", post(drs::apply))
         .route("/api/drs/{id}/dismiss", post(drs::dismiss))
+        .route("/api/drs/rules", get(drs::list_rules).post(drs::create_rule))
+        .route("/api/drs/rules/{id}", put(drs::update_rule).delete(drs::delete_rule))
 
         // ── Alarms ──────────────────────────────────────
         .route("/api/alarms", get(alarms::list))

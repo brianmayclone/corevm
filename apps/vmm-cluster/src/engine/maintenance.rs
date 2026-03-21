@@ -158,3 +158,61 @@ async fn migrate_vm_from_host(
 
     Ok(())
 }
+
+/// Shutdown mode: gracefully stop all running VMs on the host without migrating.
+pub async fn shutdown_host_vms(state: &Arc<ClusterState>, host_id: &str) {
+    tracing::info!("Maintenance: Shutting down all VMs on host {}", host_id);
+
+    let vms = {
+        let db = match state.db.lock() {
+            Ok(db) => db,
+            Err(_) => return,
+        };
+        VmService::list_by_host(&db, host_id).unwrap_or_default()
+    };
+
+    let running: Vec<_> = vms.iter().filter(|v| v.state == "running").collect();
+    if running.is_empty() {
+        tracing::info!("Maintenance: No running VMs to shut down");
+        return;
+    }
+
+    let node = match state.nodes.get(host_id) {
+        Some(n) => n.clone(),
+        None => return,
+    };
+
+    let client = match NodeClient::new(&node.address, &node.agent_token) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let mut stopped = 0;
+    for vm in &running {
+        tracing::info!("Maintenance: Stopping VM '{}'", vm.name);
+        match client.stop_vm(&vm.id).await {
+            Ok(resp) if resp.success => {
+                if let Ok(db) = state.db.lock() {
+                    VmService::update_state(&db, &vm.id, "stopping").ok();
+                }
+                stopped += 1;
+            }
+            _ => {
+                // Try force-stop
+                let _ = client.force_stop_vm(&vm.id).await;
+                if let Ok(db) = state.db.lock() {
+                    VmService::update_state(&db, &vm.id, "stopped").ok();
+                }
+                stopped += 1;
+            }
+        }
+    }
+
+    if let Ok(db) = state.db.lock() {
+        EventService::log(&db, "info", "host",
+            &format!("Maintenance shutdown: {} VMs stopped", stopped),
+            Some("host"), Some(host_id), Some(host_id));
+    }
+
+    tracing::info!("Maintenance: {} VMs shut down on host {}", stopped, host_id);
+}

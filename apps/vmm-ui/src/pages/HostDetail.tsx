@@ -3,9 +3,11 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { Server, Cpu, MemoryStick, HardDrive, Circle, Wrench, ArrowLeft, Trash2 } from 'lucide-react'
 import { useClusterStore } from '../stores/clusterStore'
 import { useVmStore } from '../stores/vmStore'
+import api from '../api/client'
 import Card from '../components/Card'
 import SpecRow from '../components/SpecRow'
 import VmPriorityCard from '../components/VmPriorityCard'
+import MaintenanceDialog from '../components/MaintenanceDialog'
 import { formatRam, formatBytes } from '../utils/format'
 import type { Host } from '../api/types'
 
@@ -13,6 +15,7 @@ export default function HostDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const { hosts, fetchHosts, setMaintenance, deregisterHost } = useClusterStore()
+  const [maintenanceOpen, setMaintenanceOpen] = useState(false)
   const { vms, fetchVms, startVm, stopVm } = useVmStore()
   const [host, setHost] = useState<Host | null>(null)
 
@@ -37,7 +40,13 @@ export default function HostDetail() {
         </div>
         <div className="flex gap-2">
           <button
-            onClick={() => setMaintenance(host.id, !host.maintenance_mode)}
+            onClick={() => {
+              if (host.maintenance_mode) {
+                setMaintenance(host.id, false)
+              } else {
+                setMaintenanceOpen(true)
+              }
+            }}
             className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
               host.maintenance_mode
                 ? 'bg-vmm-accent/10 text-vmm-accent hover:bg-vmm-accent/20'
@@ -110,6 +119,18 @@ export default function HostDetail() {
           </div>
         </div>
       )}
+
+      {/* Maintenance dialog */}
+      <MaintenanceDialog
+        open={maintenanceOpen}
+        onClose={() => setMaintenanceOpen(false)}
+        host={host}
+        onConfirm={async (mode) => {
+          // Send maintenance request with evacuation mode
+          await api.post(`/api/hosts/${host.id}/maintenance`, { mode })
+          fetchHosts()
+        }}
+      />
     </div>
   )
 }
