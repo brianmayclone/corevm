@@ -61,11 +61,11 @@ export default function HostDetail() {
           <div className="p-4">
             <h3 className="text-sm font-semibold text-vmm-text mb-3">Status</h3>
             <div className="space-y-2">
-              <SpecRow icon={Circle} label="Status" value={host.status} />
-              <SpecRow icon={Server} label="Version" value={`v${host.version}`} />
-              <SpecRow icon={Cpu} label="CPU" value={`${host.cpu_model}`} />
-              <SpecRow icon={Cpu} label="Cores / Threads" value={`${host.cpu_cores} / ${host.cpu_threads}`} />
-              <SpecRow icon={Cpu} label="CPU Usage" value={`${host.cpu_usage_pct.toFixed(1)}%`} />
+              <SpecRow icon={<Circle size={14} />} label="Status" value={host.status} />
+              <SpecRow icon={<Server size={14} />} label="Version" value={`v${host.version}`} />
+              <SpecRow icon={<Cpu size={14} />} label="CPU" value={`${host.cpu_model}`} />
+              <SpecRow icon={<Cpu size={14} />} label="Cores / Threads" value={`${host.cpu_cores} / ${host.cpu_threads}`} />
+              <SpecRow icon={<Cpu size={14} />} label="CPU Usage" value={`${host.cpu_usage_pct.toFixed(1)}%`} />
             </div>
           </div>
         </Card>

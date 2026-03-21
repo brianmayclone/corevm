@@ -1,0 +1,13 @@
+[server]
+bind = "0.0.0.0"
+port = 9443
+
+[auth]
+jwt_secret = "cluster-dev-secret-change-in-production"
+session_timeout_hours = 24
+
+[data]
+data_dir = "/tmp/vmm-cluster"
+
+[logging]
+level = "info"
