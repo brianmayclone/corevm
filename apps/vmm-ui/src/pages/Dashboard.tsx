@@ -9,32 +9,8 @@ import VmPriorityCard from '../components/VmPriorityCard'
 import Card from '../components/Card'
 import SectionLabel from '../components/SectionLabel'
 import { formatBytes, formatRam } from '../utils/format'
+import { formatJournalLine, getActionSeverity } from '../utils/auditLabels'
 import { useUiStore } from '../stores/uiStore'
-
-/** Format audit entry into human-readable log line. */
-function formatLogEntry(a: AuditEntry): string {
-  const time = a.created_at.includes('T') ? a.created_at.split('T')[1]?.slice(0, 8) : a.created_at
-  const action = a.action
-    .replace('vm.started', "VM started successfully")
-    .replace('vm.stopped', "VM shutdown completed")
-    .replace('vm.force_stopped', "VM force-stopped")
-    .replace('vm.created', "VM created")
-    .replace('vm.deleted', "VM deleted")
-    .replace('user.login', "User authenticated")
-    .replace('pool.created', "Storage pool added")
-    .replace('pool.deleted', "Storage pool removed")
-    .replace('image.created', "Disk image created")
-    .replace('image.deleted', "Disk image deleted")
-
-  const detail = a.details ? ` '${a.details}'` : ''
-  const target = a.target_id ? ` (${a.target_id.slice(0, 8)})` : ''
-  return `[${time}] ${action}${detail}${target}`
-}
-
-/** Is this a warning-level log entry? */
-function isWarning(a: AuditEntry): boolean {
-  return a.action.includes('force') || a.action.includes('delete') || a.action.includes('error')
-}
 
 export default function Dashboard() {
   const { vms, fetchVms, startVm, stopVm } = useVmStore()
@@ -135,11 +111,17 @@ export default function Dashboard() {
             <button className="text-xs text-vmm-text-muted hover:text-vmm-text cursor-pointer">Clear Logs</button>
           </div>
           <div className="px-5 py-3 font-mono text-xs leading-6 max-h-[180px] overflow-y-auto text-vmm-text-dim">
-            {activities.length > 0 ? activities.map((a) => (
-              <div key={a.id} className={isWarning(a) ? 'text-vmm-warning font-bold' : ''}>
-                {formatLogEntry(a)}
-              </div>
-            )) : (
+            {activities.length > 0 ? activities.map((a) => {
+              const sev = getActionSeverity(a.action)
+              const cls = sev === 'danger' ? 'text-vmm-danger font-bold'
+                : sev === 'warning' ? 'text-vmm-warning font-bold'
+                : sev === 'success' ? 'text-vmm-success' : ''
+              return (
+                <div key={a.id} className={cls}>
+                  {formatJournalLine(a)}
+                </div>
+              )
+            }) : (
               <div className="text-vmm-text-muted">No log entries yet.</div>
             )}
           </div>

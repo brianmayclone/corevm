@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Power, RefreshCw, Square, Cpu, MemoryStick, HardDrive, Camera, Clock, FileText } from 'lucide-react'
+import { Power, RefreshCw, Square, Cpu, MemoryStick, HardDrive, Camera, Clock, FileText, Minimize2, Keyboard } from 'lucide-react'
+import { useMobileLandscape } from '../hooks/useMobileLandscape'
 import api from '../api/client'
 import type { VmDetail as VmDetailType, AuditEntry } from '../api/types'
 import StatusBadge from '../components/StatusBadge'
@@ -16,6 +17,7 @@ import ActivityCard from '../components/ActivityCard'
 import QuickAction from '../components/QuickAction'
 import OsIcon from '../components/OsIcon'
 import { guestOsLabel, formatRam, formatBytes } from '../utils/format'
+import { getActionLabel, getActionSeverity } from '../utils/auditLabels'
 import { useVmStore } from '../stores/vmStore'
 
 const tabs = [
@@ -33,6 +35,14 @@ export default function VmDetail() {
   const [activeTab, setActiveTab] = useState('general')
   const [activities, setActivities] = useState<AuditEntry[]>([])
   const { startVm, stopVm, forceStopVm } = useVmStore()
+  const isMobileLandscape = useMobileLandscape()
+  const [landscapeExitOverride, setLandscapeExitOverride] = useState(false)
+  const showLandscapeConsole = isMobileLandscape && !landscapeExitOverride
+
+  // Reset exit override when going back to portrait
+  useEffect(() => {
+    if (!isMobileLandscape) setLandscapeExitOverride(false)
+  }, [isMobileLandscape])
 
   useEffect(() => {
     if (!id) return
@@ -58,6 +68,64 @@ export default function VmDetail() {
   const totalDiskBytes = vm.disks.reduce((sum, d) => sum + d.size_bytes, 0)
   const usedDiskBytes = vm.disks.reduce((sum, d) => sum + d.used_bytes, 0)
   const diskPercent = totalDiskBytes > 0 ? Math.round((usedDiskBytes / totalDiskBytes) * 100) : 0
+
+  // ── Mobile Landscape: Fullscreen Console Mode ──────────────────────────
+  if (showLandscapeConsole && vm) {
+    return (
+      <div className="fixed inset-0 z-[100] bg-black flex">
+        {/* Left action bar */}
+        <div className="w-12 bg-vmm-sidebar/90 flex flex-col items-center py-2 gap-2 border-r border-vmm-border/50 flex-shrink-0">
+          {/* VM status dot */}
+          <div className={`w-3 h-3 rounded-full mb-1 ${isRunning ? 'bg-vmm-success animate-pulse' : 'bg-vmm-danger'}`} />
+
+          {/* Power controls */}
+          {isStopped ? (
+            <button onClick={handleStart} className="w-9 h-9 rounded-lg bg-vmm-success/20 flex items-center justify-center text-vmm-success active:bg-vmm-success/40">
+              <Power size={16} />
+            </button>
+          ) : (
+            <button onClick={handleStop} className="w-9 h-9 rounded-lg bg-vmm-warning/20 flex items-center justify-center text-vmm-warning active:bg-vmm-warning/40">
+              <Power size={16} />
+            </button>
+          )}
+
+          <button onClick={handleForceStop} disabled={isStopped}
+            className="w-9 h-9 rounded-lg bg-vmm-danger/20 flex items-center justify-center text-vmm-danger active:bg-vmm-danger/40 disabled:opacity-30">
+            <Square size={14} />
+          </button>
+
+          <div className="flex-1" />
+
+          {/* Ctrl+Alt+Del */}
+          <button
+            onClick={() => {
+              const canvas = document.querySelector('canvas')
+              if (canvas) canvas.dispatchEvent(new CustomEvent('ctrl-alt-del'))
+            }}
+            className="w-9 h-9 rounded-lg bg-vmm-surface/50 flex items-center justify-center text-vmm-text-muted active:bg-vmm-surface text-[8px] font-bold"
+            title="Ctrl+Alt+Del"
+          >
+            <Keyboard size={14} />
+          </button>
+
+          {/* Exit landscape mode */}
+          <button onClick={() => setLandscapeExitOverride(true)}
+            className="w-9 h-9 rounded-lg bg-vmm-surface/50 flex items-center justify-center text-vmm-text-muted active:bg-vmm-surface">
+            <Minimize2 size={14} />
+          </button>
+        </div>
+
+        {/* Fullscreen console */}
+        <div className="flex-1 flex items-center justify-center bg-black min-w-0">
+          {isRunning ? (
+            <ConsoleCanvas vmId={vm.id} captureKeyboard />
+          ) : (
+            <div className="text-vmm-text-muted text-sm">VM is powered off</div>
+          )}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-6">
@@ -116,7 +184,7 @@ export default function VmDetail() {
                   <ActivityCard
                     key={a.id}
                     icon={a.action.includes('snapshot') ? <Camera size={16} /> : <RefreshCw size={16} />}
-                    title={a.action}
+                    title={getActionLabel(a.action)}
                     subtitle={`${a.created_at}${a.details ? ` — ${a.details}` : ''}`}
                   />
                 )) : (
@@ -244,13 +312,17 @@ export default function VmDetail() {
             <div className="text-vmm-text-muted text-sm py-8 text-center">No log entries</div>
           ) : (
             <div className="space-y-2">
-              {activities.map((a) => (
-                <div key={a.id} className="flex items-start gap-3 text-sm py-2 border-b border-vmm-border last:border-0">
-                  <span className="text-[10px] text-vmm-text-muted font-mono whitespace-nowrap mt-0.5">{a.created_at}</span>
-                  <span className="text-vmm-text">{a.action}</span>
-                  {a.details && <span className="text-vmm-text-muted">— {a.details}</span>}
-                </div>
-              ))}
+              {activities.map((a) => {
+                const sev = getActionSeverity(a.action)
+                const sevCls = sev === 'danger' ? 'text-vmm-danger' : sev === 'warning' ? 'text-vmm-warning' : sev === 'success' ? 'text-vmm-success' : 'text-vmm-text'
+                return (
+                  <div key={a.id} className="flex flex-col sm:flex-row sm:items-start gap-1 sm:gap-3 text-sm py-2 border-b border-vmm-border last:border-0">
+                    <span className="text-[10px] text-vmm-text-muted font-mono whitespace-nowrap">{a.created_at}</span>
+                    <span className={sevCls}>{getActionLabel(a.action)}</span>
+                    {a.details && <span className="text-vmm-text-muted">— {a.details}</span>}
+                  </div>
+                )
+              })}
             </div>
           )}
         </Card>

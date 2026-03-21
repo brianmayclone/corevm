@@ -38,49 +38,44 @@ operating systems without depending on QEMU or any external emulator.
 
 ## VMM Web UI
 
-CoreVM ships with **vmm-server** and **vmm-ui** — a full-featured, web-based management platform for virtual machines. Manage your entire VM infrastructure from any browser.
+CoreVM ships with **vmm-server** and **vmm-ui** — a full-featured, web-based management platform for virtual machines. Fully responsive — manage your VMs from desktop or phone.
 
-<div align="center">
+> Click any screenshot to view full size.
 
-### Dashboard
+### Desktop
 
-<img src="assets/screenshots/dashboard.png" alt="Dashboard — System overview with metrics, VM status, and activity log" width="900">
+<p align="center">
+  <a href="assets/screenshots/dashboard.png"><img src="assets/screenshots/dashboard.png" alt="Dashboard" width="270"></a>&nbsp;
+  <a href="assets/screenshots/vm.png"><img src="assets/screenshots/vm.png" alt="Virtual Machines" width="270"></a>&nbsp;
+  <a href="assets/screenshots/vmsettings.png"><img src="assets/screenshots/vmsettings.png" alt="VM Settings" width="270"></a>
+</p>
+<p align="center">
+  <sub>Dashboard</sub>&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;
+  <sub>Virtual Machines</sub>&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;
+  <sub>VM Settings</sub>
+</p>
 
-<sub>System overview with real-time metrics, VM status, storage and network stats, and audit log.</sub>
+<p align="center">
+  <a href="assets/screenshots/storage.png"><img src="assets/screenshots/storage.png" alt="Storage Management" width="270"></a>&nbsp;
+  <a href="assets/screenshots/network.png"><img src="assets/screenshots/network.png" alt="Network Management" width="270"></a>
+</p>
+<p align="center">
+  <sub>Storage Management</sub>&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;
+  <sub>Network Management</sub>
+</p>
 
-<br><br>
+### Mobile
 
-### Virtual Machines
-
-<img src="assets/screenshots/vm.png" alt="VM Management — Create, start, stop, and monitor virtual machines" width="900">
-
-<sub>Full VM lifecycle management — create, start, stop, configure, and live-console into your VMs.</sub>
-
-<br><br>
-
-### VM Settings
-
-<img src="assets/screenshots/vmsettings.png" alt="VM Settings — CPU, RAM, disks, network, boot order configuration" width="900">
-
-<sub>Granular VM configuration — CPU, RAM, disks, NICs, boot order, BIOS selection, and more.</sub>
-
-<br><br>
-
-### Storage Management
-
-<img src="assets/screenshots/storage.png" alt="Storage — Pool and disk image management" width="900">
-
-<sub>Storage pools, disk images, ISO management, and capacity overview.</sub>
-
-<br><br>
-
-### Network Management
-
-<img src="assets/screenshots/network.png" alt="Network — Interface and network configuration" width="900">
-
-<sub>Network interfaces, NAT configuration, and traffic statistics.</sub>
-
-</div>
+<p align="center">
+  <a href="assets/screenshots/mobile_vms.png"><img src="assets/screenshots/mobile_vms.png" alt="Mobile — VM List" width="200"></a>&emsp;
+  <a href="assets/screenshots/mobile_details.png"><img src="assets/screenshots/mobile_details.png" alt="Mobile — VM Details" width="200"></a>&emsp;
+  <a href="assets/screenshots/mobile_console.png"><img src="assets/screenshots/mobile_console.png" alt="Mobile — Console" width="200"></a>
+</p>
+<p align="center">
+  <sub>VM List</sub>&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;
+  <sub>VM Details</sub>&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;
+  <sub>Live Console</sub>
+</p>
 
 ---
 
