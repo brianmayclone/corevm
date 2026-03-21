@@ -17,18 +17,21 @@ interface Props {
   open: boolean
   onClose: () => void
   onCreated: () => void
+  /** In cluster mode: the cluster this datastore belongs to */
+  clusterId?: string
 }
 
-export default function AddPoolDialog({ open, onClose, onCreated }: Props) {
+export default function AddPoolDialog({ open, onClose, onCreated, clusterId }: Props) {
   const [name, setName] = useState('')
   const [path, setPath] = useState('')
-  const [poolType, setPoolType] = useState('local')
+  const [poolType, setPoolType] = useState(clusterId ? 'nfs' : 'local')
   const [mountSource, setMountSource] = useState('')
   const [mountOpts, setMountOpts] = useState('')
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
 
   const isShared = poolType !== 'local'
+  const isCluster = !!clusterId
 
   const handleSave = async () => {
     if (!name.trim()) { setError('Name is required'); return }
@@ -37,16 +40,28 @@ export default function AddPoolDialog({ open, onClose, onCreated }: Props) {
     setSaving(true)
     setError('')
     try {
-      await api.post('/api/storage/pools', {
-        name, path, pool_type: poolType,
-        mount_source: isShared ? mountSource : undefined,
-        mount_opts: mountOpts || undefined,
-      })
+      if (isCluster) {
+        // Cluster mode: create via cluster datastore API
+        await api.post('/api/storage/datastores', {
+          name,
+          store_type: poolType,
+          mount_source: mountSource,
+          mount_opts: mountOpts || '',
+          mount_path: path,
+          cluster_id: clusterId,
+        })
+      } else {
+        await api.post('/api/storage/pools', {
+          name, path, pool_type: poolType,
+          mount_source: isShared ? mountSource : undefined,
+          mount_opts: mountOpts || undefined,
+        })
+      }
       onCreated()
       onClose()
-      setName(''); setPath(''); setPoolType('local'); setMountSource(''); setMountOpts('')
+      setName(''); setPath(''); setPoolType(isCluster ? 'nfs' : 'local'); setMountSource(''); setMountOpts('')
     } catch (e: any) {
-      setError(e.response?.data?.error || 'Failed to create pool')
+      setError(e.response?.data?.error || 'Failed to create')
     } finally {
       setSaving(false)
     }
@@ -59,7 +74,13 @@ export default function AddPoolDialog({ open, onClose, onCreated }: Props) {
           <TextInput value={name} onChange={(e) => setName(e.target.value)} placeholder="Local-NVMe-P01" />
         </FormField>
         <FormField label="Type">
-          <Select options={poolTypes} value={poolType} onChange={(e) => setPoolType(e.target.value)} />
+          <Select options={isCluster ? poolTypes.filter(t => t.value !== 'local') : poolTypes}
+            value={poolType} onChange={(e) => setPoolType(e.target.value)} />
+          {isCluster && (
+            <p className="text-xs text-vmm-text-muted mt-1">
+              Only shared storage types are available in cluster mode (mounted on all hosts)
+            </p>
+          )}
         </FormField>
         <FormField label="Local Mount Path">
           <TextInput value={path} onChange={(e) => setPath(e.target.value)}

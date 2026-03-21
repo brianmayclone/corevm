@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { HardDrive, Plus, Settings, CheckCircle, AlertTriangle, Trash2, Link } from 'lucide-react'
+import { HardDrive, Plus, Settings, CheckCircle, AlertTriangle, Trash2, Link, Workflow } from 'lucide-react'
 import api from '../api/client'
-import type { StoragePool, StorageStats, DiskImage, Iso } from '../api/types'
+import type { StoragePool, StorageStats, DiskImage, Iso, Cluster } from '../api/types'
+import { useClusterStore } from '../stores/clusterStore'
 import Card from '../components/Card'
 import SectionLabel from '../components/SectionLabel'
 import SpecRow from '../components/SpecRow'
 import Button from '../components/Button'
+import Select from '../components/Select'
 import StoragePoolRow from '../components/StoragePoolRow'
 import AddPoolDialog from '../components/AddPoolDialog'
 import ConfirmDialog from '../components/ConfirmDialog'
@@ -15,6 +17,8 @@ import { formatBytes } from '../utils/format'
 
 export default function Storage() {
   const navigate = useNavigate()
+  const { backendMode } = useClusterStore()
+  const isCluster = backendMode === 'cluster'
   const [pools, setPools] = useState<StoragePool[]>([])
   const [stats, setStats] = useState<StorageStats | null>(null)
   const [images, setImages] = useState<DiskImage[]>([])
@@ -25,13 +29,27 @@ export default function Storage() {
   const [orphanedOpen, setOrphanedOpen] = useState(false)
   const [filter, setFilter] = useState<'all' | 'orphaned'>('all')
 
+  // Cluster-mode: cluster selector
+  const [clusters, setClusters] = useState<Cluster[]>([])
+  const [selectedClusterId, setSelectedClusterId] = useState('')
+
+  useEffect(() => {
+    if (isCluster) {
+      api.get<Cluster[]>('/api/clusters').then(({ data }) => {
+        setClusters(data)
+        if (data.length > 0 && !selectedClusterId) setSelectedClusterId(data[0].id)
+      })
+    }
+  }, [isCluster])
+
   const refresh = () => {
-    api.get<StoragePool[]>('/api/storage/pools').then(({ data }) => setPools(data))
+    const clusterParam = isCluster && selectedClusterId ? `?cluster_id=${encodeURIComponent(selectedClusterId)}` : ''
+    api.get<StoragePool[]>(`/api/storage/pools${clusterParam}`).then(({ data }) => setPools(data))
     api.get<StorageStats>('/api/storage/stats').then(({ data }) => setStats(data))
-    api.get<DiskImage[]>('/api/storage/images').then(({ data }) => setImages(data))
-    api.get<Iso[]>('/api/storage/isos').then(({ data }) => setIsos(data))
+    api.get<DiskImage[]>('/api/storage/images').then(({ data }) => setImages(data)).catch(() => {})
+    api.get<Iso[]>('/api/storage/isos').then(({ data }) => setIsos(data)).catch(() => {})
   }
-  useEffect(() => { refresh() }, [])
+  useEffect(() => { refresh() }, [selectedClusterId])
 
   const usedBytes = stats?.used_bytes || 0
   const totalBytes = stats?.total_bytes || 1
@@ -71,13 +89,35 @@ export default function Storage() {
         <div>
           <h1 className="text-2xl font-bold text-vmm-text">Storage Management</h1>
           <p className="text-sm text-vmm-text-muted mt-1">
-            Manage storage pools, disk images and ISO files
+            {isCluster ? 'Cluster-wide datastores and disk images' : 'Manage storage pools, disk images and ISO files'}
           </p>
         </div>
         <div className="flex items-center gap-3">
-          <Button variant="primary" icon={<Plus size={14} />} onClick={() => setAddPoolOpen(true)}>Add Storage Pool</Button>
+          <Button variant="primary" icon={<Plus size={14} />} onClick={() => setAddPoolOpen(true)}>
+            {isCluster ? 'Add Datastore' : 'Add Storage Pool'}
+          </Button>
         </div>
       </div>
+
+      {/* Cluster selector — only in cluster mode */}
+      {isCluster && clusters.length > 0 && (
+        <div className="flex items-center gap-3 bg-vmm-surface border border-vmm-border rounded-xl px-4 py-3">
+          <Workflow size={16} className="text-vmm-accent flex-shrink-0" />
+          <span className="text-sm text-vmm-text-muted flex-shrink-0">Cluster:</span>
+          <select
+            value={selectedClusterId}
+            onChange={(e) => setSelectedClusterId(e.target.value)}
+            className="bg-vmm-bg border border-vmm-border rounded-lg px-3 py-1.5 text-sm text-vmm-text flex-1 max-w-xs"
+          >
+            {clusters.map(c => (
+              <option key={c.id} value={c.id}>{c.name} ({c.host_count} hosts)</option>
+            ))}
+          </select>
+          <span className="text-xs text-vmm-text-muted">
+            Showing only datastores accessible by all hosts in this cluster
+          </span>
+        </div>
+      )}
 
       {/* ── Aggregate Capacity + Health ────────────────────────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_300px] gap-5">
@@ -237,7 +277,8 @@ export default function Storage() {
       )}
 
       {/* Dialogs */}
-      <AddPoolDialog open={addPoolOpen} onClose={() => setAddPoolOpen(false)} onCreated={refresh} />
+      <AddPoolDialog open={addPoolOpen} onClose={() => setAddPoolOpen(false)} onCreated={refresh}
+        clusterId={isCluster ? selectedClusterId : undefined} />
 
       <ConfirmDialog
         open={!!deletePool}

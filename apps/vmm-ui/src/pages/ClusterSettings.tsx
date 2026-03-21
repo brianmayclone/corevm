@@ -51,7 +51,8 @@ export default function ClusterSettings() {
       <div className="space-y-3">
         {clusters.map(cluster => (
           <Card key={cluster.id}>
-            <div className="p-4">
+            <div className="p-4 cursor-pointer hover:bg-vmm-surface-hover rounded-lg transition-colors"
+              onClick={() => navigate(`/cluster/detail/${cluster.id}`)}>
               <div className="flex items-center justify-between mb-2">
                 <h3 className="font-semibold text-vmm-text">{cluster.name}</h3>
                 <button onClick={() => { if (confirm(`Delete cluster "${cluster.name}"?`)) deleteCluster(cluster.id) }}

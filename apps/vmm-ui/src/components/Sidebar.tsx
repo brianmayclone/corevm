@@ -55,6 +55,8 @@ const standaloneNavItems: NavItem[] = [
 
 /** Additional navigation items when connected to vmm-cluster */
 const clusterNavItems: NavItem[] = [
+  // Top-level overview — cluster-wide dashboard
+  { to: '/', icon: LayoutDashboard, label: 'Overview' },
   {
     to: '/cluster', icon: Workflow, label: 'Cluster',
     children: [
@@ -76,20 +78,7 @@ const clusterNavItems: NavItem[] = [
     to: '/storage', icon: HardDrive, label: 'Storage',
     children: [
       { to: '/storage/overview', icon: HardDrive, label: 'Overview' },
-      { to: '/storage/local', icon: Database, label: 'Local Storage' },
-      { to: '/storage/shared', icon: Share2, label: 'Shared Storage' },
       { to: '/storage/disks', icon: Disc, label: 'Disk Management' },
-      { to: '/storage/qos', icon: Gauge, label: 'QoS Policies' },
-    ],
-  },
-  {
-    to: '/networks', icon: Network, label: 'Networks',
-    children: [
-      { to: '/networks/overview', icon: Network, label: 'Overview' },
-      { to: '/networks/nat', icon: Globe, label: 'NAT Bridges' },
-      { to: '/networks/host-only', icon: Unplug, label: 'Host-Only' },
-      { to: '/networks/adapters', icon: Cable, label: 'Adapter Bindings' },
-      { to: '/networks/vlans', icon: Layers, label: 'VLAN Config' },
     ],
   },
   {

@@ -14,9 +14,11 @@ interface Props {
   vmId: string
   /** Called with the created disk path */
   onCreated: (path: string) => void
+  /** In cluster mode: only show pools accessible by all hosts in this cluster */
+  clusterId?: string
 }
 
-export default function CreateDiskDialog({ open, onClose, vmName, vmId, onCreated }: Props) {
+export default function CreateDiskDialog({ open, onClose, vmName, vmId, onCreated, clusterId }: Props) {
   const [pools, setPools] = useState<StoragePool[]>([])
   const [poolId, setPoolId] = useState<number | null>(null)
   const [sizeGb, setSizeGb] = useState(32)
@@ -25,12 +27,13 @@ export default function CreateDiskDialog({ open, onClose, vmName, vmId, onCreate
 
   useEffect(() => {
     if (open) {
-      api.get<StoragePool[]>('/api/storage/pools').then(({ data }) => {
+      const params = clusterId ? `?cluster_id=${encodeURIComponent(clusterId)}` : ''
+      api.get<StoragePool[]>(`/api/storage/pools${params}`).then(({ data }) => {
         setPools(data.filter((p) => p.total_bytes > 0)) // only online pools
         if (data.length > 0 && !poolId) setPoolId(data[0].id)
       })
     }
-  }, [open])
+  }, [open, clusterId])
 
   const selectedPool = pools.find((p) => p.id === poolId)
   const safeName = vmName.replace(/\s/g, '_').replace(/\//g, '_').toLowerCase()

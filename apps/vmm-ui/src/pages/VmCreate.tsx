@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { Info, Monitor, Zap, SlidersHorizontal, HardDrive, Cpu, MemoryStick, Clock, Search, Plus } from 'lucide-react'
+import { Info, Monitor, Zap, SlidersHorizontal, HardDrive, Cpu, MemoryStick, Clock, Search, Plus, Server, Workflow } from 'lucide-react'
 import api from '../api/client'
-import type { VmConfig, VmDetail } from '../api/types'
+import type { VmConfig, VmDetail, Cluster, Host } from '../api/types'
+import { useClusterStore } from '../stores/clusterStore'
 import TabBar from '../components/TabBar'
 import SectionCard from '../components/SectionCard'
 import FormField from '../components/FormField'
@@ -73,6 +74,8 @@ export default function VmCreate() {
   const { id } = useParams<{ id: string }>()
   const isEdit = !!id
   const navigate = useNavigate()
+  const { backendMode } = useClusterStore()
+  const isCluster = backendMode === 'cluster'
   const [activeTab, setActiveTab] = useState('general')
   const [saving, setSaving] = useState(false)
   const [loading, setLoading] = useState(isEdit)
@@ -80,6 +83,12 @@ export default function VmCreate() {
   const [isoBrowserOpen, setIsoBrowserOpen] = useState(false)
   const [diskBrowserOpen, setDiskBrowserOpen] = useState(false)
   const [createDiskOpen, setCreateDiskOpen] = useState(false)
+
+  // Cluster-mode: cluster and host selection
+  const [clusters, setClusters] = useState<Cluster[]>([])
+  const [hosts, setHosts] = useState<Host[]>([])
+  const [selectedClusterId, setSelectedClusterId] = useState('')
+  const [selectedHostId, setSelectedHostId] = useState('')  // '' = auto-placement
 
   const [form, setForm] = useState<VmConfig>({
     uuid: '', name: '', guest_os: 'other', guest_arch: 'x64',
@@ -104,17 +113,42 @@ export default function VmCreate() {
     }
   }, [id])
 
+  // Load clusters and hosts in cluster mode
+  useEffect(() => {
+    if (isCluster) {
+      api.get<Cluster[]>('/api/clusters').then(({ data }) => {
+        setClusters(data)
+        if (data.length > 0 && !selectedClusterId) setSelectedClusterId(data[0].id)
+      })
+      api.get<Host[]>('/api/hosts').then(({ data }) => setHosts(data))
+    }
+  }, [isCluster])
+
+  // Filter hosts by selected cluster
+  const clusterHosts = hosts.filter(h => h.cluster_id === selectedClusterId && h.status === 'online' && !h.maintenance_mode)
+
   const set = <K extends keyof VmConfig>(key: K, val: VmConfig[K]) =>
     setForm((f) => ({ ...f, [key]: val }))
 
   const handleSave = async () => {
     if (!form.name.trim()) { setError('Machine name is required'); return }
+    if (isCluster && !selectedClusterId) { setError('Please select a cluster'); return }
     setSaving(true)
     setError('')
     try {
       if (isEdit) {
         await api.put(`/api/vms/${id}`, form)
         navigate(`/vms/${id}`)
+      } else if (isCluster) {
+        // Cluster mode: send cluster_id, host_id, and config separately
+        const { data } = await api.post('/api/vms', {
+          name: form.name,
+          description: '',
+          cluster_id: selectedClusterId,
+          host_id: selectedHostId || undefined,
+          config: { ...form, uuid: '' },
+        })
+        navigate(`/vms/${data.id}`)
       } else {
         const { data } = await api.post('/api/vms', { ...form, uuid: '' })
         navigate(`/vms/${data.id}`)
@@ -144,6 +178,42 @@ export default function VmCreate() {
       {/* ── General ───────────────────────────────────────────────── */}
       {activeTab === 'general' && (
         <div className="space-y-5">
+          {/* Cluster/Host placement — only in cluster mode */}
+          {isCluster && !isEdit && (
+            <SectionCard icon={<Workflow size={18} />} title="Placement">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                <FormField label="Cluster">
+                  <Select
+                    options={clusters.map(c => ({ value: c.id, label: `${c.name} (${c.host_count} hosts, ${c.vm_count} VMs)` }))}
+                    value={selectedClusterId}
+                    onChange={(e) => { setSelectedClusterId(e.target.value); setSelectedHostId('') }}
+                  />
+                </FormField>
+                <FormField label="Target Host">
+                  <Select
+                    options={[
+                      { value: '', label: 'Auto (Best Fit)' },
+                      ...clusterHosts.map(h => ({
+                        value: h.id,
+                        label: `${h.hostname} (${h.free_ram_mb} MB free)`
+                      }))
+                    ]}
+                    value={selectedHostId}
+                    onChange={(e) => setSelectedHostId(e.target.value)}
+                  />
+                  <p className="text-xs text-vmm-text-muted mt-1">
+                    {selectedHostId ? 'VM will be placed on the selected host' : 'Scheduler will choose the host with the most free resources'}
+                  </p>
+                </FormField>
+              </div>
+              {selectedClusterId && clusterHosts.length === 0 && (
+                <div className="mt-3 bg-yellow-500/10 border border-yellow-500/30 text-yellow-400 rounded-lg p-3 text-xs">
+                  No online hosts in this cluster. Add hosts before creating VMs.
+                </div>
+              )}
+            </SectionCard>
+          )}
+
           <div className="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-5">
             <SectionCard icon={<Info size={18} />} title="Basic Information">
               <div className="space-y-5">
@@ -328,14 +398,17 @@ export default function VmCreate() {
       {/* ── Dialogs ───────────────────────────────────────────────── */}
       <PoolBrowser open={isoBrowserOpen} onClose={() => setIsoBrowserOpen(false)}
         filterExt=".iso" title="Select ISO Image"
+        clusterId={isCluster ? selectedClusterId : undefined}
         onSelect={(path) => set('iso_image', path)} />
 
       <PoolBrowser open={diskBrowserOpen} onClose={() => setDiskBrowserOpen(false)}
         filterExt=".raw" title="Select Disk Image"
+        clusterId={isCluster ? selectedClusterId : undefined}
         onSelect={(path) => set('disk_images', [...form.disk_images, path])} />
 
       <CreateDiskDialog open={createDiskOpen} onClose={() => setCreateDiskOpen(false)}
         vmName={form.name || 'new-vm'} vmId={form.uuid}
+        clusterId={isCluster ? selectedClusterId : undefined}
         onCreated={(path) => set('disk_images', [...form.disk_images, path])} />
     </div>
   )

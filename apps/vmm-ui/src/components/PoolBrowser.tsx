@@ -15,9 +15,11 @@ interface Props {
   /** Called when user selects a file */
   onSelect: (path: string) => void
   title?: string
+  /** In cluster mode: only show pools accessible by all hosts in this cluster */
+  clusterId?: string
 }
 
-export default function PoolBrowser({ open, onClose, filterExt, onSelect, title }: Props) {
+export default function PoolBrowser({ open, onClose, filterExt, onSelect, title, clusterId }: Props) {
   const [pools, setPools] = useState<StoragePool[]>([])
   const [selectedPool, setSelectedPool] = useState<number | null>(null)
   const [files, setFiles] = useState<PoolFile[]>([])
@@ -25,12 +27,13 @@ export default function PoolBrowser({ open, onClose, filterExt, onSelect, title 
 
   useEffect(() => {
     if (open) {
-      api.get<StoragePool[]>('/api/storage/pools').then(({ data }) => {
+      const params = clusterId ? `?cluster_id=${encodeURIComponent(clusterId)}` : ''
+      api.get<StoragePool[]>(`/api/storage/pools${params}`).then(({ data }) => {
         setPools(data)
         if (data.length > 0 && !selectedPool) setSelectedPool(data[0].id)
       })
     }
-  }, [open])
+  }, [open, clusterId])
 
   useEffect(() => {
     if (selectedPool) {

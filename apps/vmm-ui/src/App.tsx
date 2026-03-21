@@ -33,6 +33,8 @@ import SettingsServer from './pages/SettingsServer'
 import TerminalPage from './pages/TerminalPage'
 import ManagedModePage from './pages/ManagedModePage'
 // Cluster-mode pages
+import ClusterDashboard from './pages/ClusterDashboard'
+import ClusterDetail from './pages/ClusterDetail'
 import HostsList from './pages/HostsList'
 import HostDetail from './pages/HostDetail'
 import AddHost from './pages/AddHost'
@@ -41,6 +43,7 @@ import DatastoresList from './pages/DatastoresList'
 import TasksList from './pages/TasksList'
 import EventsList from './pages/EventsList'
 import DrsPage from './pages/DrsPage'
+import AlarmsList from './pages/AlarmsList'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore()
@@ -76,7 +79,7 @@ export default function App() {
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
-          <Route index element={<Dashboard />} />
+          <Route index element={backendMode === 'cluster' ? <ClusterDashboard /> : <Dashboard />} />
           <Route path="machines" element={<Machines />}>
             <Route path="overview" element={<Dashboard />} />
             <Route path="list" element={<MachinesList />} />
@@ -113,10 +116,12 @@ export default function App() {
           <Route path="cluster/hosts/add" element={<AddHost />} />
           <Route path="cluster/hosts/:id" element={<HostDetail />} />
           <Route path="cluster/settings" element={<ClusterSettings />} />
+          <Route path="cluster/detail/:id" element={<ClusterDetail />} />
           <Route path="cluster/datastores" element={<DatastoresList />} />
           <Route path="cluster/drs" element={<DrsPage />} />
           <Route path="operations/tasks" element={<TasksList />} />
           <Route path="operations/events" element={<EventsList />} />
+          <Route path="operations/alarms" element={<AlarmsList />} />
         </Route>
       </Routes>
     </BrowserRouter>

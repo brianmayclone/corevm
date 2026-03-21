@@ -19,6 +19,7 @@ pub mod tasks;
 pub mod drs;
 pub mod migration;
 pub mod alarms;
+pub mod activity;
 
 pub fn router() -> Router<Arc<ClusterState>> {
     Router::new()
@@ -29,6 +30,7 @@ pub fn router() -> Router<Arc<ClusterState>> {
         // ── System ──────────────────────────────────────
         .route("/api/system/info", get(system::info))
         .route("/api/system/stats", get(system::stats))
+        .route("/api/system/activity", get(activity::activity))
 
         // ── Users (admin only) ──────────────────────────
         .route("/api/users", get(users::list).post(users::create))
@@ -53,9 +55,21 @@ pub fn router() -> Router<Arc<ClusterState>> {
         .route("/api/vms/{id}/force-stop", post(vms::force_stop))
         .route("/api/vms/{id}/migrate", post(migration::migrate))
 
-        // ── Storage (cluster-wide datastores) ───────────
+        // ── Storage (cluster-wide datastores + compat endpoints) ────
         .route("/api/storage/datastores", get(storage::list_datastores).post(storage::create_datastore))
         .route("/api/storage/datastores/{id}", get(storage::get_datastore).delete(storage::delete_datastore))
+        .route("/api/storage/pools", get(activity::list_storage_pools))
+        .route("/api/storage/pools/{id}/browse", get(activity::browse_storage_pool))
+        .route("/api/storage/stats", get(activity::storage_stats))
+        .route("/api/storage/images", get(activity::list_images))
+        .route("/api/storage/isos", get(activity::list_isos))
+
+        // ── Resource Groups (compat) ────────────────────
+        .route("/api/resource-groups", get(activity::list_resource_groups))
+
+        // ── Network (compat stubs) ──────────────────────
+        .route("/api/network/interfaces", get(activity::network_interfaces))
+        .route("/api/network/stats", get(activity::network_stats))
 
         // ── Events ──────────────────────────────────────
         .route("/api/events", get(events::list))
