@@ -20,6 +20,7 @@ use state::{ClusterState, NodeConnection, NodeStatus};
 use dashmap::DashMap;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
 #[tokio::main]
@@ -112,10 +113,23 @@ async fn main() {
     tracing::info!("DRS engine started (5m interval)");
 
     // ── Build router ────────────────────────────────────────────────
-    let app = api::router()
+    let api_router = api::router()
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
+
+    // Serve the embedded UI if a `ui/` directory exists next to the binary.
+    // This enables single-binary deployment in production — in development,
+    // Vite serves the UI separately and this directory won't exist.
+    let app = if let Some(ui_dir) = find_ui_dir() {
+        tracing::info!("Serving UI from {}", ui_dir.display());
+        let index = ui_dir.join("index.html");
+        let serve_dir = ServeDir::new(&ui_dir).not_found_service(ServeFile::new(&index));
+        api_router.fallback_service(serve_dir)
+    } else {
+        tracing::info!("No UI directory found — API-only mode (use Vite dev server for UI)");
+        api_router
+    };
 
     // ── Start server ────────────────────────────────────────────────
     let addr = format!("{}:{}", bind, port);
@@ -139,4 +153,17 @@ async fn main() {
             eprintln!("Server error: {}", e);
             std::process::exit(1);
         });
+}
+
+/// Look for a `ui/` directory containing `index.html` next to the binary.
+fn find_ui_dir() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = std::fs::canonicalize(exe).ok()?;
+    let exe_dir = exe.parent()?;
+    let ui_dir = exe_dir.join("ui");
+    if ui_dir.join("index.html").exists() {
+        Some(ui_dir)
+    } else {
+        None
+    }
 }

@@ -7,10 +7,11 @@
 # CoreVM
 
 **A pure-software x86 virtual machine engine built entirely in Rust and NASM assembly,**
-**with a modern web-based management platform.**
+**with a modern web-based management platform and cluster orchestration.**
 
 Full PC hardware emulation with KVM acceleration — create, manage, and run real
 operating systems without depending on QEMU or any external emulator.
+Single-node or multi-node cluster deployments with DRS, HA, and live migration.
 
 <br>
 
@@ -26,7 +27,7 @@ operating systems without depending on QEMU or any external emulator.
 
 <br>
 
-[Features](#features) · [VMM Web UI](#vmm-web-ui) · [Quick Start](#quick-start) · [Architecture](#architecture) · [REST API](#rest-api) · [Building](#building) · [anyOS Integration](#anyos-integration)
+[Features](#features) · [VMM Web UI](#vmm-web-ui) · [Quick Start](#quick-start) · [Architecture](#architecture) · [REST API](#rest-api) · [Building](#building) · [Cluster](#cluster-orchestration) · [Docs](docs/) · [anyOS Integration](#anyos-integration)
 
 </div>
 
@@ -38,7 +39,7 @@ operating systems without depending on QEMU or any external emulator.
 
 ## VMM Web UI
 
-CoreVM ships with **vmm-server** and **vmm-ui** — a full-featured, web-based management platform for virtual machines. Fully responsive — manage your VMs from desktop or phone.
+CoreVM ships with **vmm-server**, **vmm-cluster**, and **vmm-ui** — a full-featured, web-based management platform for virtual machines with optional multi-node cluster orchestration. Fully responsive — manage your VMs from desktop or phone.
 
 > Click any screenshot to view full size.
 
@@ -92,6 +93,17 @@ CoreVM ships with **vmm-server** and **vmm-ui** — a full-featured, web-based m
 - **Settings** — server configuration, timezone, security policies, UI preferences
 - **Audit Logging** — full activity trail for all management operations
 - **Built with** — Rust (Axum + Tokio), React 19, TypeScript, Tailwind CSS, SQLite
+
+### Cluster Orchestration (vmm-cluster)
+
+- **Multi-Node Management** — central authority managing multiple vmm-server nodes
+- **DRS (Distributed Resource Scheduler)** — automatic VM load balancing across hosts
+- **High Availability** — automatic VM failover when nodes go offline
+- **Live Migration** — move running VMs between nodes
+- **Host Maintenance Mode** — safely drain VMs before host maintenance
+- **Datastores** — cluster-wide shared storage management
+- **Events & Alarms** — cluster event logging and alert system
+- **Task Tracking** — monitor long-running operations (migrations, provisioning)
 
 ### CPU & Execution
 
@@ -220,14 +232,15 @@ cargo +stable build --release
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                         vmm-ui (React)                             │
-│               Browser-based management dashboard                    │
-├─────────────────────────────────────────────────────────────────────┤
-│                      vmm-server (Axum)                              │
-│          REST API · WebSocket Console · JWT Auth · SQLite           │
-├──────────────────────────────┬──────────────────────────────────────┤
-│    VM Manager (egui)         │         vmctl (CLI)                  │
-├──────────────────────────────┴──────────────────────────────────────┤
+│                         vmm-ui (React)                              │
+│     Browser-based management dashboard (standalone + cluster)       │
+├──────────────────────────────────┬──────────────────────────────────┤
+│       vmm-cluster (Axum)         │        vmm-server (Axum)         │
+│  Central authority · DRS · HA    │  REST API · WebSocket · Agent    │
+│  Migration · Events · Alarms    │  JWT Auth · SQLite · Storage     │
+├──────────────────────────────────┴──────────────────────────────────┤
+│    vmmanager (egui)              │         vmctl (CLI)               │
+├──────────────────────────────────┴──────────────────────────────────┤
 │                       C FFI Layer (58 exports)                      │
 │                corevm_create / corevm_run / ...                     │
 ├─────────────────────────────────────────────────────────────────────┤
@@ -356,6 +369,7 @@ GET    /ws/console/{vm_id}          # Live VGA console (framebuffer + input)
 corevm/
 ├── apps/
 │   ├── vmm-server/             REST API + WebSocket server (Axum/Tokio)
+│   ├── vmm-cluster/            Cluster orchestration authority (DRS, HA, migration)
 │   ├── vmm-ui/                 React 19 web UI (Vite + Tailwind)
 │   ├── vmctl/                  CLI tool for running VMs
 │   └── vmmanager/              Desktop GUI (egui/eframe)
@@ -370,7 +384,9 @@ corevm/
 │   │   │   ├── ffi.rs          C FFI layer (58 exports)
 │   │   │   └── ...
 │   │   └── bios/               Custom BIOS (23 NASM assembly files)
-│   └── vmm-core/               Shared data models (VmConfig, enums)
+│   ├── vmm-core/               Shared data models (VmConfig, cluster types)
+│   └── vmm-term/               Terminal command registry & parser
+├── docs/                       Full documentation (developer + user guides)
 ├── tests/
 │   └── hosttests/              Integration & smoke tests
 ├── tools/
@@ -381,6 +397,7 @@ corevm/
 │   ├── icons/                  Project logo
 │   └── screenshots/            UI screenshots
 ├── vmm-server.toml             Server configuration
+├── vmm-cluster.toml            Cluster configuration
 └── Cargo.toml                  Workspace manifest
 ```
 
@@ -508,7 +525,87 @@ libcorevm exposes 58 C ABI functions for dynamic loading (`dlopen`/`dlsym`):
 - [x] Live WebSocket console
 - [x] Storage & network management
 - [x] User & group management with audit logging
-- [ ] **Cluster management** — multi-node orchestration, VM migration, high availability
+- [x] **Cluster management** — multi-node orchestration (vmm-cluster)
+- [x] **DRS** — Distributed Resource Scheduler for automatic load balancing
+- [x] **High Availability** — automatic VM failover on node failure
+- [x] **Live Migration** — move VMs between hosts
+- [x] **Host maintenance mode** — safe node drain before maintenance
+- [x] **Datastores** — cluster-wide shared storage
+- [x] **Events & Alarms** — cluster event logging and alert system
+
+---
+
+## Cluster Orchestration
+
+CoreVM includes **vmm-cluster** — a central authority for managing multiple vmm-server nodes, similar to VMware vCenter.
+
+```
+                    ┌──────────────────┐
+                    │   vmm-cluster     │
+                    │ (central authority)│
+                    └────────┬─────────┘
+                             │
+              ┌──────────────┼──────────────┐
+              ▼              ▼              ▼
+        ┌──────────┐  ┌──────────┐  ┌──────────┐
+        │vmm-server│  │vmm-server│  │vmm-server│
+        │ (agent)  │  │ (agent)  │  │ (agent)  │
+        │  Node 1  │  │  Node 2  │  │  Node 3  │
+        └──────────┘  └──────────┘  └──────────┘
+```
+
+### Key Features
+
+- **DRS (Distributed Resource Scheduler)** — automatically balances VM workloads across hosts
+- **High Availability** — restarts failed VMs on healthy nodes
+- **Live Migration** — move running VMs between hosts
+- **Host Maintenance Mode** — safely drain VMs before host maintenance
+- **Cluster-wide Datastores** — shared storage visible to all nodes
+- **Events & Alarms** — centralized event logging and alert system
+- **Task Tracking** — monitor migrations, provisioning, and other long-running operations
+
+### Quick Start
+
+```bash
+# Build and run the cluster authority
+cargo build --release -p vmm-cluster
+./target/release/vmm-cluster
+
+# On each node, run vmm-server as usual
+./target/release/vmm-server
+
+# Add nodes via API or Web UI
+curl -X POST http://cluster:9443/api/hosts \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"address":"http://node1:8443","name":"node-1"}'
+```
+
+For detailed cluster documentation, see [docs/apps/vmm-cluster/](docs/apps/vmm-cluster/).
+
+---
+
+## Documentation
+
+Full developer and user documentation is available in the [docs/](docs/) directory:
+
+| Documentation | Link |
+|--------------|------|
+| **vmm-server** User Guide | [docs/apps/vmm-server/user-guide.md](docs/apps/vmm-server/user-guide.md) |
+| **vmm-server** Developer Guide | [docs/apps/vmm-server/developer-guide.md](docs/apps/vmm-server/developer-guide.md) |
+| **vmm-cluster** User Guide | [docs/apps/vmm-cluster/user-guide.md](docs/apps/vmm-cluster/user-guide.md) |
+| **vmm-cluster** Developer Guide | [docs/apps/vmm-cluster/developer-guide.md](docs/apps/vmm-cluster/developer-guide.md) |
+| **vmm-ui** User Guide | [docs/apps/vmm-ui/user-guide.md](docs/apps/vmm-ui/user-guide.md) |
+| **vmm-ui** Developer Guide | [docs/apps/vmm-ui/developer-guide.md](docs/apps/vmm-ui/developer-guide.md) |
+| **vmmanager** User Guide | [docs/apps/vmmanager/user-guide.md](docs/apps/vmmanager/user-guide.md) |
+| **vmmanager** Developer Guide | [docs/apps/vmmanager/developer-guide.md](docs/apps/vmmanager/developer-guide.md) |
+| **vmctl** User Guide | [docs/apps/vmctl/user-guide.md](docs/apps/vmctl/user-guide.md) |
+| **vmctl** Developer Guide | [docs/apps/vmctl/developer-guide.md](docs/apps/vmctl/developer-guide.md) |
+| **libcorevm** Overview | [docs/libcorevm/overview.md](docs/libcorevm/overview.md) |
+| **libcorevm** Devices | [docs/libcorevm/devices.md](docs/libcorevm/devices.md) |
+| **libcorevm** Backends | [docs/libcorevm/backends.md](docs/libcorevm/backends.md) |
+| **libcorevm** C FFI | [docs/libcorevm/ffi.md](docs/libcorevm/ffi.md) |
+| **libcorevm** Memory | [docs/libcorevm/memory.md](docs/libcorevm/memory.md) |
 
 ---
 

@@ -7,6 +7,7 @@ pub mod vm;
 pub mod status;
 pub mod storage;
 pub mod resources;
+pub mod cluster;
 
 use crate::registry::CommandRegistry;
 

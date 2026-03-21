@@ -1,10 +1,55 @@
-//! Alarm service — evaluates alarm conditions against current state.
+//! Alarm service — evaluates alarm conditions and manages alarm CRUD.
 
 use rusqlite::Connection;
+use serde::Serialize;
 
 pub struct AlarmService;
 
+#[derive(Debug, Serialize)]
+pub struct AlarmInfo {
+    pub id: i64,
+    pub name: String,
+    pub target_type: String,
+    pub target_id: String,
+    pub condition_type: String,
+    pub threshold: Option<f64>,
+    pub severity: String,
+    pub triggered: bool,
+    pub acknowledged: bool,
+    pub created_at: String,
+    pub triggered_at: Option<String>,
+}
+
 impl AlarmService {
+    /// List all alarms.
+    pub fn list(db: &Connection) -> Result<Vec<AlarmInfo>, String> {
+        let mut stmt = db.prepare(
+            "SELECT id, name, target_type, target_id, condition_type, threshold, severity, \
+                    triggered, acknowledged, created_at, triggered_at \
+             FROM alarms ORDER BY triggered DESC, created_at DESC"
+        ).map_err(|e| e.to_string())?;
+
+        let alarms = stmt.query_map([], |row| {
+            Ok(AlarmInfo {
+                id: row.get(0)?, name: row.get(1)?, target_type: row.get(2)?,
+                target_id: row.get(3)?, condition_type: row.get(4)?,
+                threshold: row.get(5)?, severity: row.get(6)?,
+                triggered: row.get::<_, i32>(7)? != 0,
+                acknowledged: row.get::<_, i32>(8)? != 0,
+                created_at: row.get(9)?, triggered_at: row.get(10)?,
+            })
+        }).map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok()).collect();
+        Ok(alarms)
+    }
+
+    /// Acknowledge an alarm.
+    pub fn acknowledge(db: &Connection, id: i64) -> Result<(), String> {
+        db.execute("UPDATE alarms SET acknowledged = 1 WHERE id = ?1", rusqlite::params![id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// Check all alarms and trigger/clear as needed.
     /// Called periodically by the heartbeat engine after state updates.
     pub fn evaluate(db: &Connection) {

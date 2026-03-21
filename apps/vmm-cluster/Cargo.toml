@@ -12,11 +12,14 @@ path = "src/main.rs"
 # Shared models
 vmm-core = { path = "../../libs/vmm-core" }
 
+# Terminal command engine
+vmm-term = { path = "../../libs/vmm-term" }
+
 # Web framework
 axum = { version = "0.8", features = ["ws"] }
 axum-extra = { version = "0.10", features = ["typed-header"] }
 tower = { version = "0.5" }
-tower-http = { version = "0.6", features = ["cors", "compression-gzip", "trace"] }
+tower-http = { version = "0.6", features = ["cors", "compression-gzip", "fs", "trace"] }
 tokio = { version = "1", features = ["full"] }
 
 # HTTP client (for Agent API calls to nodes)

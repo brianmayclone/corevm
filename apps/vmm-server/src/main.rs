@@ -15,6 +15,7 @@ mod agent;
 
 use std::sync::{Arc, Mutex};
 use tower_http::cors::CorsLayer;
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
@@ -202,10 +203,21 @@ async fn main() {
     });
 
     // Build router
-    let app = api::router()
+    let api_router = api::router()
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
+
+    // Serve the embedded UI if a `ui/` directory exists next to the binary.
+    let app = if let Some(ui_dir) = find_ui_dir() {
+        tracing::info!("Serving UI from {}", ui_dir.display());
+        let index = ui_dir.join("index.html");
+        let serve_dir = ServeDir::new(&ui_dir).not_found_service(ServeFile::new(&index));
+        api_router.fallback_service(serve_dir)
+    } else {
+        tracing::info!("No UI directory found — API-only mode (use Vite dev server for UI)");
+        api_router
+    };
 
     // Start server
     let bind = format!("{}:{}", state.config.server.bind, state.config.server.port);
@@ -258,6 +270,19 @@ async fn main() {
         });
 
     tracing::info!("Server shut down");
+}
+
+/// Look for a `ui/` directory containing `index.html` next to the binary.
+fn find_ui_dir() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = std::fs::canonicalize(exe).ok()?;
+    let exe_dir = exe.parent()?;
+    let ui_dir = exe_dir.join("ui");
+    if ui_dir.join("index.html").exists() {
+        Some(ui_dir)
+    } else {
+        None
+    }
 }
 
 async fn shutdown_signal() {

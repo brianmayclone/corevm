@@ -88,4 +88,5 @@ pub fn router() -> Router<Arc<ClusterState>> {
 
         // ── WebSocket ───────────────────────────────────
         .route("/ws/console/{vm_id}", get(crate::ws::console_bridge::handler))
+        .route("/ws/terminal", get(crate::ws::terminal::ws_terminal))
 }

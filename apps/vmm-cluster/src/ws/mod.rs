@@ -1,3 +1,4 @@
-//! WebSocket handlers — console and terminal bridging through the cluster.
+//! WebSocket handlers — console bridging and terminal.
 
 pub mod console_bridge;
+pub mod terminal;
