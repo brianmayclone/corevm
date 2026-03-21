@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS clusters (
 CREATE TABLE IF NOT EXISTS hosts (
     id              TEXT PRIMARY KEY,
     hostname        TEXT NOT NULL,
+    display_name    TEXT NOT NULL DEFAULT '',  -- custom name (editable), falls back to hostname if empty
     address         TEXT NOT NULL UNIQUE,
     cluster_id      TEXT NOT NULL REFERENCES clusters(id),
     agent_token     TEXT NOT NULL,
@@ -71,6 +72,7 @@ CREATE TABLE IF NOT EXISTS vms (
     ha_restart_priority TEXT NOT NULL DEFAULT 'medium',
     -- DRS
     drs_automation  TEXT NOT NULL DEFAULT 'manual',
+    drs_excluded    INTEGER NOT NULL DEFAULT 0,
     -- Resource group
     resource_group_id INTEGER REFERENCES resource_groups(id),
     -- Owner
@@ -159,6 +161,8 @@ CREATE TABLE IF NOT EXISTS resource_groups (
     name            TEXT NOT NULL UNIQUE,
     description     TEXT NOT NULL DEFAULT '',
     is_default      INTEGER NOT NULL DEFAULT 0,
+    cluster_id      TEXT REFERENCES clusters(id) ON DELETE SET NULL,  -- NULL = global
+    drs_excluded    INTEGER NOT NULL DEFAULT 0,  -- 1 = VMs in this group excluded from DRS
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -323,6 +327,123 @@ CREATE TABLE IF NOT EXISTS notification_log (
     status          TEXT NOT NULL DEFAULT 'sent',  -- sent, failed, throttled
     error           TEXT,
     sent_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ═══════════════════════════════════════════════════════════════
+-- CLUSTER SETTINGS (key-value store for global configuration)
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS cluster_settings (
+    key             TEXT PRIMARY KEY,
+    value           TEXT NOT NULL DEFAULT '',
+    category        TEXT NOT NULL DEFAULT 'general'  -- smtp, ldap, dhcp, dns, general
+);
+
+-- ═══════════════════════════════════════════════════════════════
+-- DRS EXCLUSIONS (VMs or resource groups excluded from DRS)
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS drs_exclusions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    cluster_id      TEXT NOT NULL REFERENCES clusters(id) ON DELETE CASCADE,
+    exclusion_type  TEXT NOT NULL,           -- vm, resource_group
+    target_id       TEXT NOT NULL,           -- VM ID or resource group ID
+    reason          TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(cluster_id, exclusion_type, target_id)
+);
+
+-- ═══════════════════════════════════════════════════════════════
+-- NETWORK SERVICES (optional DHCP + DNS per cluster)
+-- ═══════════════════════════════════════════════════════════════
+
+-- Virtual networks (cluster-managed networks with optional services)
+CREATE TABLE IF NOT EXISTS virtual_networks (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    cluster_id      TEXT NOT NULL REFERENCES clusters(id) ON DELETE CASCADE,
+    name            TEXT NOT NULL,
+    vlan_id         INTEGER,                    -- NULL = untagged
+    subnet          TEXT NOT NULL DEFAULT '',    -- e.g. "10.0.0.0/24"
+    gateway         TEXT NOT NULL DEFAULT '',    -- e.g. "10.0.0.1"
+    -- Services
+    dhcp_enabled    INTEGER NOT NULL DEFAULT 0,
+    dhcp_range_start TEXT NOT NULL DEFAULT '',   -- e.g. "10.0.0.100"
+    dhcp_range_end  TEXT NOT NULL DEFAULT '',    -- e.g. "10.0.0.200"
+    dhcp_lease_secs INTEGER NOT NULL DEFAULT 3600,
+    dns_enabled     INTEGER NOT NULL DEFAULT 0,
+    dns_domain      TEXT NOT NULL DEFAULT '',    -- e.g. "vm.local"
+    dns_upstream    TEXT NOT NULL DEFAULT '',    -- e.g. "8.8.8.8,8.8.4.4"
+    pxe_enabled     INTEGER NOT NULL DEFAULT 0,
+    pxe_boot_file   TEXT NOT NULL DEFAULT '',    -- e.g. "pxelinux.0" or "ipxe.efi"
+    pxe_tftp_root   TEXT NOT NULL DEFAULT '',    -- e.g. "/vmm/tftp"
+    pxe_next_server TEXT NOT NULL DEFAULT '',    -- TFTP server IP (usually cluster IP)
+    auto_register_dns INTEGER NOT NULL DEFAULT 1, -- auto-create DNS records for VM names
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(cluster_id, name)
+);
+
+-- Kept for backward compat — but virtual_networks is the primary model
+CREATE TABLE IF NOT EXISTS network_services (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    cluster_id      TEXT NOT NULL REFERENCES clusters(id) ON DELETE CASCADE,
+    service_type    TEXT NOT NULL,           -- dhcp, dns, pxe
+    enabled         INTEGER NOT NULL DEFAULT 0,
+    config_json     TEXT NOT NULL DEFAULT '{}',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(cluster_id, service_type)
+);
+
+-- DHCP leases (managed by the built-in DHCP server)
+CREATE TABLE IF NOT EXISTS dhcp_leases (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    network_service_id INTEGER NOT NULL REFERENCES network_services(id) ON DELETE CASCADE,
+    mac_address     TEXT NOT NULL,
+    ip_address      TEXT NOT NULL,
+    hostname        TEXT,
+    vm_id           TEXT REFERENCES vms(id) ON DELETE SET NULL,
+    lease_start     TEXT NOT NULL DEFAULT (datetime('now')),
+    lease_end       TEXT,
+    UNIQUE(network_service_id, mac_address)
+);
+
+-- DNS records (managed by the built-in DNS server)
+CREATE TABLE IF NOT EXISTS dns_records (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    network_service_id INTEGER NOT NULL REFERENCES network_services(id) ON DELETE CASCADE,
+    record_type     TEXT NOT NULL DEFAULT 'A',  -- A, AAAA, CNAME, PTR
+    name            TEXT NOT NULL,
+    value           TEXT NOT NULL,
+    ttl             INTEGER NOT NULL DEFAULT 3600,
+    auto_registered INTEGER NOT NULL DEFAULT 0,  -- 1 = auto-created from VM name
+    UNIQUE(network_service_id, record_type, name)
+);
+
+-- ═══════════════════════════════════════════════════════════════
+-- LDAP / ACTIVE DIRECTORY INTEGRATION
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS ldap_configs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL UNIQUE,
+    enabled         INTEGER NOT NULL DEFAULT 0,
+    server_url      TEXT NOT NULL DEFAULT '',        -- ldap://dc.example.com:389
+    bind_dn         TEXT NOT NULL DEFAULT '',        -- CN=svc_vmm,OU=ServiceAccounts,DC=example,DC=com
+    bind_password   TEXT NOT NULL DEFAULT '',
+    base_dn         TEXT NOT NULL DEFAULT '',        -- DC=example,DC=com
+    user_search_dn  TEXT NOT NULL DEFAULT '',        -- OU=Users,DC=example,DC=com
+    user_filter     TEXT NOT NULL DEFAULT '(&(objectClass=user)(sAMAccountName={username}))',
+    group_search_dn TEXT NOT NULL DEFAULT '',        -- OU=Groups,DC=example,DC=com
+    group_filter    TEXT NOT NULL DEFAULT '(&(objectClass=group)(member={user_dn}))',
+    -- Attribute mappings
+    attr_username   TEXT NOT NULL DEFAULT 'sAMAccountName',
+    attr_email      TEXT NOT NULL DEFAULT 'mail',
+    attr_display    TEXT NOT NULL DEFAULT 'displayName',
+    -- Role mapping (JSON): { "VMM-Admins": "admin", "VMM-Operators": "operator", "VMM-Viewers": "viewer" }
+    role_mapping    TEXT NOT NULL DEFAULT '{}',
+    -- TLS
+    use_tls         INTEGER NOT NULL DEFAULT 0,
+    skip_tls_verify INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 "#;
 

@@ -78,12 +78,38 @@ pub fn start_vm(config: &VmConfig, bios_paths: &[std::path::PathBuf]) -> Result<
                 let _ = setup::load_e1000_rom(handle, bios_paths);
             }
         }
-        let net_mode_id = match config.net_mode {
-            NetMode::Disconnected => 0,
-            NetMode::UserMode => 1,
-            NetMode::Bridge => 2,
-        };
-        corevm_setup_net(handle, net_mode_id);
+        // Use SDN config if provided (from cluster), otherwise default SLIRP
+        if config.net_mode == NetMode::UserMode {
+            if let Some(ref sdn) = config.sdn_config {
+                // Cluster-managed SDN network — use custom SLIRP parameters
+                let slirp_cfg = libcorevm::devices::slirp::SlirpConfig {
+                    net_prefix: sdn.net_prefix,
+                    gateway_ip: sdn.gateway_ip,
+                    dns_ip: sdn.dns_ip,
+                    guest_ip: sdn.guest_ip,
+                    netmask: sdn.netmask,
+                    gw_mac: [0x52, 0x55, sdn.net_prefix[0], sdn.net_prefix[1], sdn.net_prefix[2], sdn.gateway_ip[3]],
+                    custom_dns: if sdn.upstream_dns.is_empty() { None } else {
+                        sdn.upstream_dns.first()
+                            .and_then(|s| s.parse::<std::net::SocketAddr>().ok()
+                                .or_else(|| format!("{}:53", s).parse().ok()))
+                    },
+                    pxe_boot_file: sdn.pxe_boot_file.as_bytes().to_vec(),
+                    pxe_next_server: sdn.pxe_next_server,
+                };
+                libcorevm::ffi::corevm_setup_net_sdn(handle, &slirp_cfg);
+            } else {
+                // Standard SLIRP with defaults
+                corevm_setup_net(handle, 1);
+            }
+        } else {
+            let net_mode_id = match config.net_mode {
+                NetMode::Disconnected => 0,
+                NetMode::UserMode => unreachable!(),
+                NetMode::Bridge => 2,
+            };
+            corevm_setup_net(handle, net_mode_id);
+        }
     }
 
     // USB tablet

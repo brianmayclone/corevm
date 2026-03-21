@@ -26,3 +26,6 @@ pub mod drs_service;
 pub mod storage_compat;
 pub mod resource_group;
 pub mod notification;
+pub mod settings;
+pub mod network;
+pub mod ldap;

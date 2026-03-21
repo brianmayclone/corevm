@@ -64,6 +64,7 @@ const clusterNavItems: NavItem[] = [
       { to: '/cluster/settings', icon: Settings, label: 'Clusters' },
       { to: '/cluster/drs', icon: Activity, label: 'DRS' },
       { to: '/cluster/datastores', icon: Database, label: 'Datastores' },
+      { to: '/cluster/networks', icon: Network, label: 'Networks (SDN)' },
     ],
   },
   {

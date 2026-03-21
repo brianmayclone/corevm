@@ -114,6 +114,36 @@ pub enum GuestArch {
     X64,
 }
 
+// ── SDN Network Configuration ────────────────────────────────────────────
+
+/// Software-defined network configuration pushed from vmm-cluster.
+/// Overrides the hardcoded SLIRP defaults when present.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SdnNetConfig {
+    /// Subnet (first 3 octets), e.g. [10, 0, 50] for 10.0.50.0/24
+    pub net_prefix: [u8; 3],
+    /// Gateway IP, e.g. [10, 0, 50, 1]
+    pub gateway_ip: [u8; 4],
+    /// DNS server IP, e.g. [10, 0, 50, 1] (same as gateway) or custom
+    pub dns_ip: [u8; 4],
+    /// Guest IP assigned via DHCP, e.g. [10, 0, 50, 100]
+    pub guest_ip: [u8; 4],
+    /// Netmask, e.g. [255, 255, 255, 0]
+    pub netmask: [u8; 4],
+    /// Custom upstream DNS servers (empty = use host resolver)
+    #[serde(default)]
+    pub upstream_dns: Vec<String>,
+    /// DNS domain suffix for auto-registration (e.g. "vm.local")
+    #[serde(default)]
+    pub dns_domain: String,
+    /// PXE boot file name (empty = PXE disabled)
+    #[serde(default)]
+    pub pxe_boot_file: String,
+    /// PXE TFTP server IP (next-server in DHCP)
+    #[serde(default)]
+    pub pxe_next_server: [u8; 4],
+}
+
 // ── VmConfig ─────────────────────────────────────────────────────────────
 
 /// Complete VM configuration — the single source of truth shared by
@@ -144,6 +174,9 @@ pub struct VmConfig {
     pub diagnostics: bool,
     pub disk_cache_mb: u32,
     pub disk_cache_mode: DiskCacheMode,
+    /// SDN network configuration (optional — overrides SLIRP defaults when set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sdn_config: Option<SdnNetConfig>,
 }
 
 impl VmConfig {
@@ -207,6 +240,7 @@ impl Default for VmConfig {
             diagnostics: false,
             disk_cache_mb: 0,
             disk_cache_mode: DiskCacheMode::None,
+            sdn_config: None,
         }
     }
 }

@@ -2835,6 +2835,42 @@ pub extern "C" fn corevm_setup_net(handle: u64, mode: i32) -> i32 {
     { let _ = (handle, mode); -1 }
 }
 
+/// Setup user-mode networking with custom SDN configuration.
+/// The config pointer must point to a valid SlirpConfig struct.
+/// Returns 0 on success.
+#[no_mangle]
+pub extern "C" fn corevm_setup_net_sdn(handle: u64, config_ptr: *const crate::devices::slirp::SlirpConfig) -> i32 {
+    #[cfg(feature = "std")]
+    {
+        let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
+        if config_ptr.is_null() { return -1; }
+        let config = unsafe { &*config_ptr };
+        #[cfg(feature = "linux")]
+        {
+            // Clone the config data into a new SlirpConfig
+            let sdn_config = crate::devices::slirp::SlirpConfig {
+                net_prefix: config.net_prefix,
+                gateway_ip: config.gateway_ip,
+                dns_ip: config.dns_ip,
+                guest_ip: config.guest_ip,
+                netmask: config.netmask,
+                gw_mac: config.gw_mac,
+                custom_dns: config.custom_dns,
+                pxe_boot_file: config.pxe_boot_file.clone(),
+                pxe_next_server: config.pxe_next_server,
+            };
+            vm.net_backend = Some(alloc::boxed::Box::new(
+                crate::devices::slirp::SlirpNet::with_config(sdn_config)
+            ));
+            return 0;
+        }
+        #[cfg(not(feature = "linux"))]
+        { -1 }
+    }
+    #[cfg(not(feature = "std"))]
+    { let _ = (handle, config_ptr); -1 }
+}
+
 /// Poll the network backend: move TX packets from E1000 to backend,
 /// move RX packets from backend to E1000. Call periodically from VM loop.
 /// Returns the number of RX packets delivered to the guest.

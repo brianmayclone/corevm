@@ -45,6 +45,7 @@ import EventsList from './pages/EventsList'
 import DrsPage from './pages/DrsPage'
 import AlarmsList from './pages/AlarmsList'
 import NotificationsPage from './pages/NotificationsPage'
+import SdnNetworks from './pages/SdnNetworks'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore()
@@ -124,6 +125,7 @@ export default function App() {
           <Route path="operations/events" element={<EventsList />} />
           <Route path="operations/alarms" element={<AlarmsList />} />
           <Route path="operations/notifications" element={<NotificationsPage />} />
+          <Route path="cluster/networks" element={<SdnNetworks />} />
         </Route>
       </Routes>
     </BrowserRouter>

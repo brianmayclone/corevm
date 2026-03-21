@@ -28,15 +28,68 @@ use super::net::NetBackend;
 
 // ── Network configuration ────────────────────────────────────────────────────
 
-const NET_PREFIX: [u8; 3] = [10, 0, 2];
-const GATEWAY_IP: [u8; 4] = [10, 0, 2, 2];
-const DNS_IP: [u8; 4]     = [10, 0, 2, 3];
-const GUEST_IP: [u8; 4]   = [10, 0, 2, 15];
-const NETMASK: [u8; 4]    = [255, 255, 255, 0];
+/// Default network parameters (used when no SDN config is provided).
+const DEFAULT_NET_PREFIX: [u8; 3] = [10, 0, 2];
+const DEFAULT_GATEWAY_IP: [u8; 4] = [10, 0, 2, 2];
+const DEFAULT_DNS_IP: [u8; 4]     = [10, 0, 2, 3];
+const DEFAULT_GUEST_IP: [u8; 4]   = [10, 0, 2, 15];
+const DEFAULT_NETMASK: [u8; 4]    = [255, 255, 255, 0];
+const DEFAULT_GW_MAC: [u8; 6]     = [0x52, 0x55, 0x0A, 0x00, 0x02, 0x02];
+
+/// Configurable SLIRP network parameters.
+/// All fields have sane defaults matching the original hardcoded values.
+pub struct SlirpConfig {
+    pub net_prefix: [u8; 3],
+    pub gateway_ip: [u8; 4],
+    pub dns_ip: [u8; 4],
+    pub guest_ip: [u8; 4],
+    pub netmask: [u8; 4],
+    pub gw_mac: [u8; 6],
+    /// Override host DNS with custom upstream (empty = auto-detect)
+    pub custom_dns: Option<SocketAddr>,
+    /// PXE boot file name (empty = no PXE)
+    pub pxe_boot_file: Vec<u8>,
+    /// PXE next-server IP (TFTP server)
+    pub pxe_next_server: [u8; 4],
+}
+
+impl Default for SlirpConfig {
+    fn default() -> Self {
+        Self {
+            net_prefix: DEFAULT_NET_PREFIX,
+            gateway_ip: DEFAULT_GATEWAY_IP,
+            dns_ip: DEFAULT_DNS_IP,
+            guest_ip: DEFAULT_GUEST_IP,
+            netmask: DEFAULT_NETMASK,
+            gw_mac: DEFAULT_GW_MAC,
+            custom_dns: None,
+            pxe_boot_file: Vec::new(),
+            pxe_next_server: [0; 4],
+        }
+    }
+}
+
+impl SlirpConfig {
+    fn broadcast(&self) -> [u8; 4] {
+        [
+            self.net_prefix[0] | !self.netmask[0],
+            self.net_prefix[1] | !self.netmask[1],
+            self.net_prefix[2] | !self.netmask[2],
+            0xFF,
+        ]
+    }
+}
+
+// Backward compat — old code referencing the constants
+const NET_PREFIX: [u8; 3] = DEFAULT_NET_PREFIX;
+const GATEWAY_IP: [u8; 4] = DEFAULT_GATEWAY_IP;
+const DNS_IP: [u8; 4]     = DEFAULT_DNS_IP;
+const GUEST_IP: [u8; 4]   = DEFAULT_GUEST_IP;
+const NETMASK: [u8; 4]    = DEFAULT_NETMASK;
 const BROADCAST: [u8; 4]  = [10, 0, 2, 255];
 
 /// MAC address of the virtual gateway.
-const GW_MAC: [u8; 6] = [0x52, 0x55, 0x0A, 0x00, 0x02, 0x02];
+const GW_MAC: [u8; 6] = DEFAULT_GW_MAC;
 
 /// Maximum Ethernet frame we handle.
 const MAX_FRAME: usize = 1514;
@@ -208,6 +261,8 @@ struct FtpDataListener {
 // ── SLIRP backend ────────────────────────────────────────────────────────────
 
 pub struct SlirpNet {
+    /// SDN configuration (network parameters).
+    config: SlirpConfig,
     /// Guest MAC address (learned from first frame or DHCP).
     guest_mac: [u8; 6],
     /// Frames ready to be delivered to the guest.
@@ -236,12 +291,28 @@ pub struct SlirpNet {
 }
 
 impl SlirpNet {
+    /// Create with default network configuration (10.0.2.0/24).
     pub fn new() -> Self {
-        // Detect host DNS resolver
-        let host_dns = detect_host_dns();
+        Self::with_config(SlirpConfig::default())
+    }
+
+    /// Create with custom SDN network configuration.
+    pub fn with_config(config: SlirpConfig) -> Self {
+        let host_dns = config.custom_dns.unwrap_or_else(|| detect_host_dns());
+        eprintln!("[slirp] Network: {}.{}.{}.0/{}", config.net_prefix[0], config.net_prefix[1], config.net_prefix[2],
+            if config.netmask == [255, 255, 255, 0] { "24" } else { "??" });
+        eprintln!("[slirp] Gateway: {}.{}.{}.{}", config.gateway_ip[0], config.gateway_ip[1], config.gateway_ip[2], config.gateway_ip[3]);
+        eprintln!("[slirp] Guest:   {}.{}.{}.{}", config.guest_ip[0], config.guest_ip[1], config.guest_ip[2], config.guest_ip[3]);
         eprintln!("[slirp] DNS relay → {}", host_dns);
+        if !config.pxe_boot_file.is_empty() {
+            eprintln!("[slirp] PXE boot: {:?} via {}.{}.{}.{}",
+                String::from_utf8_lossy(&config.pxe_boot_file),
+                config.pxe_next_server[0], config.pxe_next_server[1],
+                config.pxe_next_server[2], config.pxe_next_server[3]);
+        }
 
         SlirpNet {
+            config,
             guest_mac: [0; 6],
             rx_queue: VecDeque::new(),
             tcp_conns: BTreeMap::new(),
