@@ -29,7 +29,7 @@ async fn main() {
         .unwrap_or_else(|| "/etc/vmm/vmm-server.toml".into());
 
     // Load config
-    let cfg = ServerConfig::load(std::path::Path::new(&config_path))
+    let mut cfg = ServerConfig::load(std::path::Path::new(&config_path))
         .unwrap_or_else(|e| {
             eprintln!("Config error: {}", e);
             std::process::exit(1);
@@ -43,6 +43,59 @@ async fn main() {
         .init();
 
     tracing::info!("vmm-server v{} starting", env!("CARGO_PKG_VERSION"));
+
+    // Auto-detect BIOS search paths if not configured
+    tracing::info!("CWD: {:?}", std::env::current_dir());
+    tracing::info!("EXE: {:?}", std::env::current_exe());
+    tracing::info!("Config file: {}", config_path);
+    if cfg.vms.bios_search_paths.is_empty() {
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+
+        // Relative to executable (target/release/vmm-server → walk up to project root)
+        if let Ok(exe) = std::env::current_exe() {
+            if let Ok(exe) = std::fs::canonicalize(&exe) {
+                if let Some(exe_dir) = exe.parent() {
+                    // target/release/assets/bios (deployed alongside binary)
+                    candidates.push(exe_dir.join("assets/bios"));
+                    // target/release/../../apps/vmm-server/assets/bios (dev layout)
+                    if let Some(project_root) = exe_dir.parent().and_then(|p| p.parent()) {
+                        candidates.push(project_root.join("apps/vmm-server/assets/bios"));
+                    }
+                }
+            }
+        }
+
+        // Relative to CWD
+        if let Ok(cwd) = std::env::current_dir() {
+            candidates.push(cwd.join("assets/bios"));
+            candidates.push(cwd.join("apps/vmm-server/assets/bios"));
+            // If CWD is a subdirectory (e.g. tools/)
+            candidates.push(cwd.join("../apps/vmm-server/assets/bios"));
+        }
+
+        // Relative to config file
+        if let Some(cfg_dir) = std::path::Path::new(&config_path).parent() {
+            candidates.push(cfg_dir.join("assets/bios"));
+            candidates.push(cfg_dir.join("apps/vmm-server/assets/bios"));
+        }
+
+        for p in &candidates {
+            let has_bios = p.join("bios.bin").exists();
+            tracing::debug!("BIOS candidate: {} (exists={}, bios.bin={})", p.display(), p.exists(), has_bios);
+            if has_bios || p.join("vgabios.bin").exists() {
+                let abs = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+                tracing::info!("Auto-detected BIOS path: {}", abs.display());
+                cfg.vms.bios_search_paths.push(abs);
+                break;
+            }
+        }
+        // Also add standard system paths
+        for p in &["/usr/share/seabios", "/usr/share/OVMF", "/usr/share/qemu"] {
+            let path = std::path::PathBuf::from(p);
+            if path.exists() { cfg.vms.bios_search_paths.push(path); }
+        }
+    }
+    tracing::info!("BIOS search paths: {:?}", cfg.vms.bios_search_paths);
 
     // Ensure data directories exist
     let _ = std::fs::create_dir_all(&cfg.vms.config_dir);

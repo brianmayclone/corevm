@@ -12,7 +12,7 @@ iso_pool = "/tmp/vmm/isos"
 
 [vms]
 config_dir = "/tmp/vmm/vms"
-bios_search_paths = ["/usr/share/seabios", "/usr/share/OVMF"]
+
 
 [logging]
 level = "info"

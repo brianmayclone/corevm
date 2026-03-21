@@ -18,11 +18,18 @@ echo -e "${CYAN}=== Building vmm-server (Rust) ===${NC}"
 cargo build --release -p vmm-server
 echo -e "${GREEN}✓ vmm-server built${NC}"
 
+# Copy BIOS assets next to the binary
+BIOS_SRC="$ROOT/apps/vmm-server/assets/bios"
+BIOS_DST="$ROOT/target/release/assets/bios"
+if [ -d "$BIOS_SRC" ]; then
+    mkdir -p "$BIOS_DST"
+    cp -u "$BIOS_SRC"/*.bin "$BIOS_DST/" 2>/dev/null || true
+    echo -e "${GREEN}✓ BIOS files copied to target/release/assets/bios/${NC}"
+fi
+
 echo ""
 echo -e "${CYAN}=== Building vmm-ui (React) ===${NC}"
-cd "$ROOT/apps/vmm-ui"
-npm install --silent 2>/dev/null
-npx vite build
+(cd "$ROOT/apps/vmm-ui" && npm install --silent 2>/dev/null && npx vite build)
 echo -e "${GREEN}✓ vmm-ui built → apps/vmm-ui/dist/${NC}"
 
 if [ "$1" = "--run" ]; then
@@ -32,7 +39,7 @@ if [ "$1" = "--run" ]; then
     # Create default config if missing
     CONFIG="$ROOT/vmm-server.toml"
     if [ ! -f "$CONFIG" ]; then
-        cat > "$CONFIG" << 'EOF'
+        cat > "$CONFIG" << EOF
 [server]
 bind = "0.0.0.0"
 port = 8443
@@ -47,7 +54,6 @@ iso_pool = "/tmp/vmm/isos"
 
 [vms]
 config_dir = "/tmp/vmm/vms"
-bios_search_paths = ["/usr/share/seabios", "/usr/share/OVMF"]
 
 [logging]
 level = "info"
@@ -55,15 +61,15 @@ EOF
         echo -e "Created default config: ${CONFIG}"
     fi
 
-    # Start vmm-server in background
+    # Start vmm-server from project root (so relative paths work)
+    cd "$ROOT"
     echo -e "${CYAN}Starting vmm-server on :8443...${NC}"
     "$ROOT/target/release/vmm-server" --config "$CONFIG" &
     SERVER_PID=$!
 
-    # Start vmm-ui dev server (proxies API to :8443)
+    # Start vmm-ui dev server in a subshell (proxies API to :8443)
     echo -e "${CYAN}Starting vmm-ui dev server on :5173...${NC}"
-    cd "$ROOT/apps/vmm-ui"
-    npx vite --host &
+    (cd "$ROOT/apps/vmm-ui" && npx vite --host) &
     UI_PID=$!
 
     echo ""

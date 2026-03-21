@@ -90,6 +90,16 @@ impl EventHandler for ServerEventHandler {
         if self.last_fb_update.elapsed() >= Duration::from_millis(33) {
             update_framebuffer(handle, &self.fb);
             self.last_fb_update = Instant::now();
+
+            // Debug: log framebuffer state periodically
+            static TICK_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = TICK_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n % 100 == 0 {
+                if let Ok(fb) = self.fb.lock() {
+                    tracing::info!("[fb-tick] handle={} {}x{} text={} pixels={} dirty={}",
+                        handle, fb.width, fb.height, fb.text_mode, fb.pixels.len(), fb.dirty);
+                }
+            }
         }
     }
 }

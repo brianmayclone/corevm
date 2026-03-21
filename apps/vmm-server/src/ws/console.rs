@@ -87,23 +87,31 @@ async fn handle_socket(socket: WebSocket, vm_id: String, state: Arc<AppState>) {
 
     // Frame sender task — sends JPEG frames at ~30fps
     let send_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(33));
+        let mut interval = tokio::time::interval(Duration::from_millis(100)); // 10fps to reduce load
         let mut prev_hash: u64 = 0;
         let quality = 65u8;
+        let mut frame_num = 0u32;
 
         loop {
             interval.tick().await;
+            frame_num += 1;
 
             // Check VM is still running
             let still_running = state_for_send.vms.get(&vm_id_for_send)
                 .map(|v| v.state == VmState::Running)
                 .unwrap_or(false);
-            if !still_running { break; }
+            if !still_running {
+                tracing::info!("[ws-send] VM no longer running, exiting send loop");
+                break;
+            }
 
             let frame = {
                 let fb_lock = match fb_for_send.lock() {
                     Ok(l) => l,
-                    Err(_) => continue,
+                    Err(_) => {
+                        tracing::warn!("[ws-send] fb lock poisoned");
+                        continue;
+                    }
                 };
                 let jpeg = framebuffer_encoder::encode_frame(&fb_lock, &mut prev_hash, quality);
                 jpeg.map(|data| (fb_lock.width, fb_lock.height, data))
@@ -111,27 +119,37 @@ async fn handle_socket(socket: WebSocket, vm_id: String, state: Arc<AppState>) {
 
             match frame {
                 Some((w, h, jpeg_data)) => {
-                    // Binary frame: [0x01][width:u16LE][height:u16LE][jpeg...]
+                    if frame_num % 10 == 0 {
+                        tracing::info!("[ws-frame] sending {}x{} jpeg={}B frame#{}", w, h, jpeg_data.len(), frame_num);
+                    }
                     let mut msg = Vec::with_capacity(5 + jpeg_data.len());
                     msg.push(0x01);
                     msg.extend_from_slice(&(w as u16).to_le_bytes());
                     msg.extend_from_slice(&(h as u16).to_le_bytes());
                     msg.extend_from_slice(&jpeg_data);
-                    if sender.send(Message::Binary(msg.into())).await.is_err() {
-                        break;
+                    match sender.send(Message::Binary(msg.into())).await {
+                        Ok(_) => {},
+                        Err(e) => {
+                            tracing::info!("[ws-send] send error: {}, closing", e);
+                            break;
+                        }
                     }
                 }
                 None => {
-                    // No change — send keepalive every ~1s (every 30th frame)
-                    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                    if COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 30 == 0 {
-                        if sender.send(Message::Binary(vec![0x03].into())).await.is_err() {
-                            break;
+                    // Send keepalive every ~3s
+                    if frame_num % 30 == 0 {
+                        match sender.send(Message::Binary(vec![0x03].into())).await {
+                            Ok(_) => {},
+                            Err(e) => {
+                                tracing::info!("[ws-send] keepalive error: {}, closing", e);
+                                break;
+                            }
                         }
                     }
                 }
             }
         }
+        tracing::info!("[ws-send] send loop ended at frame#{}", frame_num);
     });
 
     // Input receiver task — receives keyboard/mouse events from client
@@ -139,12 +157,18 @@ async fn handle_socket(socket: WebSocket, vm_id: String, state: Arc<AppState>) {
         while let Some(Ok(msg)) = receiver.next().await {
             match msg {
                 Message::Text(text) => {
-                    if let Ok(input) = serde_json::from_str::<ConsoleInput>(&text.to_string()) {
-                        let (fw, fh) = {
-                            let fb_lock = fb.lock().unwrap_or_else(|e| e.into_inner());
-                            (fb_lock.width, fb_lock.height)
-                        };
-                        input_translator::inject_input(vm_handle, &input, fw, fh);
+                    let text_str: &str = &text;
+                    match serde_json::from_str::<ConsoleInput>(text_str) {
+                        Ok(input) => {
+                            let (fw, fh) = {
+                                let fb_lock = fb.lock().unwrap_or_else(|e| e.into_inner());
+                                (fb_lock.width, fb_lock.height)
+                            };
+                            input_translator::inject_input(vm_handle, &input, fw, fh);
+                        }
+                        Err(e) => {
+                            tracing::warn!("[ws-input] parse error: {} for: {}", e, text_str);
+                        }
                     }
                 }
                 Message::Close(_) => break,

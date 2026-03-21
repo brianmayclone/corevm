@@ -140,7 +140,7 @@ pub async fn start(auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_i
                 break;
             }
         }
-        let reason = control_for_watcher.exit_reason().unwrap_or_default();
+        let reason = control_for_watcher.exit_reason();
         tracing::info!("VM {} exited: {}", watcher_vm_id, if reason.is_empty() { "normal" } else { &reason });
 
         if let Some(mut vm) = watcher_state.vms.get_mut(&watcher_vm_id) {

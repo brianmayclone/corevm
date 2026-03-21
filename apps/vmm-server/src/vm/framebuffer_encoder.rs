@@ -15,24 +15,25 @@ pub fn encode_frame(
         return None;
     }
 
-    // Fast hash for delta detection — hash a sample of pixels, not all.
-    let hash = fast_hash(&fb.pixels);
-    if hash == *prev_hash {
-        return None;
-    }
-    *prev_hash = hash;
+    // Skip delta detection — always encode every frame
+    let _ = prev_hash;
 
     // Convert RGBA → RGB (JPEG doesn't support alpha)
     let w = fb.width as usize;
     let h = fb.height as usize;
+    let expected = w * h * 4;
+    if fb.pixels.len() < expected {
+        return None;
+    }
+
     let mut rgb = Vec::with_capacity(w * h * 3);
-    for chunk in fb.pixels.chunks_exact(4) {
+    for chunk in fb.pixels[..expected].chunks_exact(4) {
         rgb.push(chunk[0]); // R
         rgb.push(chunk[1]); // G
         rgb.push(chunk[2]); // B
     }
 
-    // Encode as JPEG using the `image` crate
+    // Encode as JPEG
     let mut buf: Vec<u8> = Vec::with_capacity(w * h / 4);
     {
         let mut cursor = std::io::Cursor::new(&mut buf);
@@ -45,22 +46,29 @@ pub fn encode_frame(
     Some(buf)
 }
 
-/// Fast hash: sample evenly spaced chunks across the pixel buffer.
-fn fast_hash(pixels: &[u8]) -> u64 {
+/// Hash resolution + ~4KB of pixel samples spread across the buffer.
+fn frame_hash(w: u32, h: u32, pixels: &[u8]) -> u64 {
     let mut hasher = DefaultHasher::new();
-    let len = pixels.len();
-    if len == 0 { return 0; }
+    // Always include resolution so mode switches are detected
+    w.hash(&mut hasher);
+    h.hash(&mut hasher);
+    pixels.len().hash(&mut hasher);
 
-    // Hash first 256 bytes, middle 256 bytes, last 256 bytes
-    let sample_size = 256.min(len);
-    pixels[..sample_size].hash(&mut hasher);
-    if len > sample_size * 2 {
-        let mid = len / 2;
-        let mid_start = mid.saturating_sub(sample_size / 2);
-        pixels[mid_start..mid_start + sample_size.min(len - mid_start)].hash(&mut hasher);
+    let len = pixels.len();
+    if len == 0 { return hasher.finish(); }
+
+    // Sample 16 evenly-spaced 256-byte chunks across the buffer
+    let num_samples = 16;
+    let chunk_size = 256;
+    let step = if len > num_samples * chunk_size { len / num_samples } else { 1 };
+
+    let mut offset = 0;
+    for _ in 0..num_samples {
+        if offset >= len { break; }
+        let end = (offset + chunk_size).min(len);
+        pixels[offset..end].hash(&mut hasher);
+        offset += step;
     }
-    if len > sample_size {
-        pixels[len - sample_size..].hash(&mut hasher);
-    }
+
     hasher.finish()
 }

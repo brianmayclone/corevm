@@ -50,32 +50,44 @@ export default function ConsoleCanvas({ vmId, captureKeyboard = false }: Props) 
   const [resolution, setResolution] = useState({ w: 0, h: 0 })
   const [focused, setFocused] = useState(false)
 
-  // Connect WebSocket
+  // Connect WebSocket — connects directly to backend port to bypass Vite proxy issues
   useEffect(() => {
     const token = localStorage.getItem('vmm_token')
     if (!token || !vmId) return
 
+    // In dev mode, connect directly to the backend (port 8443).
+    // In production, use the same host.
+    const isDev = window.location.port === '5173'
+    const wsHost = isDev ? `${window.location.hostname}:8443` : window.location.host
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const url = `${proto}://${window.location.host}/ws/console/${vmId}?token=${token}`
+    const url = `${proto}://${wsHost}/ws/console/${vmId}?token=${token}`
 
     let reconnectTimer: ReturnType<typeof setTimeout>
-    let alive = true
+    const aliveRef = { current: true }
 
     const connect = () => {
-      if (!alive) return
+      if (!aliveRef.current) return
+      console.log('[console] connecting to', url)
       const ws = new WebSocket(url)
       ws.binaryType = 'arraybuffer'
       wsRef.current = ws
 
-      ws.onopen = () => setConnected(true)
-
-      ws.onclose = () => {
-        setConnected(false)
-        wsRef.current = null
-        if (alive) reconnectTimer = setTimeout(connect, 2000)
+      ws.onopen = () => {
+        console.log('[console] connected')
+        setConnected(true)
       }
 
-      ws.onerror = () => ws.close()
+      ws.onclose = (ev) => {
+        console.log('[console] closed', ev.code, ev.reason)
+        setConnected(false)
+        wsRef.current = null
+        if (aliveRef.current) reconnectTimer = setTimeout(connect, 2000)
+      }
+
+      ws.onerror = (ev) => {
+        console.error('[console] error', ev)
+        ws.close()
+      }
 
       ws.onmessage = (ev) => {
         if (!(ev.data instanceof ArrayBuffer)) return
@@ -95,10 +107,13 @@ export default function ConsoleCanvas({ vmId, captureKeyboard = false }: Props) 
     connect()
 
     return () => {
-      alive = false
+      aliveRef.current = false
       clearTimeout(reconnectTimer)
-      wsRef.current?.close()
-      wsRef.current = null
+      if (wsRef.current) {
+        wsRef.current.onclose = null // prevent reconnect on intentional close
+        wsRef.current.close()
+        wsRef.current = null
+      }
     }
   }, [vmId])
 
