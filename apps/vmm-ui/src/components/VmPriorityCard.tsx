@@ -1,8 +1,13 @@
 import { Monitor, Power } from 'lucide-react'
 import ProgressBar from './ProgressBar'
+import OsIcon from './OsIcon'
+import StatusBadge from './StatusBadge'
+import type { VmState } from '../api/types'
 
 interface Props {
   name: string
+  guestOs: string
+  state: VmState
   tag: string
   cpuPercent: number
   ramPercent: number
@@ -11,7 +16,7 @@ interface Props {
   onPower?: () => void
 }
 
-export default function VmPriorityCard({ name, tag, cpuPercent, ramPercent, onClick, onConsole, onPower }: Props) {
+export default function VmPriorityCard({ name, guestOs, state, tag, cpuPercent, ramPercent, onClick, onConsole, onPower }: Props) {
   return (
     <div
       onClick={onClick}
@@ -20,11 +25,12 @@ export default function VmPriorityCard({ name, tag, cpuPercent, ramPercent, onCl
     >
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-vmm-bg-alt flex items-center justify-center">
-            <Monitor size={14} className="text-vmm-text-muted" />
-          </div>
+          <OsIcon guestOs={guestOs} size={36} />
           <div>
-            <div className="text-sm font-semibold text-vmm-text">{name}</div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold text-vmm-text">{name}</span>
+              <StatusBadge state={state} size="sm" />
+            </div>
             <div className="text-[10px] text-vmm-text-muted font-mono tracking-wider">{tag}</div>
           </div>
         </div>

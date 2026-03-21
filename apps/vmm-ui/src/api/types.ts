@@ -51,6 +51,12 @@ export interface VmConfig {
   disk_cache_mode: string
 }
 
+export interface DiskInfoApi {
+  path: string
+  size_bytes: number
+  used_bytes: number
+}
+
 export interface VmDetail {
   id: string
   name: string
@@ -58,6 +64,7 @@ export interface VmDetail {
   config: VmConfig
   owner_id: number
   created_at: string
+  disks: DiskInfoApi[]
 }
 
 export interface StoragePool {
@@ -80,6 +87,7 @@ export interface DiskImage {
   format: string
   pool_id: number | null
   vm_id: string | null
+  vm_name: string | null
   created_at: string
 }
 
@@ -141,4 +149,26 @@ export interface PoolFile {
   path: string
   size_bytes: number
   is_dir: boolean
+}
+
+// ── Network ──────────────────────────────────────────────────────────────
+
+export interface NetworkInterface {
+  name: string
+  kind: string
+  mac: string
+  ipv4: string | null
+  ipv6: string | null
+  mtu: number
+  state: string
+  speed_mbps: number | null
+  rx_bytes: number
+  tx_bytes: number
+}
+
+export interface NetworkStats {
+  total_interfaces: number
+  active_interfaces: number
+  total_rx_bytes: number
+  total_tx_bytes: number
 }

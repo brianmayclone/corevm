@@ -8,6 +8,12 @@ import VmDetail from './pages/VmDetail'
 import VmCreate from './pages/VmCreate'
 import VmConsole from './pages/VmConsole'
 import Storage from './pages/Storage'
+import Networks from './pages/Networks'
+import NetworkOverview from './pages/NetworkOverview'
+import NetworkNat from './pages/NetworkNat'
+import NetworkHostOnly from './pages/NetworkHostOnly'
+import NetworkAdapters from './pages/NetworkAdapters'
+import NetworkVlans from './pages/NetworkVlans'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore()
@@ -30,7 +36,13 @@ export default function App() {
           <Route path="vms/:id/console" element={<VmConsole />} />
           <Route path="vms/:id/settings" element={<VmCreate />} />
           <Route path="storage" element={<Storage />} />
-          <Route path="networks" element={<Placeholder title="Networks" />} />
+          <Route path="networks" element={<Networks />}>
+            <Route path="overview" element={<NetworkOverview />} />
+            <Route path="nat" element={<NetworkNat />} />
+            <Route path="host-only" element={<NetworkHostOnly />} />
+            <Route path="adapters" element={<NetworkAdapters />} />
+            <Route path="vlans" element={<NetworkVlans />} />
+          </Route>
           <Route path="settings" element={<Placeholder title="Settings" />} />
         </Route>
       </Routes>

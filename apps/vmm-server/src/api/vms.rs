@@ -22,6 +22,13 @@ pub struct VmSummary {
 }
 
 #[derive(Serialize)]
+pub struct DiskInfo {
+    pub path: String,
+    pub size_bytes: u64,
+    pub used_bytes: u64,
+}
+
+#[derive(Serialize)]
 pub struct VmDetail {
     pub id: String,
     pub name: String,
@@ -29,6 +36,7 @@ pub struct VmDetail {
     pub config: VmConfig,
     pub owner_id: i64,
     pub created_at: String,
+    pub disks: Vec<DiskInfo>,
 }
 
 /// GET /api/vms
@@ -67,7 +75,25 @@ pub async fn get(_auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_id
     let db = state.db.lock().unwrap();
     let r = VmService::get(&db, &vm_id).map_err(|e| AppError(StatusCode::NOT_FOUND, e))?;
     let vm_state = state.vms.get(&r.id).map(|v| v.state).unwrap_or(VmState::Stopped);
-    Ok(Json(VmDetail { id: r.id, name: r.name, state: vm_state, config: r.config, owner_id: r.owner_id, created_at: r.created_at }))
+
+    // Get real disk sizes
+    let disks: Vec<DiskInfo> = r.config.disk_images.iter().map(|path| {
+        let meta = std::fs::metadata(path);
+        let size_bytes = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        // For raw images, used = allocated file size on disk (sparse-aware)
+        let used_bytes = {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                meta.as_ref().map(|m| m.blocks() * 512).unwrap_or(size_bytes)
+            }
+            #[cfg(not(unix))]
+            { size_bytes }
+        };
+        DiskInfo { path: path.clone(), size_bytes, used_bytes }
+    }).collect();
+
+    Ok(Json(VmDetail { id: r.id, name: r.name, state: vm_state, config: r.config, owner_id: r.owner_id, created_at: r.created_at, disks }))
 }
 
 /// PUT /api/vms/:id

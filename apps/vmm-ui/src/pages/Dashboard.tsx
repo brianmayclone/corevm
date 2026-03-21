@@ -1,25 +1,52 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Heart, Cpu, MemoryStick, HardDrive, Play, AlertTriangle, Activity } from 'lucide-react'
+import { Heart, Cpu, MemoryStick, HardDrive, Play, AlertTriangle, Activity, Upload, Layout, Network } from 'lucide-react'
 import api from '../api/client'
 import { useVmStore } from '../stores/vmStore'
-import type { DashboardStats, AuditEntry } from '../api/types'
+import type { DashboardStats, AuditEntry, NetworkStats } from '../api/types'
 import MetricCard from '../components/MetricCard'
 import VmPriorityCard from '../components/VmPriorityCard'
-import ActivityRow from '../components/ActivityRow'
 import Card from '../components/Card'
+import SectionLabel from '../components/SectionLabel'
 import { formatBytes, formatRam } from '../utils/format'
+
+/** Format audit entry into human-readable log line. */
+function formatLogEntry(a: AuditEntry): string {
+  const time = a.created_at.includes('T') ? a.created_at.split('T')[1]?.slice(0, 8) : a.created_at
+  const action = a.action
+    .replace('vm.started', "VM started successfully")
+    .replace('vm.stopped', "VM shutdown completed")
+    .replace('vm.force_stopped', "VM force-stopped")
+    .replace('vm.created', "VM created")
+    .replace('vm.deleted', "VM deleted")
+    .replace('user.login', "User authenticated")
+    .replace('pool.created', "Storage pool added")
+    .replace('pool.deleted', "Storage pool removed")
+    .replace('image.created', "Disk image created")
+    .replace('image.deleted', "Disk image deleted")
+
+  const detail = a.details ? ` '${a.details}'` : ''
+  const target = a.target_id ? ` (${a.target_id.slice(0, 8)})` : ''
+  return `[${time}] ${action}${detail}${target}`
+}
+
+/** Is this a warning-level log entry? */
+function isWarning(a: AuditEntry): boolean {
+  return a.action.includes('force') || a.action.includes('delete') || a.action.includes('error')
+}
 
 export default function Dashboard() {
   const { vms, fetchVms, startVm, stopVm } = useVmStore()
   const [stats, setStats] = useState<DashboardStats | null>(null)
+  const [netStats, setNetStats] = useState<NetworkStats | null>(null)
   const [activities, setActivities] = useState<AuditEntry[]>([])
   const navigate = useNavigate()
 
   const refresh = () => {
     fetchVms()
     api.get<DashboardStats>('/api/system/stats').then(({ data }) => setStats(data))
-    api.get<AuditEntry[]>('/api/system/activity?limit=10').then(({ data }) => setActivities(data))
+    api.get<NetworkStats>('/api/network/stats').then(({ data }) => setNetStats(data)).catch(() => {})
+    api.get<AuditEntry[]>('/api/system/activity?limit=8').then(({ data }) => setActivities(data))
   }
 
   useEffect(() => {
@@ -33,114 +60,114 @@ export default function Dashboard() {
   const ramPercent = totalRamMb > 0 ? Math.round((usedRamMb / totalRamMb) * 100) : 0
   const totalDisk = stats?.total_disk_bytes || 0
   const usedDisk = stats?.used_disk_bytes || 0
-  const diskPercent = totalDisk > 0 ? Math.round((usedDisk / totalDisk) * 100) : 0
   const runningVms = stats?.running_vms || 0
   const totalVms = stats?.total_vms || 0
   const healthPercent = totalVms > 0 ? Math.round((runningVms / totalVms) * 100) : 100
 
   return (
-    <div className="space-y-6">
-      {/* ── Top Metrics (REAL DATA) ───────────────────────────────── */}
-      <div className="grid grid-cols-4 gap-4">
-        <MetricCard label="Cluster Health" value={`${healthPercent}%`}
-          subtitle={`${runningVms}/${totalVms} VMs running`}
+    <div className="flex flex-col h-full min-h-0">
+      {/* ── Top Metrics ─────────────────────────────────────────────── */}
+      <div className="grid grid-cols-3 gap-4 mb-5 flex-shrink-0">
+        <MetricCard label="System Performance" value={healthPercent > 80 ? 'Optimal State' : `${healthPercent}%`}
+          subtitle={`${formatRam(totalRamMb)} Total RAM • ${runningVms}/${totalVms} Active`}
           icon={<Heart size={20} />}
           progress={healthPercent}
-          progressColor={healthPercent > 80 ? 'bg-vmm-success' : healthPercent > 50 ? 'bg-vmm-warning' : 'bg-vmm-danger'} />
-        <MetricCard label="CPU Cores" value={`${stats?.cpu_count || '-'}`}
-          subtitle="Host processors"
-          icon={<Cpu size={20} />}
-          progress={24} />
-        <MetricCard label="Memory" value={formatRam(usedRamMb)}
-          subtitle={`/ ${formatRam(totalRamMb)}`}
-          icon={<MemoryStick size={20} />}
-          progress={ramPercent} />
-        <MetricCard label="Storage" value={formatBytes(usedDisk)}
-          subtitle={`/ ${formatBytes(totalDisk)}`}
+          progressColor={healthPercent > 80 ? 'bg-vmm-success' : 'bg-vmm-warning'} />
+        <MetricCard label="Network Traffic" value={formatBytes(netStats?.total_rx_bytes || 0)}
+          subtitle="Total ingress"
+          icon={<Network size={20} />}
+          progress={42} />
+        <MetricCard label="Storage Pools" value={formatBytes(totalDisk)}
+          subtitle={`${formatBytes(usedDisk)} used`}
           icon={<HardDrive size={20} />}
-          progress={diskPercent} />
+          progress={totalDisk > 0 ? Math.round((usedDisk / totalDisk) * 100) : 0} />
       </div>
 
-      {/* ── VMs + Activity ────────────────────────────────────────── */}
-      <div className="grid grid-cols-[1fr_340px] gap-6">
-        {/* Left: VM List */}
-        <div>
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-lg font-bold text-vmm-text">
-              Virtual Machines
-              <span className="ml-2 text-sm font-normal text-vmm-text-muted">({totalVms})</span>
-            </h2>
-          </div>
-
-          {vms.length === 0 ? (
-            <Card>
-              <div className="text-vmm-text-muted text-sm py-8 text-center">
-                No virtual machines yet. Click "Create VM" to get started.
-              </div>
-            </Card>
-          ) : (
-            <div className="space-y-3">
-              {vms.map((vm) => (
-                <VmPriorityCard
-                  key={vm.id}
-                  name={vm.name}
-                  tag={`${vm.cpu_cores} vCPU • ${formatRam(vm.ram_mb)} • ${vm.state.toUpperCase()}`}
-                  cpuPercent={vm.state === 'running' ? Math.floor(Math.random() * 60 + 5) : 0}
-                  ramPercent={vm.state === 'running' ? Math.round((vm.ram_mb / (totalRamMb || 1)) * 100) : 0}
-                  onClick={() => navigate(`/vms/${vm.id}`)}
-                  onConsole={() => navigate(`/vms/${vm.id}/console`)}
-                  onPower={() => vm.state === 'stopped' ? startVm(vm.id) : stopVm(vm.id)}
-                />
-              ))}
-            </div>
-          )}
+      {/* ── Instances ───────────────────────────────────────────────── */}
+      <div className="flex-1 min-h-0 mb-5">
+        <div className="flex items-center justify-between mb-3 flex-shrink-0">
+          <h2 className="text-lg font-bold text-vmm-text">
+            Instances
+            <span className="ml-2 text-sm font-normal text-vmm-text-muted">({totalVms})</span>
+          </h2>
         </div>
 
-        {/* Right: Recent Activities + Network */}
-        <div className="space-y-5">
-          <div>
-            <h2 className="text-lg font-bold text-vmm-text mb-3">Recent Activity</h2>
-            <Card padding={false}>
-              {activities.length > 0 ? activities.map((a) => {
-                const icon = a.action.includes('start') ? <Play size={14} />
-                  : a.action.includes('stop') ? <AlertTriangle size={14} />
-                  : <Activity size={14} />
-                const severity = a.action.includes('start') ? 'success' as const
-                  : a.action.includes('stop') || a.action.includes('force') ? 'danger' as const
-                  : 'info' as const
-                return (
-                  <ActivityRow key={a.id} icon={icon} severity={severity}
-                    title={<><strong>{a.action}</strong>{a.details ? ` — ${a.details}` : ''}{a.target_id ? ` (${a.target_id.slice(0, 8)}...)` : ''}</>}
-                    subtitle={a.created_at} />
-                )
-              }) : (
-                <div className="px-5 py-6 text-sm text-vmm-text-muted text-center">No recent activity</div>
-              )}
-            </Card>
-          </div>
-
+        {vms.length === 0 ? (
           <Card>
-            <h3 className="text-base font-semibold text-vmm-text mb-4">System Overview</h3>
-            <div className="space-y-3 text-sm">
-              <div className="flex justify-between">
-                <span className="text-vmm-text-muted">Platform</span>
-                <span className="text-vmm-text font-mono">{stats ? `${stats.cpu_count}-core` : '—'}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-vmm-text-muted">Total VMs</span>
-                <span className="text-vmm-text">{totalVms}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-vmm-text-muted">Running</span>
-                <span className="text-vmm-success">{runningVms}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-vmm-text-muted">Stopped</span>
-                <span className="text-vmm-danger">{stats?.stopped_vms || 0}</span>
-              </div>
+            <div className="text-vmm-text-muted text-sm py-8 text-center">
+              No virtual machines yet. Click "Create VM" to get started.
             </div>
           </Card>
-        </div>
+        ) : (
+          <div className="grid grid-cols-3 gap-3 overflow-y-auto max-h-[calc(100vh-480px)]">
+            {vms.map((vm) => (
+              <VmPriorityCard
+                key={vm.id}
+                name={vm.name}
+                guestOs={vm.guest_os}
+                state={vm.state}
+                tag={`${vm.cpu_cores} vCPU • ${formatRam(vm.ram_mb)}`}
+                cpuPercent={vm.state === 'running' ? Math.floor(Math.random() * 60 + 5) : 0}
+                ramPercent={vm.state === 'running' ? Math.round((vm.ram_mb / (totalRamMb || 1)) * 100) : 0}
+                onClick={() => navigate(`/vms/${vm.id}`)}
+                onConsole={() => navigate(`/vms/${vm.id}/console`)}
+                onPower={() => vm.state === 'stopped' ? startVm(vm.id) : stopVm(vm.id)}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ── System Journal + Quick Deploy (bottom) ──────────────────── */}
+      <div className="grid grid-cols-[1fr_300px] gap-5 flex-shrink-0">
+        {/* System Journal */}
+        <Card padding={false}>
+          <div className="flex items-center justify-between px-5 py-3 border-b border-vmm-border">
+            <div className="flex items-center gap-2">
+              <SectionLabel>System Journal</SectionLabel>
+              <span className="flex items-center gap-1.5 text-[10px] text-vmm-success">
+                <span className="w-1.5 h-1.5 rounded-full bg-vmm-success animate-pulse" />
+                Live monitoring enabled
+              </span>
+            </div>
+            <button className="text-xs text-vmm-text-muted hover:text-vmm-text cursor-pointer">Clear Logs</button>
+          </div>
+          <div className="px-5 py-3 font-mono text-xs leading-6 max-h-[180px] overflow-y-auto text-vmm-text-dim">
+            {activities.length > 0 ? activities.map((a) => (
+              <div key={a.id} className={isWarning(a) ? 'text-vmm-warning font-bold' : ''}>
+                {formatLogEntry(a)}
+              </div>
+            )) : (
+              <div className="text-vmm-text-muted">No log entries yet.</div>
+            )}
+          </div>
+        </Card>
+
+        {/* Quick Deploy */}
+        <Card>
+          <SectionLabel className="mb-3">Quick Deploy</SectionLabel>
+          <div className="grid grid-cols-2 gap-3 mb-3">
+            <button
+              onClick={() => navigate('/storage')}
+              className="flex flex-col items-center gap-2 p-4 bg-vmm-bg-alt rounded-lg hover:bg-vmm-surface-hover transition-colors cursor-pointer"
+            >
+              <Upload size={20} className="text-vmm-accent" />
+              <span className="text-xs text-vmm-text-dim">Upload ISO</span>
+            </button>
+            <button
+              onClick={() => navigate('/vms/create')}
+              className="flex flex-col items-center gap-2 p-4 bg-vmm-bg-alt rounded-lg hover:bg-vmm-surface-hover transition-colors cursor-pointer"
+            >
+              <Layout size={20} className="text-vmm-accent" />
+              <span className="text-xs text-vmm-text-dim">Templates</span>
+            </button>
+          </div>
+          <div className="bg-vmm-accent/5 border border-vmm-accent/20 rounded-lg p-3">
+            <p className="text-[11px] text-vmm-accent italic">
+              "Pro-tip: Use snapshots before major kernel upgrades to ensure 100% recovery."
+            </p>
+          </div>
+        </Card>
       </div>
     </div>
   )

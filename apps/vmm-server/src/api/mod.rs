@@ -9,6 +9,7 @@ pub mod system;
 pub mod users;
 pub mod vms;
 pub mod storage;
+pub mod network;
 
 /// Build the complete API router.
 pub fn router() -> Router<Arc<AppState>> {
@@ -45,6 +46,9 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/storage/isos", get(storage::list_isos))
         .route("/api/storage/isos/upload", post(storage::upload_iso))
         .route("/api/storage/isos/{id}", delete(storage::delete_iso))
+        // Network
+        .route("/api/network/interfaces", get(network::list_interfaces))
+        .route("/api/network/stats", get(network::network_stats))
         // WebSocket console
         .route("/ws/console/{vm_id}", get(crate::ws::console::handler))
 }

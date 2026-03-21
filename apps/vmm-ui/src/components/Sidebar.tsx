@@ -1,14 +1,47 @@
-import { NavLink } from 'react-router-dom'
-import { Monitor, HardDrive, Network, Settings, Zap, LifeBuoy, FileText } from 'lucide-react'
+import { useState } from 'react'
+import { NavLink, useLocation } from 'react-router-dom'
+import { Monitor, HardDrive, Network, Settings, Zap, LifeBuoy, FileText, ChevronDown, Cable, Layers, Globe, Unplug } from 'lucide-react'
 
-const navItems = [
+interface NavItem {
+  to: string
+  icon: React.ElementType
+  label: string
+  children?: { to: string; icon: React.ElementType; label: string }[]
+}
+
+const navItems: NavItem[] = [
   { to: '/', icon: Monitor, label: 'My Machines' },
   { to: '/storage', icon: HardDrive, label: 'Storage' },
-  { to: '/networks', icon: Network, label: 'Networks' },
+  {
+    to: '/networks', icon: Network, label: 'Networks',
+    children: [
+      { to: '/networks/overview', icon: Network, label: 'Overview' },
+      { to: '/networks/nat', icon: Globe, label: 'NAT Bridges' },
+      { to: '/networks/host-only', icon: Unplug, label: 'Host-Only' },
+      { to: '/networks/adapters', icon: Cable, label: 'Adapter Bindings' },
+      { to: '/networks/vlans', icon: Layers, label: 'VLAN Config' },
+    ],
+  },
   { to: '/settings', icon: Settings, label: 'Settings' },
 ]
 
 export default function Sidebar() {
+  const location = useLocation()
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(
+    () => new Set(navItems.filter(i => i.children && location.pathname.startsWith(i.to)).map(i => i.to))
+  )
+
+  const toggleSection = (to: string) => {
+    setExpandedSections((prev) => {
+      const next = new Set(prev)
+      if (next.has(to)) next.delete(to)
+      else next.add(to)
+      return next
+    })
+  }
+
+  const isNetworkActive = location.pathname.startsWith('/networks')
+
   return (
     <aside className="w-56 bg-vmm-sidebar border-r border-vmm-border flex flex-col h-full">
       {/* Branding */}
@@ -26,23 +59,80 @@ export default function Sidebar() {
 
       {/* Navigation */}
       <nav className="flex-1 px-3 space-y-0.5">
-        {navItems.map(({ to, icon: Icon, label }) => (
-          <NavLink
-            key={to}
-            to={to}
-            end={to === '/'}
-            className={({ isActive }) =>
-              `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors
-              ${isActive
-                ? 'bg-vmm-sidebar-active text-vmm-accent border-l-2 border-vmm-accent'
-                : 'text-vmm-text-dim hover:text-vmm-text hover:bg-vmm-surface-hover'
-              }`
-            }
-          >
-            <Icon size={18} />
-            {label}
-          </NavLink>
-        ))}
+        {navItems.map((item) => {
+          const Icon = item.icon
+          const hasChildren = !!item.children
+          const isExpanded = expandedSections.has(item.to)
+          const isParentActive = hasChildren && location.pathname.startsWith(item.to)
+
+          if (hasChildren) {
+            return (
+              <div key={item.to}>
+                {/* Parent with expand toggle */}
+                <button
+                  onClick={() => toggleSection(item.to)}
+                  className={`w-full flex items-center justify-between gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer
+                    ${isParentActive
+                      ? 'bg-vmm-sidebar-active text-vmm-accent border-l-2 border-vmm-accent'
+                      : 'text-vmm-text-dim hover:text-vmm-text hover:bg-vmm-surface-hover'
+                    }`}
+                >
+                  <span className="flex items-center gap-3">
+                    <Icon size={18} />
+                    {item.label}
+                  </span>
+                  <ChevronDown
+                    size={14}
+                    className={`transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}
+                  />
+                </button>
+
+                {/* Children */}
+                {isExpanded && (
+                  <div className="mt-0.5 ml-4 pl-3 border-l border-vmm-border space-y-0.5">
+                    {item.children!.map((child) => {
+                      const ChildIcon = child.icon
+                      return (
+                        <NavLink
+                          key={child.to}
+                          to={child.to}
+                          className={({ isActive }) =>
+                            `flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium transition-colors
+                            ${isActive
+                              ? 'bg-vmm-sidebar-active text-vmm-accent'
+                              : 'text-vmm-text-muted hover:text-vmm-text hover:bg-vmm-surface-hover'
+                            }`
+                          }
+                        >
+                          <ChildIcon size={15} />
+                          {child.label}
+                        </NavLink>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            )
+          }
+
+          return (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.to === '/'}
+              className={({ isActive }) =>
+                `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors
+                ${isActive
+                  ? 'bg-vmm-sidebar-active text-vmm-accent border-l-2 border-vmm-accent'
+                  : 'text-vmm-text-dim hover:text-vmm-text hover:bg-vmm-surface-hover'
+                }`
+              }
+            >
+              <Icon size={18} />
+              {item.label}
+            </NavLink>
+          )
+        })}
       </nav>
 
       {/* Upgrade banner */}

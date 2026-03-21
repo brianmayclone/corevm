@@ -92,18 +92,22 @@ pub struct DiskImage {
     pub pool_id: Option<i64>,
     pub vm_id: Option<String>,
     pub created_at: String,
+    pub vm_name: Option<String>,
 }
 
 impl StorageService {
     pub fn list_images(db: &Connection) -> Result<Vec<DiskImage>, String> {
         let mut stmt = db.prepare(
-            "SELECT id, name, path, size_bytes, format, pool_id, vm_id, created_at FROM disk_images ORDER BY name"
+            "SELECT d.id, d.name, d.path, d.size_bytes, d.format, d.pool_id, d.vm_id, d.created_at, \
+             v.name AS vm_name \
+             FROM disk_images d LEFT JOIN vms v ON d.vm_id = v.id ORDER BY d.name"
         ).map_err(|e| e.to_string())?;
         let images = stmt.query_map([], |row| {
             Ok(DiskImage {
                 id: row.get(0)?, name: row.get(1)?, path: row.get(2)?,
                 size_bytes: row.get(3)?, format: row.get(4)?,
                 pool_id: row.get(5)?, vm_id: row.get(6)?, created_at: row.get(7)?,
+                vm_name: row.get(8)?,
             })
         }).map_err(|e| e.to_string())?
         .filter_map(|r| r.ok()).collect();

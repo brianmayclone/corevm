@@ -172,28 +172,40 @@ export default function ConsoleCanvas({ vmId, captureKeyboard = false }: Props) 
   // Mouse input — send both absolute (USB tablet) and relative (PS/2)
   const lastMouseRef = useRef<{ x: number; y: number } | null>(null)
 
-  const sendMouse = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+  const getMousePos = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current
-    if (!canvas || !wsRef.current) return
+    if (!canvas) return null
     const rect = canvas.getBoundingClientRect()
     const x = Math.round(((e.clientX - rect.left) / rect.width) * canvas.width)
     const y = Math.round(((e.clientY - rect.top) / rect.height) * canvas.height)
+    return { x, y }
+  }, [])
+
+  const sendMouse = useCallback((e: React.MouseEvent<HTMLCanvasElement>, forceButton?: boolean) => {
+    const ws = wsRef.current
+    if (!ws) return
+    const pos = getMousePos(e)
+    if (!pos) return
     const buttons = e.buttons & 0x07
 
     // Send absolute position (for USB tablet mode)
-    wsRef.current.send(JSON.stringify({ type: 'mouse_move', x, y, buttons }))
+    ws.send(JSON.stringify({ type: 'mouse_move', x: pos.x, y: pos.y, buttons }))
 
-    // Also send relative delta (for PS/2 mouse mode)
+    // Send relative delta (for PS/2 mouse mode)
     const last = lastMouseRef.current
     if (last) {
-      const dx = x - last.x
-      const dy = -(y - last.y)  // PS/2: positive Y = up, browser: positive Y = down
-      if (dx !== 0 || dy !== 0) {
-        wsRef.current.send(JSON.stringify({ type: 'mouse_rel', dx, dy, buttons }))
+      const dx = pos.x - last.x
+      const dy = -(pos.y - last.y)  // PS/2: positive Y = up, browser: positive Y = down
+      // Send if there's movement OR if it's a button press/release event
+      if (dx !== 0 || dy !== 0 || forceButton) {
+        ws.send(JSON.stringify({ type: 'mouse_rel', dx, dy, buttons }))
       }
+    } else if (forceButton) {
+      // First event is a click — send with zero delta
+      ws.send(JSON.stringify({ type: 'mouse_rel', dx: 0, dy: 0, buttons }))
     }
-    lastMouseRef.current = { x, y }
-  }, [])
+    lastMouseRef.current = pos
+  }, [getMousePos])
 
   const sendWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault()
@@ -223,14 +235,14 @@ export default function ConsoleCanvas({ vmId, captureKeyboard = false }: Props) 
       <canvas
         ref={canvasRef}
         style={aspectStyle}
-        className="w-full h-auto block cursor-crosshair"
-        onMouseMove={sendMouse}
-        onMouseDown={(e) => { sendMouse(e); setFocused(true) }}
-        onMouseUp={sendMouse}
+        className="w-full h-auto block cursor-none"
+        onMouseMove={(e) => sendMouse(e)}
+        onMouseDown={(e) => { sendMouse(e, true); setFocused(true) }}
+        onMouseUp={(e) => sendMouse(e, true)}
         onWheel={sendWheel}
         onContextMenu={(e) => e.preventDefault()}
         onFocus={() => setFocused(true)}
-        onBlur={() => setFocused(false)}
+        onBlur={() => { setFocused(false); lastMouseRef.current = null }}
         tabIndex={0}
       />
 
