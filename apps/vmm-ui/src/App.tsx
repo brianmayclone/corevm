@@ -46,6 +46,7 @@ import DrsPage from './pages/DrsPage'
 import AlarmsList from './pages/AlarmsList'
 import NotificationsPage from './pages/NotificationsPage'
 import SdnNetworks from './pages/SdnNetworks'
+import SdnNetworkDetail from './pages/SdnNetworkDetail'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore()
@@ -126,6 +127,12 @@ export default function App() {
           <Route path="operations/alarms" element={<AlarmsList />} />
           <Route path="operations/notifications" element={<NotificationsPage />} />
           <Route path="cluster/networks" element={<SdnNetworks />} />
+          <Route path="cluster/networks/:id" element={<SdnNetworkDetail />} />
+          {/* SDN network routes (accessible from Networks sidebar section) */}
+          <Route path="networks/overview" element={<SdnNetworks />} />
+          <Route path="networks/dhcp" element={<SdnNetworks />} />
+          <Route path="networks/dns" element={<SdnNetworks />} />
+          <Route path="networks/pxe" element={<SdnNetworks />} />
         </Route>
       </Routes>
     </BrowserRouter>

@@ -418,6 +418,19 @@ CREATE TABLE IF NOT EXISTS dns_records (
     UNIQUE(network_service_id, record_type, name)
 );
 
+-- PXE boot entries (ISOs linked to PXE boot menu per network)
+CREATE TABLE IF NOT EXISTS pxe_boot_entries (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    network_id      INTEGER NOT NULL REFERENCES virtual_networks(id) ON DELETE CASCADE,
+    name            TEXT NOT NULL,           -- Menu label (e.g. "Ubuntu 24.04 Server")
+    iso_id          TEXT REFERENCES isos(id) ON DELETE SET NULL,
+    iso_path        TEXT NOT NULL DEFAULT '', -- Direct path if no ISO record
+    boot_args       TEXT NOT NULL DEFAULT '', -- Kernel args (e.g. "auto=true")
+    sort_order      INTEGER NOT NULL DEFAULT 0,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- ═══════════════════════════════════════════════════════════════
 -- LDAP / ACTIVE DIRECTORY INTEGRATION
 -- ═══════════════════════════════════════════════════════════════

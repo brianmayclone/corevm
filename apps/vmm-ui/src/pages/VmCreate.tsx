@@ -90,6 +90,11 @@ export default function VmCreate() {
   const [selectedClusterId, setSelectedClusterId] = useState('')
   const [selectedHostId, setSelectedHostId] = useState('')  // '' = auto-placement
 
+  // SDN network selection (cluster mode)
+  interface SdnNetwork { id: number; cluster_id: string; name: string; subnet: string; gateway: string }
+  const [sdnNetworks, setSdnNetworks] = useState<SdnNetwork[]>([])
+  const [selectedNetworkId, setSelectedNetworkId] = useState<number | null>(null)
+
   const [form, setForm] = useState<VmConfig>({
     uuid: '', name: '', guest_os: 'other', guest_arch: 'x64',
     ram_mb: 2048, cpu_cores: 2, disk_images: [], iso_image: '',
@@ -121,6 +126,7 @@ export default function VmCreate() {
         if (data.length > 0 && !selectedClusterId) setSelectedClusterId(data[0].id)
       })
       api.get<Host[]>('/api/hosts').then(({ data }) => setHosts(data))
+      api.get<SdnNetwork[]>('/api/networks').then(({ data }) => setSdnNetworks(data))
     }
   }, [isCluster])
 
@@ -301,35 +307,66 @@ export default function VmCreate() {
 
       {/* ── Network ──────────────────────────────────────────────── */}
       {activeTab === 'network' && (
-        <SectionCard icon={<Monitor size={18} />} title="Network Adapter">
-          <Toggle label="Enable Networking" description="Connect a virtual NIC to the VM." enabled={form.net_enabled} onChange={(v) => set('net_enabled', v)} />
-          {form.net_enabled && (
-            <div className="mt-4 space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-                <FormField label="NIC Model">
-                  <Select options={nicOptions} value={form.nic_model} onChange={(e) => set('nic_model', e.target.value)} />
-                </FormField>
-                <FormField label="Network Mode">
-                  <Select options={netModeOptions} value={form.net_mode} onChange={(e) => set('net_mode', e.target.value)} />
-                </FormField>
-              </div>
-              {form.net_mode === 'bridge' && (
-                <FormField label="Host Bridge Interface">
-                  <TextInput value={form.net_host_nic} onChange={(e) => set('net_host_nic', e.target.value)} placeholder="br0" />
-                </FormField>
-              )}
-              <FormField label="MAC Address">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <Select options={[{ value: 'dynamic', label: 'Dynamic (auto)' }, { value: 'static', label: 'Static' }]}
-                    value={form.mac_mode} onChange={(e) => set('mac_mode', e.target.value)} />
-                  {form.mac_mode === 'static' && (
-                    <TextInput value={form.mac_address} onChange={(e) => set('mac_address', e.target.value)} placeholder="52:54:00:XX:XX:XX" />
+        <div className="space-y-5">
+          <SectionCard icon={<Monitor size={18} />} title="Network Adapter">
+            <Toggle label="Enable Networking" description="Connect a virtual NIC to the VM." enabled={form.net_enabled} onChange={(v) => set('net_enabled', v)} />
+            {form.net_enabled && (
+              <div className="mt-4 space-y-4">
+                {/* SDN network selector — cluster mode only */}
+                {isCluster && (
+                  <FormField label="Virtual Network (SDN)">
+                    <Select
+                      options={[
+                        { value: '', label: 'Default (NAT/SLIRP — 10.0.2.0/24)' },
+                        ...sdnNetworks
+                          .filter(n => !selectedClusterId || n.cluster_id === selectedClusterId)
+                          .map(n => ({ value: String(n.id), label: `${n.name} (${n.subnet})` }))
+                      ]}
+                      value={selectedNetworkId ? String(selectedNetworkId) : ''}
+                      onChange={(e) => {
+                        const id = e.target.value ? parseInt(e.target.value) : null
+                        setSelectedNetworkId(id)
+                        // Auto-set network mode to UserMode for SDN
+                        if (id) set('net_mode', 'usermode')
+                      }}
+                    />
+                    {selectedNetworkId && (
+                      <p className="text-xs text-vmm-text-muted mt-1">
+                        The VM will receive its IP, DNS, and gateway from this SDN network's DHCP/DNS services.
+                      </p>
+                    )}
+                  </FormField>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                  <FormField label="NIC Model">
+                    <Select options={nicOptions} value={form.nic_model} onChange={(e) => set('nic_model', e.target.value)} />
+                  </FormField>
+                  {/* Hide network mode in cluster mode when SDN is selected */}
+                  {(!isCluster || !selectedNetworkId) && (
+                    <FormField label="Network Mode">
+                      <Select options={netModeOptions} value={form.net_mode} onChange={(e) => set('net_mode', e.target.value)} />
+                    </FormField>
                   )}
                 </div>
-              </FormField>
-            </div>
-          )}
-        </SectionCard>
+                {form.net_mode === 'bridge' && !selectedNetworkId && (
+                  <FormField label="Host Bridge Interface">
+                    <TextInput value={form.net_host_nic} onChange={(e) => set('net_host_nic', e.target.value)} placeholder="br0" />
+                  </FormField>
+                )}
+                <FormField label="MAC Address">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <Select options={[{ value: 'dynamic', label: 'Dynamic (auto)' }, { value: 'static', label: 'Static' }]}
+                      value={form.mac_mode} onChange={(e) => set('mac_mode', e.target.value)} />
+                    {form.mac_mode === 'static' && (
+                      <TextInput value={form.mac_address} onChange={(e) => set('mac_address', e.target.value)} placeholder="52:54:00:XX:XX:XX" />
+                    )}
+                  </div>
+                </FormField>
+              </div>
+            )}
+          </SectionCard>
+        </div>
       )}
 
       {/* ── Storage ──────────────────────────────────────────────── */}

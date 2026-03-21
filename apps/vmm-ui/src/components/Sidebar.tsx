@@ -55,7 +55,6 @@ const standaloneNavItems: NavItem[] = [
 
 /** Additional navigation items when connected to vmm-cluster */
 const clusterNavItems: NavItem[] = [
-  // Top-level overview — cluster-wide dashboard
   { to: '/', icon: LayoutDashboard, label: 'Overview' },
   {
     to: '/cluster', icon: Workflow, label: 'Cluster',
@@ -63,8 +62,6 @@ const clusterNavItems: NavItem[] = [
       { to: '/cluster/hosts', icon: Server, label: 'Hosts' },
       { to: '/cluster/settings', icon: Settings, label: 'Clusters' },
       { to: '/cluster/drs', icon: Activity, label: 'DRS' },
-      { to: '/cluster/datastores', icon: Database, label: 'Datastores' },
-      { to: '/cluster/networks', icon: Network, label: 'Networks (SDN)' },
     ],
   },
   {
@@ -73,6 +70,15 @@ const clusterNavItems: NavItem[] = [
       { to: '/machines/overview', icon: LayoutDashboard, label: 'Dashboard' },
       { to: '/machines/list', icon: List, label: 'All Machines' },
       { to: '/machines/resource-groups', icon: FolderOpen, label: 'Resource Groups' },
+    ],
+  },
+  {
+    to: '/networks', icon: Network, label: 'Networks',
+    children: [
+      { to: '/networks/overview', icon: Network, label: 'All Networks' },
+      { to: '/networks/dhcp', icon: Database, label: 'DHCP' },
+      { to: '/networks/dns', icon: Globe, label: 'DNS' },
+      { to: '/networks/pxe', icon: Server, label: 'PXE Boot' },
     ],
   },
   {
