@@ -169,4 +169,80 @@ impl HostService {
             |row| row.get(0),
         ).map_err(|_| "Host not found".to_string())
     }
+
+    /// Import existing VMs from a newly registered host via Agent API.
+    /// Uses VmService for DB operations — no direct DB access here.
+    pub async fn import_vms_from_agent(
+        state: &std::sync::Arc<crate::state::ClusterState>,
+        address: &str,
+        agent_token: &str,
+        cluster_id: &str,
+        node_id: &str,
+    ) -> i32 {
+        let client = match reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return 0,
+        };
+
+        let resp = match client.get(format!("{}/agent/vms", address))
+            .header("X-Agent-Token", agent_token)
+            .send().await
+        {
+            Ok(r) => r,
+            Err(_) => return 0,
+        };
+
+        let agent_vms: Vec<vmm_core::cluster::AgentVmStatus> = match resp.json().await {
+            Ok(v) => v,
+            Err(_) => return 0,
+        };
+
+        let mut imported = 0;
+        if let Ok(db) = state.db.lock() {
+            for agent_vm in &agent_vms {
+                // Use VmService to check existence
+                if crate::services::vm::VmService::get(&db, &agent_vm.id).is_ok() {
+                    continue; // Already known
+                }
+
+                let config_json = serde_json::json!({
+                    "uuid": agent_vm.id,
+                    "name": agent_vm.id,
+                    "ram_mb": agent_vm.ram_used_mb,
+                    "cpu_cores": 1,
+                    "guest_os": "other", "guest_arch": "x64",
+                    "disk_images": [], "iso_image": "",
+                    "boot_order": "diskfirst", "bios_type": "seabios",
+                    "gpu_model": "stdvga", "vram_mb": 16,
+                    "nic_model": "e1000", "net_enabled": false,
+                    "net_mode": "usermode", "net_host_nic": "",
+                    "mac_mode": "dynamic", "mac_address": "",
+                    "audio_enabled": false, "usb_tablet": false,
+                    "ram_alloc": "ondemand", "diagnostics": false,
+                    "disk_cache_mb": 0, "disk_cache_mode": "none",
+                }).to_string();
+
+                // Use VmService to create
+                if crate::services::vm::VmService::create(
+                    &db, &agent_vm.id, &agent_vm.id, "",
+                    cluster_id, &config_json, 0,
+                ).is_ok() {
+                    // Assign to host
+                    let _ = crate::services::vm::VmService::assign_host(&db, &agent_vm.id, node_id);
+                    let _ = crate::services::vm::VmService::update_state(&db, &agent_vm.id, &agent_vm.state);
+                    imported += 1;
+                }
+            }
+
+            if imported > 0 {
+                crate::services::event::EventService::log(&db, "info", "host",
+                    &format!("Imported {} VMs from host", imported),
+                    Some("host"), Some(node_id), Some(node_id));
+            }
+        }
+        imported
+    }
 }

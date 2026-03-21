@@ -127,19 +127,27 @@ pub async fn register(
     }
 
     // Step 5: Add to in-memory node connections
+    let agent_token_clone = agent_token.clone();
+    let address_clone = address.clone();
     state.nodes.insert(node_id.clone(), NodeConnection {
         node_id: node_id.clone(),
         hostname: hostname.clone(),
-        address,
+        address: address.clone(),
         agent_token,
         status: NodeStatus::Connecting,
         missed_heartbeats: 0,
     });
 
+    // Step 6: Import existing VMs from the host via services (NO direct DB access)
+    let imported_vms = HostService::import_vms_from_agent(
+        &state, &address_clone, &agent_token_clone, &body.cluster_id, &node_id,
+    ).await;
+
     Ok(Json(serde_json::json!({
         "id": node_id,
         "hostname": hostname,
         "status": "connecting",
+        "imported_vms": imported_vms,
     })))
 }
 

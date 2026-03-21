@@ -24,20 +24,20 @@ pub async fn status(
     let (total_ram, free_ram) = get_memory_mb();
     let cpu_usage = get_cpu_usage();
 
-    // Collect VM states
+    // Collect VM states with uptime
     let vms: Vec<AgentVmStatus> = state.vms.iter().map(|entry| {
         let vm = entry.value();
         AgentVmStatus {
             id: vm.id.clone(),
             state: format!("{:?}", vm.state).to_lowercase(),
-            cpu_usage_pct: 0.0, // TODO: per-VM CPU tracking
+            cpu_usage_pct: 0.0, // Per-VM CPU tracking not yet available from libcorevm
             ram_used_mb: vm.config.ram_mb,
-            uptime_secs: 0, // TODO: track VM start time
+            uptime_secs: vm.started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0),
         }
     }).collect();
 
-    // Collect datastore/storage pool status
-    let datastores = Vec::new(); // TODO: Phase 3 — report mounted datastores
+    // Collect datastore mount status from managed config
+    let datastores = collect_datastore_status(&state);
 
     Ok(Json(HostStatus {
         node_id,
@@ -157,7 +157,7 @@ pub async fn provision_vm(
         config,
         state: crate::state::VmState::Stopped,
         vm_handle: None, control: None, framebuffer: None,
-        serial_tx: None, vm_thread: None,
+        serial_tx: None, vm_thread: None, started_at: None,
     });
 
     Ok(Json(ProvisionVmResponse {
@@ -200,6 +200,7 @@ pub async fn start_vm(
         vm.framebuffer = Some(running.framebuffer);
         vm.serial_tx = Some(running.serial_tx);
         vm.vm_thread = Some(running.thread);
+        vm.started_at = Some(std::time::Instant::now());
     }
 
     // Watcher task to detect VM exit
@@ -389,6 +390,112 @@ pub async fn delete_disk(
     Ok(Json(AgentResponse::ok()))
 }
 
+// ── Direct Host-to-Host Migration ───────────────────────────────────────
+
+/// POST /agent/migration/send — Send VM disks directly to another host.
+/// The cluster provides a one-time token and the target address.
+pub async fn migration_send(
+    State(state): State<Arc<AppState>>,
+    _agent: AgentAuth,
+    Json(req): Json<vmm_core::cluster::MigrationSendRequest>,
+) -> Result<Json<AgentResponse>, AppError> {
+    // Verify VM exists
+    let vm = state.vms.get(&req.vm_id)
+        .ok_or_else(|| AppError(StatusCode::NOT_FOUND, "VM not found".into()))?;
+    let vm_name = vm.config.name.clone();
+    drop(vm);
+
+    // Stop VM if running
+    if let Some(mut vm) = state.vms.get_mut(&req.vm_id) {
+        if let Some(ref control) = vm.control {
+            control.request_stop();
+        }
+        vm.state = crate::state::VmState::Stopping;
+    }
+    // Wait for stop
+    for _ in 0..30 {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if let Some(vm) = state.vms.get(&req.vm_id) {
+            if matches!(vm.state, crate::state::VmState::Stopped) { break; }
+        }
+    }
+
+    // Transfer disk files to target host
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(3600))
+        .build()
+        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    for disk_path in &req.disk_paths {
+        let path = std::path::Path::new(disk_path);
+        if !path.exists() { continue; }
+
+        let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let file_data = tokio::fs::read(path).await
+            .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, format!("Cannot read disk: {}", e)))?;
+
+        // Send to target's migration/receive endpoint with the one-time token
+        let target_url = format!("{}/agent/migration/receive", req.target_address.trim_end_matches('/'));
+        let resp = client.post(&target_url)
+            .header("X-Migration-Token", &req.migration_token)
+            .header("X-VM-Id", &req.vm_id)
+            .header("X-Disk-Path", disk_path)
+            .header("X-Config-Json", &req.config_json)
+            .body(file_data)
+            .send().await
+            .map_err(|e| AppError(StatusCode::BAD_GATEWAY, format!("Transfer failed: {}", e)))?;
+
+        if !resp.status().is_success() {
+            let err = resp.text().await.unwrap_or_default();
+            return Err(AppError(StatusCode::BAD_GATEWAY, format!("Target rejected transfer: {}", err)));
+        }
+
+        tracing::info!("Migration: Sent disk {} ({} bytes) to {}", disk_path, file_size, req.target_address);
+    }
+
+    // Remove VM from local state after successful transfer
+    state.vms.remove(&req.vm_id);
+    if let Ok(db) = state.db.lock() {
+        let _ = db.execute("DELETE FROM vms WHERE id = ?1", rusqlite::params![&req.vm_id]);
+    }
+
+    tracing::info!("Migration: VM '{}' sent to {}", vm_name, req.target_address);
+    Ok(Json(AgentResponse::ok()))
+}
+
+/// POST /agent/migration/receive — Receive VM config + disk metadata from source host.
+/// The actual disk files are transferred via the source host's migration/send handler
+/// which writes directly to this host. This endpoint provisions the VM locally.
+pub async fn migration_receive(
+    State(state): State<Arc<AppState>>,
+    _agent: AgentAuth,
+    Json(req): Json<vmm_core::cluster::ProvisionVmRequest>,
+) -> Result<Json<AgentResponse>, AppError> {
+    let config: vmm_core::config::VmConfig = serde_json::from_value(req.config)
+        .map_err(|e| AppError(StatusCode::BAD_REQUEST, format!("Invalid VM config: {}", e)))?;
+
+    let config_json = serde_json::to_string(&config)
+        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Provision VM locally
+    let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
+    db.execute(
+        "INSERT OR REPLACE INTO vms (id, name, config_json) VALUES (?1, ?2, ?3)",
+        rusqlite::params![&req.vm_id, &config.name, &config_json],
+    ).map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    drop(db);
+
+    state.vms.insert(req.vm_id.clone(), crate::state::VmInstance {
+        id: req.vm_id.clone(), config, state: crate::state::VmState::Stopped,
+        vm_handle: None, control: None, framebuffer: None,
+        serial_tx: None, vm_thread: None, started_at: None,
+    });
+
+    tracing::info!("Migration: Received VM '{}' for provisioning", req.vm_id);
+    Ok(Json(AgentResponse::ok()))
+}
+
 // ── System info helpers ─────────────────────────────────────────────────
 
 fn get_memory_mb() -> (u64, u64) {
@@ -413,6 +520,76 @@ fn get_memory_mb() -> (u64, u64) {
 fn get_cpu_usage() -> f32 {
     // Simplified — return 0.0, real implementation would read /proc/stat
     0.0
+}
+
+/// Collect mounted datastore status by checking if known mount paths are actually mounted.
+fn collect_datastore_status(state: &AppState) -> Vec<AgentDatastoreStatus> {
+    // Read mount points the cluster told us about from the local DB
+    let db = match state.db.lock() { Ok(db) => db, Err(_) => return Vec::new() };
+
+    // Check storage_pools table for shared pools (these are cluster datastores)
+    let mut stmt = match db.prepare(
+        "SELECT id, name, path, pool_type FROM storage_pools WHERE shared = 1"
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    let pools: Vec<(String, String)> = match stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(2)?))
+    }) {
+        Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+        Err(_) => return Vec::new(),
+    };
+
+    let mut result = Vec::new();
+    for (pool_id, mount_path) in &pools {
+        let path = std::path::Path::new(mount_path);
+        let mounted = path.exists() && is_mountpoint(mount_path);
+        let (total, free) = if mounted { get_fs_stats(mount_path) } else { (0, 0) };
+
+        result.push(AgentDatastoreStatus {
+            datastore_id: pool_id.clone(),
+            mount_path: mount_path.clone(),
+            mounted,
+            total_bytes: total,
+            free_bytes: free,
+        });
+    }
+    result
+}
+
+/// Check if a path is a mount point using `mountpoint -q`.
+fn is_mountpoint(path: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("mountpoint")
+            .arg("-q")
+            .arg(path)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "linux"))]
+    { let _ = path; false }
+}
+
+/// Get filesystem total/free bytes for a path.
+fn get_fs_stats(path: &str) -> (u64, u64) {
+    #[cfg(target_os = "linux")]
+    {
+        unsafe {
+            let mut stat: libc::statvfs = std::mem::zeroed();
+            let c_path = std::ffi::CString::new(path).unwrap();
+            if libc::statvfs(c_path.as_ptr(), &mut stat) == 0 {
+                let total = stat.f_blocks as u64 * stat.f_frsize as u64;
+                let free = stat.f_bavail as u64 * stat.f_frsize as u64;
+                return (total, free);
+            }
+        }
+    }
+    let _ = path;
+    (0, 0)
 }
 
 fn get_cpu_model() -> String {

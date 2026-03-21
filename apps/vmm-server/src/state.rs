@@ -40,6 +40,8 @@ pub struct VmInstance {
     pub serial_tx: Option<broadcast::Sender<Vec<u8>>>,
     /// VM execution thread.
     pub vm_thread: Option<JoinHandle<()>>,
+    /// When the VM was last started (for uptime tracking).
+    pub started_at: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]

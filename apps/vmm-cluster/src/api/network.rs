@@ -52,6 +52,21 @@ pub async fn create_network(
     Json(body): Json<CreateNetworkRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_operator(&user)?;
+    use crate::services::validation;
+    // Validate inputs
+    if body.name.trim().is_empty() {
+        return Err(AppError(StatusCode::BAD_REQUEST, "Network name is required".into()));
+    }
+    validation::validate_cidr(&body.subnet)
+        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+    validation::validate_ipv4(&body.gateway)
+        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+    validation::validate_ip_in_subnet(&body.gateway, &body.subnet)
+        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+    if let Some(vlan) = body.vlan_id {
+        validation::validate_vlan(vlan)
+            .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+    }
     let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
     let id = NetworkService::create_network(&db, &body.cluster_id, &body.name, &body.subnet,
         &body.gateway, body.vlan_id)

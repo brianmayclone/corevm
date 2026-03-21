@@ -29,3 +29,4 @@ pub mod notification;
 pub mod settings;
 pub mod network;
 pub mod ldap;
+pub mod validation;

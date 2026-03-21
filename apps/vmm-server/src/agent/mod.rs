@@ -38,4 +38,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/agent/storage/unmount", post(handlers::unmount_datastore))
         .route("/agent/storage/create-disk", post(handlers::create_disk))
         .route("/agent/storage/delete-disk", delete(handlers::delete_disk))
+        // Direct host-to-host migration
+        .route("/agent/migration/send", post(handlers::migration_send))
+        .route("/agent/migration/receive", post(handlers::migration_receive))
 }

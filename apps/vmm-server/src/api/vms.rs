@@ -67,7 +67,7 @@ pub async fn create(auth: AuthUser, State(state): State<Arc<AppState>>, Json(mut
     VmService::create(&db, &config, auth.id).map_err(|e| AppError(StatusCode::CONFLICT, e))?;
     state.vms.insert(config.uuid.clone(), VmInstance {
         id: config.uuid.clone(), config: config.clone(), state: VmState::Stopped,
-        vm_handle: None, control: None, framebuffer: None, serial_tx: None, vm_thread: None,
+        vm_handle: None, control: None, framebuffer: None, serial_tx: None, vm_thread: None, started_at: None,
     });
     AuditService::log(&db, auth.id, "vm.created", "vm", &config.uuid, Some(&config.name));
     Ok(Json(serde_json::json!({"id": config.uuid, "name": config.name})))
@@ -153,6 +153,7 @@ pub async fn start(auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_i
         vm.framebuffer = Some(running.framebuffer);
         vm.serial_tx = Some(running.serial_tx);
         vm.vm_thread = Some(running.thread);
+        vm.started_at = Some(std::time::Instant::now());
     }
     { let db = state.db.lock().unwrap(); AuditService::log(&db, auth.id, "vm.started", "vm", &vm_id, None); }
     tracing::info!("VM {} started", vm_id);

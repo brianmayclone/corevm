@@ -105,10 +105,21 @@ fn analyze_and_recommend(state: &Arc<ClusterState>) {
                 None => continue,
             };
 
-            // Pick smallest running VM that would fit
+            // Load DRS exclusions for this cluster
+            let exclusions: Vec<String> = db.prepare(
+                "SELECT target_id FROM drs_exclusions WHERE cluster_id = ?1"
+            ).ok().map(|mut stmt| {
+                stmt.query_map(rusqlite::params![&cluster.id], |r| r.get::<_, String>(0))
+                    .ok().map(|rows| rows.filter_map(|r| r.ok()).collect())
+                    .unwrap_or_default()
+            }).unwrap_or_default();
+
+            // Pick smallest running VM that would fit — exclude DRS-excluded VMs
             let candidate = vms.iter()
                 .filter(|v| v.state == "running")
                 .filter(|v| v.ram_mb as i64 <= target_host.free_ram_mb)
+                .filter(|v| !exclusions.contains(&v.id))  // Skip excluded VMs
+                .filter(|v| !v.resource_group_id.map(|rg| exclusions.contains(&rg.to_string())).unwrap_or(false))  // Skip excluded resource groups
                 .min_by_key(|v| v.ram_mb);
 
             if let Some(vm) = candidate {

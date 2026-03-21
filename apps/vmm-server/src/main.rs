@@ -164,7 +164,7 @@ async fn main() {
                     vms_map.insert(r.id.clone(), state::VmInstance {
                         id: r.id, config: r.config, state: state::VmState::Stopped,
                         vm_handle: None, control: None, framebuffer: None,
-                        serial_tx: None, vm_thread: None,
+                        serial_tx: None, vm_thread: None, started_at: None,
                     });
                 }
             }
@@ -202,8 +202,9 @@ async fn main() {
         managed_config: Mutex::new(managed_config),
     });
 
-    // Build router
+    // Build router — managed-mode guard blocks /api/* when managed by a cluster
     let api_router = api::router()
+        .layer(axum::middleware::from_fn_with_state(state.clone(), api::guard::managed_mode_guard))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());

@@ -179,3 +179,40 @@ pub struct ManagedNodeConfig {
     pub agent_token: String,
     pub node_id: String,
 }
+
+// ── Direct Host-to-Host Migration ───────────────────────────────────────
+
+/// Command from cluster to source host: send VM disks to target host.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MigrationSendRequest {
+    pub vm_id: String,
+    /// One-time token for this migration (expires after use).
+    pub migration_token: String,
+    /// Target host address to send disks to.
+    pub target_address: String,
+    /// Disk paths to transfer.
+    pub disk_paths: Vec<String>,
+    /// VM config JSON to send along with disks.
+    pub config_json: String,
+}
+
+/// Command from cluster to target host: expect incoming migration.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MigrationReceiveRequest {
+    pub vm_id: String,
+    /// One-time token — must match the source's token.
+    pub migration_token: String,
+    /// Source host address to expect connection from.
+    pub source_address: String,
+}
+
+/// Progress report from agent during migration.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MigrationProgress {
+    pub vm_id: String,
+    pub migration_token: String,
+    pub bytes_sent: u64,
+    pub bytes_total: u64,
+    pub status: String,  // "transferring", "completed", "failed"
+    pub error: Option<String>,
+}

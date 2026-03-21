@@ -12,16 +12,16 @@ pub mod storage;
 pub mod network;
 pub mod settings;
 pub mod resource_groups;
+pub mod guard;
 
 /// Build the complete API router (regular API + agent API).
+/// The managed-mode guard middleware is applied in main.rs after with_state().
 pub fn router() -> Router<Arc<AppState>> {
-    // Agent API routes (always mounted, but agent auth required)
     let agent_routes = crate::agent::router();
 
     Router::new()
-        // Agent routes (no managed-mode guard — these MUST work when managed)
         .merge(agent_routes)
-        // System info always available (so UI can detect managed mode)
+        // System
         .route("/api/system/info", get(system::info))
         .route("/api/system/stats", get(system::stats))
         .route("/api/system/activity", get(system::activity))
@@ -69,7 +69,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/settings/security", get(settings::get_security))
         .route("/api/settings/groups", get(settings::list_groups).post(settings::create_group))
         .route("/api/settings/groups/{id}", delete(settings::delete_group))
-        // WebSocket console + terminal
+        // WebSocket console + terminal — always allowed
         .route("/ws/console/{vm_id}", get(crate::ws::console::handler))
         .route("/ws/terminal", get(crate::ws::terminal::ws_terminal))
 }
