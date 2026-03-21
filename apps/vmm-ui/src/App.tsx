@@ -8,6 +8,11 @@ import VmDetail from './pages/VmDetail'
 import VmCreate from './pages/VmCreate'
 import VmConsole from './pages/VmConsole'
 import Storage from './pages/Storage'
+import StorageOverview from './pages/StorageOverview'
+import StorageLocal from './pages/StorageLocal'
+import StorageShared from './pages/StorageShared'
+import StorageDisks from './pages/StorageDisks'
+import StorageQos from './pages/StorageQos'
 import Networks from './pages/Networks'
 import NetworkOverview from './pages/NetworkOverview'
 import NetworkNat from './pages/NetworkNat'
@@ -35,7 +40,13 @@ export default function App() {
           <Route path="vms/:id" element={<VmDetail />} />
           <Route path="vms/:id/console" element={<VmConsole />} />
           <Route path="vms/:id/settings" element={<VmCreate />} />
-          <Route path="storage" element={<Storage />} />
+          <Route path="storage" element={<Storage />}>
+            <Route path="overview" element={<StorageOverview />} />
+            <Route path="local" element={<StorageLocal />} />
+            <Route path="shared" element={<StorageShared />} />
+            <Route path="disks" element={<StorageDisks />} />
+            <Route path="qos" element={<StorageQos />} />
+          </Route>
           <Route path="networks" element={<Networks />}>
             <Route path="overview" element={<NetworkOverview />} />
             <Route path="nat" element={<NetworkNat />} />

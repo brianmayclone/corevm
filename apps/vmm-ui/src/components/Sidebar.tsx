@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
-import { Monitor, HardDrive, Network, Settings, Zap, LifeBuoy, FileText, ChevronDown, Cable, Layers, Globe, Unplug } from 'lucide-react'
+import { Monitor, HardDrive, Network, Settings, Zap, LifeBuoy, FileText, ChevronDown, Cable, Layers, Globe, Unplug, Database, Share2, Gauge, Disc } from 'lucide-react'
 
 interface NavItem {
   to: string
@@ -11,7 +11,16 @@ interface NavItem {
 
 const navItems: NavItem[] = [
   { to: '/', icon: Monitor, label: 'My Machines' },
-  { to: '/storage', icon: HardDrive, label: 'Storage' },
+  {
+    to: '/storage', icon: HardDrive, label: 'Storage',
+    children: [
+      { to: '/storage/overview', icon: HardDrive, label: 'Overview' },
+      { to: '/storage/local', icon: Database, label: 'Local Storage' },
+      { to: '/storage/shared', icon: Share2, label: 'Shared Storage' },
+      { to: '/storage/disks', icon: Disc, label: 'Disk Management' },
+      { to: '/storage/qos', icon: Gauge, label: 'QoS Policies' },
+    ],
+  },
   {
     to: '/networks', icon: Network, label: 'Networks',
     children: [
@@ -28,7 +37,7 @@ const navItems: NavItem[] = [
 export default function Sidebar() {
   const location = useLocation()
   const [expandedSections, setExpandedSections] = useState<Set<string>>(
-    () => new Set(navItems.filter(i => i.children && location.pathname.startsWith(i.to)).map(i => i.to))
+    () => new Set(navItems.filter(i => i.children && (location.pathname.startsWith(i.to + '/') || location.pathname === i.to)).map(i => i.to))
   )
 
   const toggleSection = (to: string) => {
