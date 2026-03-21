@@ -231,18 +231,37 @@ cargo +stable build --release
 ## Architecture
 
 ```
+ Cluster Stack                          Standalone Apps
+ ─────────────                          ───────────────
+
+┌───────────────────────────┐
+│        vmm-ui (React)     │          ┌─────────────────────────┐
+│  Browser-based dashboard  │          │  vmmanager (egui)        │
+└─────────────┬─────────────┘          │  Desktop GUI             │
+              │                        └────────────┬────────────┘
+              ▼                                     │
+┌───────────────────────────┐          ┌────────────┴────────────┐
+│    vmm-cluster (Axum)     │          │  vmctl (CLI)             │
+│  Central authority        │          │  Headless VM runner      │
+│  DRS · HA · Migration     │          └────────────┬────────────┘
+│  Events · Alarms · Tasks  │                       │
+└─────────────┬─────────────┘                       │
+              │  manages multiple nodes              │
+     ┌────────┼────────┐                            │
+     ▼        ▼        ▼                            │
+┌─────────────────────────┐                         │
+│   vmm-server (Axum)     │                         │
+│   REST API · WebSocket  │                         │
+│   JWT Auth · SQLite     │                         │
+│   Agent API (cluster)   │                         │
+└────────────┬────────────┘                         │
+             │                                      │
+             └──────────────┬───────────────────────┘
+                            │
+                            ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                         vmm-ui (React)                              │
-│     Browser-based management dashboard (standalone + cluster)       │
-├──────────────────────────────────┬──────────────────────────────────┤
-│       vmm-cluster (Axum)         │        vmm-server (Axum)         │
-│  Central authority · DRS · HA    │  REST API · WebSocket · Agent    │
-│  Migration · Events · Alarms    │  JWT Auth · SQLite · Storage     │
-├──────────────────────────────────┴──────────────────────────────────┤
-│    vmmanager (egui)              │         vmctl (CLI)               │
-├──────────────────────────────────┴──────────────────────────────────┤
 │                       C FFI Layer (58 exports)                      │
-│                corevm_create / corevm_run / ...                     │
+│                corevm_create / corevm_run / ...                      │
 ├─────────────────────────────────────────────────────────────────────┤
 │                          libcorevm                                  │
 │  ┌──────────────┐  ┌────────────────┐  ┌────────────────────────┐  │

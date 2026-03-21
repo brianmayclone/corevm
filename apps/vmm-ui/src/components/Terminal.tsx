@@ -46,7 +46,8 @@ export default function Terminal({ className = '' }: TerminalProps) {
     if (!token) return
 
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host = import.meta.env.DEV ? 'localhost:8443' : window.location.host
+    // In dev mode Vite proxies /ws/* to the backend, so always use the current host
+    const host = window.location.host
     const url = `${proto}//${host}/ws/terminal?token=${token}`
 
     const ws = new WebSocket(url)
