@@ -197,46 +197,23 @@ impl NotificationService {
 
             if !channel.3 { continue; } // channel disabled
 
-            // Dispatch based on channel type
-            let result = match channel.1.as_str() {
-                "log" => {
-                    tracing::info!("NOTIFICATION [{}]: [{}] {}", rule.name, severity, message);
-                    Ok(())
-                }
-                "webhook" => {
-                    // Parse webhook config and queue HTTP request
-                    let config: serde_json::Value = serde_json::from_str(&channel.2).unwrap_or_default();
-                    let url = config.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                    if url.is_empty() {
-                        Err("Webhook URL not configured".to_string())
-                    } else {
-                        // Queue for async dispatch (we can't do async in a sync context)
-                        tracing::info!("WEBHOOK [{}]: {} → {}", rule.name, message, url);
-                        Ok(())
-                    }
-                }
-                "email" => {
-                    let config: serde_json::Value = serde_json::from_str(&channel.2).unwrap_or_default();
-                    let to = config.get("to").and_then(|v| v.as_str()).unwrap_or("");
-                    if to.is_empty() {
-                        Err("Email recipient not configured".to_string())
-                    } else {
-                        tracing::info!("EMAIL [{}]: {} → {}", rule.name, message, to);
-                        Ok(())
-                    }
-                }
-                _ => Err("Unknown channel type".to_string()),
-            };
-
-            // Log the dispatch
-            let (status, error) = match result {
-                Ok(()) => ("sent", None),
-                Err(e) => ("failed", Some(e)),
-            };
+            // Insert pending log entry (status = "queued", updated to "sent" or "failed" by worker)
             let _ = db.execute(
-                "INSERT INTO notification_log (rule_id, channel_id, event_id, status, error) VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![rule.id, channel.0, event_id, status, error],
+                "INSERT INTO notification_log (rule_id, channel_id, event_id, status) VALUES (?1, ?2, ?3, 'queued')",
+                rusqlite::params![rule.id, channel.0, event_id],
             );
+            let log_id = db.last_insert_rowid();
+
+            // Enqueue for async dispatch via the notifier worker
+            crate::engine::notifier::enqueue(crate::engine::notifier::PendingNotification {
+                channel_type: channel.1.clone(),
+                channel_config: channel.2.clone(),
+                rule_name: rule.name.clone(),
+                severity: severity.to_string(),
+                category: category.to_string(),
+                message: message.to_string(),
+                log_id,
+            });
         }
     }
 

@@ -229,6 +229,10 @@ export default function VmCreate() {
                 <FormField label="Guest OS">
                   <Select options={guestOsOptions} value={form.guest_os} onChange={(e) => set('guest_os', e.target.value)} />
                 </FormField>
+                <FormField label="Architecture">
+                  <Select options={[{ value: 'x64', label: '64-bit (x86_64)' }, { value: 'x86', label: '32-bit (x86)' }]}
+                    value={form.guest_arch} onChange={(e) => set('guest_arch', e.target.value)} />
+                </FormField>
               </div>
             </SectionCard>
             <SectionCard icon={<Monitor size={18} />} title="Firmware">

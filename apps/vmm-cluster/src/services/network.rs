@@ -213,4 +213,40 @@ impl NetworkService {
             rusqlite::params![network_id, &fqdn, ip],
         );
     }
+
+    // ── Static DHCP Reservations ─────────────────────────────────
+
+    /// Create a static MAC-to-IP reservation (DHCP reservation).
+    pub fn create_static_reservation(db: &Connection, network_id: i64, mac: &str, ip: &str, hostname: Option<&str>) -> Result<i64, String> {
+        db.execute(
+            "INSERT OR REPLACE INTO dhcp_leases (network_service_id, mac_address, ip_address, hostname, lease_end) \
+             VALUES (?1, ?2, ?3, ?4, '9999-12-31 23:59:59')",
+            rusqlite::params![network_id, mac, ip, hostname],
+        ).map_err(|e| e.to_string())?;
+        Ok(db.last_insert_rowid())
+    }
+
+    /// Delete a static reservation.
+    pub fn delete_reservation(db: &Connection, id: i64) -> Result<(), String> {
+        db.execute("DELETE FROM dhcp_leases WHERE id = ?1", rusqlite::params![id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Add a manual DNS record.
+    pub fn create_dns_record(db: &Connection, network_id: i64, record_type: &str, name: &str, value: &str, ttl: i64) -> Result<i64, String> {
+        db.execute(
+            "INSERT INTO dns_records (network_service_id, record_type, name, value, ttl, auto_registered) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+            rusqlite::params![network_id, record_type, name, value, ttl],
+        ).map_err(|e| e.to_string())?;
+        Ok(db.last_insert_rowid())
+    }
+
+    /// Delete a DNS record.
+    pub fn delete_dns_record(db: &Connection, id: i64) -> Result<(), String> {
+        db.execute("DELETE FROM dns_records WHERE id = ?1", rusqlite::params![id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
 }

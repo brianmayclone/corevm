@@ -67,8 +67,9 @@ async fn poll_all_nodes(state: &Arc<ClusterState>) {
                 }
 
                 // Reset missed heartbeat counter, mark online
-                if let Some(mut n) = state.nodes.get_mut(&node_id) {
+                let was_offline = if let Some(mut n) = state.nodes.get_mut(&node_id) {
                     n.missed_heartbeats = 0;
+                    let was = n.status == NodeStatus::Offline;
                     if n.status == NodeStatus::Connecting || n.status == NodeStatus::Offline {
                         n.status = NodeStatus::Online;
                         if let Ok(db) = state.db.lock() {
@@ -77,6 +78,16 @@ async fn poll_all_nodes(state: &Arc<ClusterState>) {
                                 Some("host"), Some(&node_id), Some(&node_id));
                         }
                     }
+                    was
+                } else { false };
+
+                // Reconcile state if host was previously offline (prevent dual-running VMs)
+                if was_offline {
+                    let state_clone = Arc::clone(state);
+                    let node_id_clone = node_id.clone();
+                    tokio::spawn(async move {
+                        crate::engine::reconciler::reconcile_host(&state_clone, &node_id_clone).await;
+                    });
                 }
             }
             Err(_) => {

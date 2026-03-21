@@ -112,6 +112,9 @@ async fn main() {
     engine::drs::spawn(Arc::clone(&state));
     tracing::info!("DRS engine started (5m interval)");
 
+    engine::notifier::spawn(Arc::clone(&state));
+    tracing::info!("Notification worker started");
+
     // ── Build router ────────────────────────────────────────────────
     let api_router = api::router()
         .layer(CorsLayer::permissive())

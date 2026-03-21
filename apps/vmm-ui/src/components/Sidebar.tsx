@@ -72,15 +72,7 @@ const clusterNavItems: NavItem[] = [
       { to: '/machines/resource-groups', icon: FolderOpen, label: 'Resource Groups' },
     ],
   },
-  {
-    to: '/networks', icon: Network, label: 'Networks',
-    children: [
-      { to: '/networks/overview', icon: Network, label: 'All Networks' },
-      { to: '/networks/dhcp', icon: Database, label: 'DHCP' },
-      { to: '/networks/dns', icon: Globe, label: 'DNS' },
-      { to: '/networks/pxe', icon: Server, label: 'PXE Boot' },
-    ],
-  },
+  { to: '/networks/overview', icon: Network, label: 'Networks' },
   {
     to: '/storage', icon: HardDrive, label: 'Storage',
     children: [

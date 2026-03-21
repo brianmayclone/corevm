@@ -81,6 +81,12 @@ pub fn router() -> Router<Arc<ClusterState>> {
         .route("/api/networks", get(network::list_networks).post(network::create_network))
         .route("/api/networks/{id}", get(network::get_network).put(network::update_network).delete(network::delete_network))
 
+        // ── Network DHCP reservations + DNS records ─────
+        .route("/api/networks/{id}/reservations", post(network::create_reservation))
+        .route("/api/networks/{network_id}/{reservation_id}/reservation", delete(network::delete_reservation))
+        .route("/api/networks/{id}/dns-records", post(network::create_dns_record))
+        .route("/api/networks/{network_id}/{record_id}/dns-record", delete(network::delete_dns_record))
+
         // ── Network (compat stubs) ──────────────────────
         .route("/api/network/interfaces", get(activity::network_interfaces))
         .route("/api/network/stats", get(activity::network_stats))

@@ -1,7 +1,7 @@
 # VMM-Cluster — TODO
 
-Offene Implementierungen, sortiert nach Priorität.
 Stand: 2026-03-21
+Letztes Update: 2026-03-21 — Alle 16 Punkte erledigt (CRITICAL 1-4, HIGH 5-12, MEDIUM 13-14, LOW 15-16)
 
 ---
 

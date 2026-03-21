@@ -52,7 +52,7 @@ pub async fn handler(
     }))
 }
 
-async fn bridge_console(client_ws: WebSocket, host_address: String, agent_token: String, vm_id: String) {
+async fn bridge_console(mut client_ws: WebSocket, host_address: String, agent_token: String, vm_id: String) {
     // Connect to the node's WebSocket console
     let ws_url = format!("{}/ws/console/{}?token={}",
         host_address.replace("https://", "wss://").replace("http://", "ws://"),
@@ -62,6 +62,11 @@ async fn bridge_console(client_ws: WebSocket, host_address: String, agent_token:
         Ok((ws, _)) => ws,
         Err(e) => {
             tracing::error!("Console bridge: Cannot connect to node: {}", e);
+            // Send error message to client before closing
+            let _ = client_ws.send(Message::Text(
+                serde_json::json!({"error": format!("Cannot reach host: {}", e)}).to_string().into()
+            )).await;
+            let _ = client_ws.close().await;
             return;
         }
     };

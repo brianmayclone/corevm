@@ -36,6 +36,7 @@ interface Iso {
 
 const tabs = [
   { id: 'overview', label: 'Overview' },
+  { id: 'settings', label: 'Settings' },
   { id: 'dhcp', label: 'DHCP' },
   { id: 'dns', label: 'DNS' },
   { id: 'pxe', label: 'PXE Boot' },
@@ -144,6 +145,49 @@ export default function SdnNetworkDetail() {
             </Card>
           </div>
         </div>
+      )}
+
+      {/* ── Settings ─────────────────────────────────────────────── */}
+      {tab === 'settings' && (
+        <Card>
+          <div className="p-5 space-y-5">
+            <h3 className="text-sm font-semibold text-vmm-text">Network Configuration</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs text-vmm-text-muted mb-1">Network Name</label>
+                <input type="text" value={net.name}
+                  onChange={e => setNet({ ...net, name: e.target.value })}
+                  onBlur={e => updateField({ name: e.target.value })}
+                  className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm" />
+              </div>
+              <div>
+                <label className="block text-xs text-vmm-text-muted mb-1">Subnet (CIDR)</label>
+                <input type="text" value={net.subnet}
+                  onChange={e => setNet({ ...net, subnet: e.target.value })}
+                  onBlur={e => updateField({ subnet: e.target.value })}
+                  className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm" />
+              </div>
+              <div>
+                <label className="block text-xs text-vmm-text-muted mb-1">Gateway</label>
+                <input type="text" value={net.gateway}
+                  onChange={e => setNet({ ...net, gateway: e.target.value })}
+                  onBlur={e => updateField({ gateway: e.target.value })}
+                  className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm" />
+              </div>
+              <div>
+                <label className="block text-xs text-vmm-text-muted mb-1">VLAN ID (optional)</label>
+                <input type="number" value={net.vlan_id ?? ''}
+                  onChange={e => setNet({ ...net, vlan_id: e.target.value ? parseInt(e.target.value) : null })}
+                  onBlur={e => updateField({ vlan_id: e.target.value ? parseInt(e.target.value) : null })}
+                  placeholder="None"
+                  className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm" />
+              </div>
+            </div>
+            <p className="text-xs text-vmm-text-muted">
+              Changes are saved automatically when you leave a field.
+            </p>
+          </div>
+        </Card>
       )}
 
       {/* ── DHCP ──────────────────────────────────────────────────── */}

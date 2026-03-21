@@ -21,7 +21,7 @@ interface Props {
 
 export default function PoolBrowser({ open, onClose, filterExt, onSelect, title, clusterId }: Props) {
   const [pools, setPools] = useState<StoragePool[]>([])
-  const [selectedPool, setSelectedPool] = useState<number | null>(null)
+  const [selectedPool, setSelectedPool] = useState<number | string | null>(null)
   const [files, setFiles] = useState<PoolFile[]>([])
   const [loading, setLoading] = useState(false)
 

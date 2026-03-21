@@ -20,7 +20,7 @@ interface Props {
 
 export default function CreateDiskDialog({ open, onClose, vmName, vmId, onCreated, clusterId }: Props) {
   const [pools, setPools] = useState<StoragePool[]>([])
-  const [poolId, setPoolId] = useState<number | null>(null)
+  const [poolId, setPoolId] = useState<number | string | null>(null)
   const [sizeGb, setSizeGb] = useState(32)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)

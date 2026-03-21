@@ -88,6 +88,75 @@ pub async fn update_network(
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
+// ── Static DHCP Reservations ────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct CreateReservationRequest {
+    pub mac_address: String,
+    pub ip_address: String,
+    pub hostname: Option<String>,
+}
+
+pub async fn create_reservation(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Path(network_id): Path<i64>,
+    Json(body): Json<CreateReservationRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    use crate::services::validation;
+    validation::validate_mac(&body.mac_address).map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+    validation::validate_ipv4(&body.ip_address).map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+
+    let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
+    let id = NetworkService::create_static_reservation(&db, network_id, &body.mac_address, &body.ip_address, body.hostname.as_deref())
+        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(serde_json::json!({"id": id})))
+}
+
+pub async fn delete_reservation(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Path((_network_id, reservation_id)): Path<(i64, i64)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
+    NetworkService::delete_reservation(&db, reservation_id).map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+// ── DNS Records CRUD ────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct CreateDnsRecordRequest {
+    pub record_type: String,
+    pub name: String,
+    pub value: String,
+    #[serde(default = "default_ttl")]
+    pub ttl: i64,
+}
+fn default_ttl() -> i64 { 3600 }
+
+pub async fn create_dns_record(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Path(network_id): Path<i64>,
+    Json(body): Json<CreateDnsRecordRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
+    let id = NetworkService::create_dns_record(&db, network_id, &body.record_type, &body.name, &body.value, body.ttl)
+        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(serde_json::json!({"id": id})))
+}
+
+pub async fn delete_dns_record(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Path((_network_id, record_id)): Path<(i64, i64)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
+    NetworkService::delete_dns_record(&db, record_id).map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
 pub async fn delete_network(
     State(state): State<Arc<ClusterState>>,
     user: AuthUser,

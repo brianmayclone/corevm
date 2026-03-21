@@ -47,19 +47,56 @@ async fn restart_vm_on_available_host(
     vm: &crate::services::vm::ClusterVm,
     failed_host_id: &str,
 ) {
-    // Find a suitable target host
-    let target = find_target_host(state, vm, failed_host_id);
-    let target_host_id = match target {
-        Some(id) => id,
-        None => {
-            tracing::error!("HA: No suitable host for VM '{}' — marking as orphaned", vm.name);
-            if let Ok(db) = state.db.lock() {
-                VmService::update_state(&db, &vm.id, "orphaned").ok();
-                EventService::log(&db, "error", "ha",
-                    &format!("VM '{}' cannot be restarted — no suitable host", vm.name),
-                    Some("vm"), Some(&vm.id), None);
+    // Check if VM's disks are on shared storage
+    let has_shared_storage = {
+        let db = match state.db.lock() { Ok(db) => db, Err(_) => return };
+        // Check if any datastore mounted on OTHER hosts contains this VM's disks
+        let shared_count: i64 = db.query_row(
+            "SELECT COUNT(*) FROM datastore_hosts dh \
+             JOIN hosts h ON dh.host_id = h.id \
+             WHERE dh.mounted = 1 AND h.id != ?1 AND h.status = 'online'",
+            rusqlite::params![failed_host_id],
+            |r| r.get(0),
+        ).unwrap_or(0);
+        shared_count > 0
+    };
+
+    if !has_shared_storage {
+        tracing::warn!("HA: VM '{}' has no shared storage — cannot restart on another host", vm.name);
+        if let Ok(db) = state.db.lock() {
+            VmService::update_state(&db, &vm.id, "orphaned").ok();
+            EventService::log(&db, "warning", "ha",
+                &format!("VM '{}' cannot be HA-restarted — no shared storage accessible from other hosts", vm.name),
+                Some("vm"), Some(&vm.id), None);
+        }
+        return;
+    }
+
+    // Find a suitable target host (with retry on cascading failure)
+    let target_host_id = {
+        let mut attempts = 0;
+        let max_attempts = 3;
+        let mut target = None;
+
+        while attempts < max_attempts {
+            target = find_target_host(state, vm, failed_host_id);
+            if target.is_some() { break; }
+            attempts += 1;
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+
+        match target {
+            Some(id) => id,
+            None => {
+                tracing::error!("HA: No suitable host for VM '{}' after {} attempts — marking as orphaned", vm.name, max_attempts);
+                if let Ok(db) = state.db.lock() {
+                    VmService::update_state(&db, &vm.id, "orphaned").ok();
+                    EventService::log(&db, "error", "ha",
+                        &format!("VM '{}' cannot be restarted — no suitable host (tried {} times)", vm.name, max_attempts),
+                        Some("vm"), Some(&vm.id), None);
+                }
+                return;
             }
-            return;
         }
     };
 

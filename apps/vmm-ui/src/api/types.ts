@@ -70,7 +70,7 @@ export interface VmDetail {
 }
 
 export interface StoragePool {
-  id: number
+  id: number | string
   name: string
   path: string
   pool_type: string

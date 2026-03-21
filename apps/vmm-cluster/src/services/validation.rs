@@ -44,14 +44,37 @@ pub fn validate_vlan(vlan_id: i32) -> Result<(), String> {
     Ok(())
 }
 
-/// Validate a DHCP range.
-pub fn validate_dhcp_range(start: &str, end: &str, cidr: &str) -> Result<(), String> {
+/// Validate a DHCP range — checks IPs are valid, in subnet, properly ordered,
+/// and don't include the gateway address.
+pub fn validate_dhcp_range(start: &str, end: &str, cidr: &str, gateway: &str) -> Result<(), String> {
     let start_ip = validate_ipv4(start)?;
     let end_ip = validate_ipv4(end)?;
+    let gw_ip = validate_ipv4(gateway)?;
     validate_ip_in_subnet(start, cidr)?;
     validate_ip_in_subnet(end, cidr)?;
     if u32::from(start_ip) >= u32::from(end_ip) {
         return Err(format!("DHCP range start ({}) must be less than end ({})", start, end));
+    }
+    // Gateway must not be within DHCP range
+    let gw_u32 = u32::from(gw_ip);
+    let start_u32 = u32::from(start_ip);
+    let end_u32 = u32::from(end_ip);
+    if gw_u32 >= start_u32 && gw_u32 <= end_u32 {
+        return Err(format!("Gateway {} is within DHCP range {}-{} — this will cause conflicts", gateway, start, end));
+    }
+    Ok(())
+}
+
+/// Validate a MAC address format (XX:XX:XX:XX:XX:XX).
+pub fn validate_mac(mac: &str) -> Result<(), String> {
+    let parts: Vec<&str> = mac.split(':').collect();
+    if parts.len() != 6 {
+        return Err(format!("'{}' is not a valid MAC address (expected XX:XX:XX:XX:XX:XX)", mac));
+    }
+    for part in &parts {
+        if part.len() != 2 || u8::from_str_radix(part, 16).is_err() {
+            return Err(format!("'{}' contains invalid hex octet '{}'", mac, part));
+        }
     }
     Ok(())
 }
