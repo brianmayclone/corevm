@@ -55,3 +55,27 @@ body {
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: var(--color-vmm-bg); }
 ::-webkit-scrollbar-thumb { background: var(--color-vmm-border-light); border-radius: 3px; }
+
+/* Hide scrollbar utility */
+.scrollbar-none { -ms-overflow-style: none; scrollbar-width: none; }
+.scrollbar-none::-webkit-scrollbar { display: none; }
+
+/* Mobile optimizations */
+@media (max-width: 640px) {
+  /* Make tables horizontally scrollable */
+  table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  thead { display: table; width: 100%; table-layout: fixed; }
+  tbody { display: table; width: 100%; table-layout: fixed; }
+  tr { display: table-row; }
+
+  /* Larger touch targets */
+  button, a, [role="button"] { min-height: 36px; }
+
+  /* Prevent text overflow */
+  .font-mono { word-break: break-all; }
+}
+
+/* Safe area insets for notched phones */
+@supports (padding: env(safe-area-inset-bottom)) {
+  footer { padding-bottom: env(safe-area-inset-bottom); }
+}

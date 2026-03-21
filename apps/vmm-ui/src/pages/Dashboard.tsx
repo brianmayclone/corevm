@@ -67,9 +67,9 @@ export default function Dashboard() {
   const healthPercent = totalVms > 0 ? Math.round((runningVms / totalVms) * 100) : 100
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="flex flex-col lg:h-full lg:min-h-0 space-y-5 lg:space-y-0">
       {/* ── Top Metrics ─────────────────────────────────────────────── */}
-      <div className="grid grid-cols-3 gap-4 mb-5 flex-shrink-0">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4 lg:mb-5 flex-shrink-0">
         <MetricCard label="System Performance" value={healthPercent > 80 ? 'Optimal State' : `${healthPercent}%`}
           subtitle={`${formatRam(totalRamMb)} Total RAM • ${runningVms}/${totalVms} Active`}
           icon={<Heart size={20} />}
@@ -86,7 +86,7 @@ export default function Dashboard() {
       </div>
 
       {/* ── Instances ───────────────────────────────────────────────── */}
-      <div className="flex-1 min-h-0 mb-5">
+      <div className="lg:flex-1 lg:min-h-0 lg:mb-5">
         <div className="flex items-center justify-between mb-3 flex-shrink-0">
           <h2 className="text-lg font-bold text-vmm-text">
             Instances
@@ -101,7 +101,7 @@ export default function Dashboard() {
             </div>
           </Card>
         ) : (
-          <div className="grid grid-cols-3 gap-3 overflow-y-auto max-h-[calc(100vh-480px)]">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 lg:overflow-y-auto lg:max-h-[calc(100vh-480px)]">
             {vms.map((vm) => (
               <VmPriorityCard
                 key={vm.id}
@@ -121,7 +121,7 @@ export default function Dashboard() {
       </div>
 
       {/* ── System Journal + Quick Deploy (bottom) ──────────────────── */}
-      <div className="grid grid-cols-[1fr_300px] gap-5 flex-shrink-0">
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_300px] gap-5 lg:flex-shrink-0">
         {/* System Journal */}
         <Card padding={false}>
           <div className="flex items-center justify-between px-5 py-3 border-b border-vmm-border">

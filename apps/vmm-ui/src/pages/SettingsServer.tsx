@@ -37,7 +37,7 @@ export default function SettingsServer() {
       </div>
 
       {/* Server Info */}
-      <div className="grid grid-cols-2 gap-5">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
         <Card>
           <div className="flex items-center gap-2 mb-4">
             <Server size={18} className="text-vmm-accent" />
@@ -66,7 +66,7 @@ export default function SettingsServer() {
             <Shield size={18} className="text-vmm-danger" />
             <SectionLabel>Security Policy</SectionLabel>
           </div>
-          <div className="grid grid-cols-2 gap-x-8 gap-y-3 text-sm">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-3 text-sm">
             <div className="flex justify-between">
               <span className="text-vmm-text-muted">Max Login Attempts</span>
               <span className="text-vmm-text font-mono">{security.max_login_attempts}</span>

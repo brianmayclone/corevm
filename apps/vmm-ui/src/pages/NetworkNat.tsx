@@ -40,12 +40,12 @@ export default function NetworkNat() {
       </div>
 
       {/* Stats Row */}
-      <div className="grid grid-cols-[1fr_1fr_300px] gap-5">
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_1fr_300px] gap-5">
         {/* Throughput */}
         <Card>
           <SectionLabel className="mb-3">Throughput</SectionLabel>
           <p className="text-xs text-vmm-text-muted mb-4">Real-time I/O monitoring across all interfaces</p>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="bg-vmm-bg-alt rounded-lg p-4 text-center">
               <div className="text-[10px] text-vmm-text-muted uppercase tracking-wider mb-1">Ingress</div>
               <div className="text-2xl font-bold text-vmm-accent">{formatBytes(totalRx)}</div>

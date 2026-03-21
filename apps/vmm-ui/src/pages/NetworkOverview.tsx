@@ -173,7 +173,7 @@ export default function NetworkOverview() {
       </div>
 
       {/* Topology + Stats */}
-      <div className="grid grid-cols-[1fr_300px] gap-5">
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_300px] gap-5">
         {/* Topology Map */}
         <Card>
           <div className="flex items-center justify-between mb-3">
@@ -251,7 +251,7 @@ export default function NetworkOverview() {
       {/* Interface summary */}
       <div>
         <h2 className="text-lg font-bold text-vmm-text mb-3">Interface Summary</h2>
-        <div className="grid grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           {interfaces.filter(i => i.kind !== 'loopback').slice(0, 8).map((iface) => (
             <Card key={iface.name}>
               <div className="flex items-center justify-between mb-2">

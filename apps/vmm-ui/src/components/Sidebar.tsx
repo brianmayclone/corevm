@@ -51,7 +51,11 @@ const navItems: NavItem[] = [
   },
 ]
 
-export default function Sidebar() {
+interface SidebarProps {
+  onNavigate?: () => void
+}
+
+export default function Sidebar({ onNavigate }: SidebarProps) {
   const location = useLocation()
   const { brandName, brandSubtitle } = useUiStore()
   const [expandedSections, setExpandedSections] = useState<Set<string>>(
@@ -123,6 +127,7 @@ export default function Sidebar() {
                         <NavLink
                           key={child.to}
                           to={child.to}
+                          onClick={onNavigate}
                           className={({ isActive }) =>
                             `flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium transition-colors
                             ${isActive
@@ -147,6 +152,7 @@ export default function Sidebar() {
               key={item.to}
               to={item.to}
               end={item.to === '/'}
+              onClick={onNavigate}
               className={({ isActive }) =>
                 `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors
                 ${isActive

@@ -62,32 +62,32 @@ export default function VmDetail() {
   return (
     <div className="space-y-6">
       {/* ── VM Header ─────────────────────────────────────────────── */}
-      <div className="flex items-start justify-between">
-        <div className="flex items-center gap-4">
-          <OsIcon guestOs={vm.config.guest_os} size={56} />
-          <div>
-            <div className="flex items-center gap-3">
-              <h1 className="text-2xl font-bold text-vmm-text">{vm.name}</h1>
-              <StatusBadge state={vm.state} />
+      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+        <div className="flex items-center gap-3 sm:gap-4 min-w-0">
+          <OsIcon guestOs={vm.config.guest_os} size={44} className="flex-shrink-0 sm:w-14 sm:h-14" />
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
+              <h1 className="text-lg sm:text-2xl font-bold text-vmm-text truncate">{vm.name}</h1>
+              <StatusBadge state={vm.state} size="sm" />
             </div>
-            <div className="flex items-center gap-2 text-sm text-vmm-text-muted mt-0.5">
-              <Clock size={13} /> Created {vm.created_at}
+            <div className="flex items-center gap-2 text-xs sm:text-sm text-vmm-text-muted mt-0.5">
+              <Clock size={12} /> Created {vm.created_at}
             </div>
           </div>
         </div>
 
         {/* Power controls */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-shrink-0">
           {isStopped ? (
-            <Button variant="primary" size="lg" icon={<Power size={16} />} onClick={handleStart}>Power On</Button>
+            <Button variant="primary" size="sm" icon={<Power size={14} />} onClick={handleStart}>Power On</Button>
           ) : (
-            <Button variant="outline" size="lg" icon={<Power size={16} />} onClick={handleStop}>Shutdown</Button>
+            <Button variant="outline" size="sm" icon={<Power size={14} />} onClick={handleStop}>Shutdown</Button>
           )}
           <Button variant="ghost" size="icon" onClick={() => {}} title="Reset">
-            <RefreshCw size={16} />
+            <RefreshCw size={14} />
           </Button>
           <Button variant="danger" size="icon" onClick={handleForceStop} title="Force Stop" disabled={isStopped}>
-            <Square size={14} />
+            <Square size={12} />
           </Button>
         </div>
       </div>
@@ -97,7 +97,7 @@ export default function VmDetail() {
 
       {/* ── General Tab ────────────────────────────────────────────── */}
       {activeTab === 'general' && (
-        <div className="grid grid-cols-[1fr_300px] gap-6">
+        <div className="grid grid-cols-1 lg:grid-cols-[1fr_300px] gap-6">
           <div className="space-y-6">
             {/* Console */}
             {isRunning ? (
@@ -111,7 +111,7 @@ export default function VmDetail() {
               <h2 className="text-base font-semibold text-vmm-text flex items-center gap-2 mb-3">
                 <RefreshCw size={15} className="text-vmm-text-muted" /> Recent Activity
               </h2>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {activities.length > 0 ? activities.slice(0, 4).map((a) => (
                   <ActivityCard
                     key={a.id}

@@ -74,7 +74,7 @@ export default function StorageQos() {
       </div>
 
       {/* Explanation cards */}
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         <Card>
           <div className="flex items-center gap-2 mb-2">
             <Gauge size={18} className="text-vmm-accent" />
@@ -108,7 +108,7 @@ export default function StorageQos() {
       {showCreate && (
         <Card>
           <SectionLabel className="mb-4">New QoS Policy</SectionLabel>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="text-[10px] text-vmm-text-muted uppercase tracking-wider block mb-1">Policy Name</label>
               <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })}

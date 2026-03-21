@@ -63,7 +63,7 @@ export default function MachinesList() {
           </div>
         </Card>
       ) : (
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {filteredVms.map((vm) => (
             <VmPriorityCard
               key={vm.id}

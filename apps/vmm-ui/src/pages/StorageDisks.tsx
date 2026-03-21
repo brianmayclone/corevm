@@ -87,7 +87,7 @@ export default function StorageDisks() {
       {showCreate && (
         <Card>
           <SectionLabel className="mb-4">New Disk Image</SectionLabel>
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             <div>
               <label className="text-[10px] text-vmm-text-muted uppercase tracking-wider block mb-1">Name</label>
               <input value={createName} onChange={(e) => setCreateName(e.target.value)}

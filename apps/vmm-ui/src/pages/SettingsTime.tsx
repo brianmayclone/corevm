@@ -66,7 +66,7 @@ export default function SettingsTime() {
         </div>
       </Card>
 
-      <div className="grid grid-cols-2 gap-5">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
         {/* Timezone */}
         <Card>
           <SectionLabel className="mb-4">Timezone</SectionLabel>

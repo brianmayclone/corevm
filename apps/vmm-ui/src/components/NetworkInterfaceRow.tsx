@@ -28,7 +28,7 @@ export default function NetworkInterfaceRow({ iface }: Props) {
   const isUp = iface.state === 'up'
 
   return (
-    <div className="flex items-center gap-4 px-5 py-4 border-b border-vmm-border last:border-b-0 hover:bg-vmm-surface-hover/30 transition-colors">
+    <div className="flex items-center gap-3 sm:gap-4 px-3 sm:px-5 py-3 sm:py-4 border-b border-vmm-border last:border-b-0 hover:bg-vmm-surface-hover/30 transition-colors min-w-0">
       {/* Icon */}
       <div className="w-10 h-10 rounded-lg bg-vmm-bg-alt flex items-center justify-center flex-shrink-0">
         <Icon size={18} className={isUp ? 'text-vmm-accent' : 'text-vmm-text-muted'} />

@@ -53,7 +53,7 @@ export default function StorageShared() {
 
       {/* Shared summary */}
       {pools.length > 0 && (
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           <Card>
             <div className="flex items-center gap-3 mb-2">
               <Share2 size={18} className="text-vmm-accent" />

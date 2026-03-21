@@ -144,7 +144,7 @@ export default function VmCreate() {
       {/* ── General ───────────────────────────────────────────────── */}
       {activeTab === 'general' && (
         <div className="space-y-5">
-          <div className="grid grid-cols-[1fr_340px] gap-5">
+          <div className="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-5">
             <SectionCard icon={<Info size={18} />} title="Basic Information">
               <div className="space-y-5">
                 <FormField label="Machine Name">
@@ -169,7 +169,7 @@ export default function VmCreate() {
             </SectionCard>
           </div>
           <SectionCard icon={<SlidersHorizontal size={18} />} title="Boot Options">
-            <div className="grid grid-cols-2 gap-8">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-8">
               <FormField label="Boot Order">
                 <div className="space-y-2">
                   {bootOptions.map((opt) => (
@@ -202,7 +202,7 @@ export default function VmCreate() {
       {activeTab === 'hardware' && (
         <div className="space-y-5">
           <SectionCard icon={<Cpu size={18} />} title="Compute Resources">
-            <div className="grid grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
               <FormField label="CPU Cores">
                 <TextInput type="number" min={1} max={32} value={form.cpu_cores} onChange={(e) => set('cpu_cores', parseInt(e.target.value) || 1)} />
               </FormField>
@@ -212,7 +212,7 @@ export default function VmCreate() {
             </div>
           </SectionCard>
           <SectionCard icon={<Monitor size={18} />} title="Display">
-            <div className="grid grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
               <FormField label="GPU Model">
                 <Select options={gpuOptions} value={form.gpu_model} onChange={(e) => set('gpu_model', e.target.value)} />
               </FormField>
@@ -235,7 +235,7 @@ export default function VmCreate() {
           <Toggle label="Enable Networking" description="Connect a virtual NIC to the VM." enabled={form.net_enabled} onChange={(v) => set('net_enabled', v)} />
           {form.net_enabled && (
             <div className="mt-4 space-y-4">
-              <div className="grid grid-cols-2 gap-6">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                 <FormField label="NIC Model">
                   <Select options={nicOptions} value={form.nic_model} onChange={(e) => set('nic_model', e.target.value)} />
                 </FormField>
@@ -249,7 +249,7 @@ export default function VmCreate() {
                 </FormField>
               )}
               <FormField label="MAC Address">
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <Select options={[{ value: 'dynamic', label: 'Dynamic (auto)' }, { value: 'static', label: 'Static' }]}
                     value={form.mac_mode} onChange={(e) => set('mac_mode', e.target.value)} />
                   {form.mac_mode === 'static' && (
@@ -290,7 +290,7 @@ export default function VmCreate() {
               </Button>
             </div>
           </div>
-          <div className="grid grid-cols-2 gap-6 mt-5 pt-5 border-t border-vmm-border">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 mt-5 pt-5 border-t border-vmm-border">
             <FormField label="Disk Cache (MB)">
               <TextInput type="number" min={0} value={form.disk_cache_mb} onChange={(e) => set('disk_cache_mb', parseInt(e.target.value) || 0)} />
             </FormField>

@@ -22,7 +22,7 @@ export default function SettingsUi() {
       {/* Theme */}
       <Card>
         <SectionLabel className="mb-4">Theme</SectionLabel>
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {([
             { id: 'dark', label: 'Dark Mode', icon: <Moon size={20} />, desc: 'Optimized for low-light environments' },
             { id: 'light', label: 'Light Mode', icon: <Sun size={20} />, desc: 'Bright theme for well-lit spaces' },

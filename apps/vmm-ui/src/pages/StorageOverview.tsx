@@ -80,7 +80,7 @@ export default function Storage() {
       </div>
 
       {/* ── Aggregate Capacity + Health ────────────────────────────── */}
-      <div className="grid grid-cols-[1fr_300px] gap-5">
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_300px] gap-5">
         <Card>
           <SectionLabel className="mb-4">Aggregate Capacity</SectionLabel>
           <div className="flex items-baseline gap-2 mb-4">

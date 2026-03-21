@@ -26,7 +26,7 @@ export default function NetworkAdapters() {
       </div>
 
       {/* Summary cards */}
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {interfaces.filter(i => i.state === 'up').map((iface) => (
           <Card key={iface.name}>
             <div className="flex items-center justify-between mb-2">
