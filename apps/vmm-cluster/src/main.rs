@@ -108,8 +108,8 @@ async fn main() {
     engine::heartbeat::spawn(Arc::clone(&state));
     tracing::info!("Heartbeat monitor started (10s interval)");
 
-    // TODO: Phase 4 — engine::ha::spawn(Arc::clone(&state));
-    // TODO: Phase 5 — engine::drs::spawn(Arc::clone(&state));
+    engine::drs::spawn(Arc::clone(&state));
+    tracing::info!("DRS engine started (5m interval)");
 
     // ── Build router ────────────────────────────────────────────────
     let app = api::router()

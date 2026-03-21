@@ -29,6 +29,10 @@ async fn poll_all_nodes(state: &Arc<ClusterState>) {
     // Snapshot current node IDs to avoid holding the DashMap lock
     let node_ids: Vec<String> = state.nodes.iter().map(|n| n.node_id.clone()).collect();
 
+    if node_ids.is_empty() {
+        return;
+    }
+
     for node_id in node_ids {
         let node = match state.nodes.get(&node_id) {
             Some(n) => n.clone(),
@@ -97,7 +101,12 @@ async fn poll_all_nodes(state: &Arc<ClusterState>) {
                             &format!("Host offline — {} missed heartbeats", MAX_MISSED_HEARTBEATS),
                             Some("host"), Some(&node_id), Some(&node_id));
                     }
-                    // TODO: Phase 4 — trigger HA engine to restart VMs
+                    // Trigger HA engine to restart protected VMs
+                    let state_clone = Arc::clone(state);
+                    let node_id_clone = node_id.clone();
+                    tokio::spawn(async move {
+                        crate::engine::ha::handle_host_failure(&state_clone, &node_id_clone).await;
+                    });
                 }
             }
         }

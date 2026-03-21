@@ -195,7 +195,12 @@ pub async fn enter_maintenance(
         node.status = NodeStatus::Maintenance;
     }
 
-    // TODO: Trigger evacuation via maintenance engine (Phase 5)
+    // Trigger evacuation in background
+    let state_evac = state.clone();
+    let host_evac = id.clone();
+    tokio::spawn(async move {
+        crate::engine::maintenance::evacuate_host(&state_evac, &host_evac).await;
+    });
 
     Ok(Json(serde_json::json!({"ok": true})))
 }

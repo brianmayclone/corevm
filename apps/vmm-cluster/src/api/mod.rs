@@ -13,6 +13,12 @@ pub mod users;
 pub mod clusters;
 pub mod hosts;
 pub mod vms;
+pub mod storage;
+pub mod events;
+pub mod tasks;
+pub mod drs;
+pub mod migration;
+pub mod alarms;
 
 pub fn router() -> Router<Arc<ClusterState>> {
     Router::new()
@@ -29,11 +35,11 @@ pub fn router() -> Router<Arc<ClusterState>> {
         .route("/api/users/{id}", put(users::update).delete(users::delete))
         .route("/api/users/{id}/password", put(users::change_password))
 
-        // ── Clusters (new — cluster management) ─────────
+        // ── Clusters ────────────────────────────────────
         .route("/api/clusters", get(clusters::list).post(clusters::create))
         .route("/api/clusters/{id}", get(clusters::get).put(clusters::update).delete(clusters::delete))
 
-        // ── Hosts (new — host management) ───────────────
+        // ── Hosts ───────────────────────────────────────
         .route("/api/hosts", get(hosts::list).post(hosts::register))
         .route("/api/hosts/{id}", get(hosts::get).delete(hosts::deregister))
         .route("/api/hosts/{id}/maintenance", post(hosts::enter_maintenance))
@@ -45,8 +51,27 @@ pub fn router() -> Router<Arc<ClusterState>> {
         .route("/api/vms/{id}/start", post(vms::start))
         .route("/api/vms/{id}/stop", post(vms::stop))
         .route("/api/vms/{id}/force-stop", post(vms::force_stop))
+        .route("/api/vms/{id}/migrate", post(migration::migrate))
 
-        // TODO: Phase 3 — Storage/Datastore endpoints
-        // TODO: Phase 5 — Migration, DRS, Tasks endpoints
-        // TODO: Phase 6 — WebSocket console/terminal bridging
+        // ── Storage (cluster-wide datastores) ───────────
+        .route("/api/storage/datastores", get(storage::list_datastores).post(storage::create_datastore))
+        .route("/api/storage/datastores/{id}", get(storage::get_datastore).delete(storage::delete_datastore))
+
+        // ── Events ──────────────────────────────────────
+        .route("/api/events", get(events::list))
+
+        // ── Tasks ───────────────────────────────────────
+        .route("/api/tasks", get(tasks::list))
+
+        // ── DRS ─────────────────────────────────────────
+        .route("/api/drs/recommendations", get(drs::list))
+        .route("/api/drs/{id}/apply", post(drs::apply))
+        .route("/api/drs/{id}/dismiss", post(drs::dismiss))
+
+        // ── Alarms ──────────────────────────────────────
+        .route("/api/alarms", get(alarms::list))
+        .route("/api/alarms/{id}/acknowledge", post(alarms::acknowledge))
+
+        // ── WebSocket ───────────────────────────────────
+        .route("/ws/console/{vm_id}", get(crate::ws::console_bridge::handler))
 }

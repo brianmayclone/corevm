@@ -91,6 +91,17 @@ impl NodeClient {
         resp.json().await.map_err(|e| format!("Invalid response: {}", e))
     }
 
+    /// POST /agent/storage/unmount
+    pub async fn unmount_datastore(&self, req: &vmm_core::cluster::UnmountDatastoreRequest) -> Result<AgentResponse, String> {
+        let resp = self.http.post(format!("{}/agent/storage/unmount", &self.base_url))
+            .header("X-Agent-Token", &self.agent_token)
+            .json(req)
+            .send().await
+            .map_err(|e| format!("Connection failed: {}", e))?;
+
+        resp.json().await.map_err(|e| format!("Invalid response: {}", e))
+    }
+
     /// Generic POST to an agent endpoint (no body).
     async fn post_agent(&self, path: &str) -> Result<AgentResponse, String> {
         let resp = self.http.post(format!("{}{}", &self.base_url, path))

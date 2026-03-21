@@ -12,3 +12,5 @@ pub mod host;
 pub mod vm;
 pub mod datastore;
 pub mod task;
+pub mod migration;
+pub mod alarm;

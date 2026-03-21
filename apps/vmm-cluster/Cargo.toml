@@ -43,3 +43,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dashmap = "6"
 futures = "0.3"
 gethostname = "0.5"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
