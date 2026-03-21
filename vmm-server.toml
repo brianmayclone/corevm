@@ -7,11 +7,11 @@ jwt_secret = "dev-secret-change-in-production"
 session_timeout_hours = 24
 
 [storage]
-default_pool = "/tmp/vmm/images"
-iso_pool = "/tmp/vmm/isos"
+default_pool = "/home/cmoeller/.vmm/images"
+iso_pool = "/home/cmoeller/.vmm/isos"
 
 [vms]
-config_dir = "/tmp/vmm/vms"
+config_dir = "/home/cmoeller/.vmm/vms"
 
 
 [logging]

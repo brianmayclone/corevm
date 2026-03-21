@@ -102,17 +102,50 @@ async fn main() {
     let _ = std::fs::create_dir_all(&cfg.storage.default_pool);
     let _ = std::fs::create_dir_all(&cfg.storage.iso_pool);
 
-    // Init database
+    // Init database — MUST be on a persistent filesystem (not /tmp!)
     let db_path = cfg.vms.config_dir.join("vmm.db");
+    let db_existed = db_path.exists();
+    if db_path.starts_with("/tmp") {
+        tracing::warn!("Database path is in /tmp — data WILL be lost on reboot! Change vms.config_dir in vmm-server.toml");
+    }
+    tracing::info!("Database: {} ({})", db_path.display(),
+        if db_existed { "existing" } else { "NEW — will be created" });
     let conn = rusqlite::Connection::open(&db_path)
         .unwrap_or_else(|e| {
-            eprintln!("Database error: {}", e);
+            tracing::error!("Failed to open database at {}: {}", db_path.display(), e);
             std::process::exit(1);
         });
+    // Enable WAL mode for better concurrent access and crash safety
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
+        .unwrap_or_else(|e| tracing::warn!("Failed to set WAL mode: {}", e));
     db::init(&conn).unwrap_or_else(|e| {
-        eprintln!("Database init error: {}", e);
+        tracing::error!("Database init/migration error: {}", e);
         std::process::exit(1);
     });
+    // Create initial backup
+    let backup_dir = cfg.vms.config_dir.join("backups");
+    let _ = std::fs::create_dir_all(&backup_dir);
+    if db_existed {
+        let backup_name = format!("vmm-startup-{}.db",
+            chrono::Local::now().format("%Y%m%d-%H%M%S"));
+        let backup_path = backup_dir.join(&backup_name);
+        match std::fs::copy(&db_path, &backup_path) {
+            Ok(_) => tracing::info!("Database backup: {}", backup_path.display()),
+            Err(e) => tracing::warn!("Failed to backup database: {}", e),
+        }
+        // Keep only last 10 backups
+        if let Ok(entries) = std::fs::read_dir(&backup_dir) {
+            let mut backups: Vec<_> = entries.filter_map(|e| e.ok())
+                .filter(|e| e.file_name().to_string_lossy().starts_with("vmm-"))
+                .collect();
+            backups.sort_by_key(|e| e.file_name());
+            if backups.len() > 10 {
+                for old in &backups[..backups.len() - 10] {
+                    let _ = std::fs::remove_file(old.path());
+                }
+            }
+        }
+    }
 
     let jwt_secret = cfg.auth.jwt_secret.clone();
 
