@@ -193,6 +193,38 @@ async fn main() {
         });
     tracing::info!("Listening on http://{}", bind);
 
+    // Periodic database backup task (every 30 minutes)
+    {
+        let db_path = db_path.clone();
+        let backup_dir = backup_dir.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30 * 60));
+            interval.tick().await; // skip first immediate tick
+            loop {
+                interval.tick().await;
+                let backup_name = format!("vmm-auto-{}.db",
+                    chrono::Local::now().format("%Y%m%d-%H%M%S"));
+                let backup_path = backup_dir.join(&backup_name);
+                match std::fs::copy(&db_path, &backup_path) {
+                    Ok(_) => tracing::info!("Auto-backup: {}", backup_path.display()),
+                    Err(e) => tracing::warn!("Auto-backup failed: {}", e),
+                }
+                // Keep only last 10 auto-backups
+                if let Ok(entries) = std::fs::read_dir(&backup_dir) {
+                    let mut backups: Vec<_> = entries.filter_map(|e| e.ok())
+                        .filter(|e| e.file_name().to_string_lossy().starts_with("vmm-auto-"))
+                        .collect();
+                    backups.sort_by_key(|e| e.file_name());
+                    if backups.len() > 10 {
+                        for old in &backups[..backups.len() - 10] {
+                            let _ = std::fs::remove_file(old.path());
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     // Graceful shutdown on Ctrl+C
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

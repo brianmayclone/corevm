@@ -41,7 +41,7 @@ export default function Header({ onMenuToggle }: Props) {
 
       {/* Actions */}
       <div className="flex items-center gap-1 sm:gap-2">
-        <Button variant="outline" size="sm" icon={<MonitorPlay size={14} />} className="hidden md:inline-flex">Terminal</Button>
+        <Button variant="outline" size="sm" icon={<MonitorPlay size={14} />} className="hidden md:inline-flex" onClick={() => navigate('/terminal')}>Terminal</Button>
         <Button variant="primary" size="sm" icon={<Plus size={14} />} onClick={() => navigate('/vms/create')}>
           <span className="hidden sm:inline">Create VM</span>
           <span className="sm:hidden">New</span>

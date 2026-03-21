@@ -3,6 +3,7 @@ members = [
   "apps/vmctl",
   "apps/vmmanager",
   "apps/vmm-server",
+  "apps/vmm-cluster",
   "libs/vmm-core",
   "tests/hosttests",
 ]

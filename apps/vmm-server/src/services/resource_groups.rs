@@ -151,7 +151,7 @@ impl ResourceGroupService {
     }
 
     /// Get all permissions for a resource group.
-    fn get_permissions(db: &Connection, rg_id: i64) -> Result<Vec<GroupPermission>, String> {
+    pub fn get_permissions(db: &Connection, rg_id: i64) -> Result<Vec<GroupPermission>, String> {
         let mut stmt = db.prepare(
             "SELECT rgp.id, rgp.group_id, g.name, rgp.permissions \
              FROM resource_group_permissions rgp \

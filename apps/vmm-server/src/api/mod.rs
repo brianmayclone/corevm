@@ -64,6 +64,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/settings/security", get(settings::get_security))
         .route("/api/settings/groups", get(settings::list_groups).post(settings::create_group))
         .route("/api/settings/groups/{id}", delete(settings::delete_group))
-        // WebSocket console
+        // WebSocket console + terminal
         .route("/ws/console/{vm_id}", get(crate::ws::console::handler))
+        .route("/ws/terminal", get(crate::ws::terminal::ws_terminal))
 }

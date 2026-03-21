@@ -29,6 +29,7 @@ import SettingsUsers from './pages/SettingsUsers'
 import SettingsGroups from './pages/SettingsGroups'
 import SettingsTime from './pages/SettingsTime'
 import SettingsServer from './pages/SettingsServer'
+import TerminalPage from './pages/TerminalPage'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore()
@@ -70,6 +71,7 @@ export default function App() {
             <Route path="adapters" element={<NetworkAdapters />} />
             <Route path="vlans" element={<NetworkVlans />} />
           </Route>
+          <Route path="terminal" element={<TerminalPage />} />
           <Route path="settings" element={<Settings />}>
             <Route path="ui" element={<SettingsUi />} />
             <Route path="users" element={<SettingsUsers />} />

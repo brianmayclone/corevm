@@ -1,29 +1,26 @@
 [package]
-name = "vmm-server"
+name = "vmm-cluster"
 version = "0.1.0"
 edition = "2021"
-description = "CoreVM web management server — REST API + WebSocket console"
+description = "CoreVM cluster orchestration server — central authority managing multiple vmm-server nodes"
 
 [[bin]]
-name = "vmm-server"
+name = "vmm-cluster"
 path = "src/main.rs"
 
 [dependencies]
 # Shared models
 vmm-core = { path = "../../libs/vmm-core" }
 
-# VM engine
-libcorevm = { path = "../../libs/libcorevm", default-features = false }
-
-# Terminal
-vmm-term = { path = "../../libs/vmm-term" }
-
 # Web framework
-axum = { version = "0.8", features = ["ws", "multipart"] }
+axum = { version = "0.8", features = ["ws"] }
 axum-extra = { version = "0.10", features = ["typed-header"] }
 tower = { version = "0.5" }
-tower-http = { version = "0.6", features = ["cors", "compression-gzip", "fs", "trace"] }
+tower-http = { version = "0.6", features = ["cors", "compression-gzip", "trace"] }
 tokio = { version = "1", features = ["full"] }
+
+# HTTP client (for Agent API calls to nodes)
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
 # Auth
 jsonwebtoken = "9"
@@ -33,16 +30,10 @@ rand = "0.8"
 # Database
 rusqlite = { version = "0.33", features = ["bundled"] }
 
-# Platform
-libc = "0.2"
-
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
-
-# Image encoding (framebuffer -> JPEG)
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -51,8 +42,3 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dashmap = "6"
 futures = "0.3"
-
-[features]
-default = ["linux"]
-linux = ["libcorevm/linux"]
-windows = ["libcorevm/windows"]
