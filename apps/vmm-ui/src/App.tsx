@@ -5,6 +5,9 @@ import { useUiStore } from './stores/uiStore'
 import Layout from './components/Layout'
 import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
+import Machines from './pages/Machines'
+import MachinesList from './pages/MachinesList'
+import ResourceGroups from './pages/ResourceGroups'
 import VmDetail from './pages/VmDetail'
 import VmCreate from './pages/VmCreate'
 import VmConsole from './pages/VmConsole'
@@ -44,6 +47,11 @@ export default function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
           <Route index element={<Dashboard />} />
+          <Route path="machines" element={<Machines />}>
+            <Route path="overview" element={<Dashboard />} />
+            <Route path="list" element={<MachinesList />} />
+            <Route path="resource-groups" element={<ResourceGroups />} />
+          </Route>
           <Route path="vms/create" element={<VmCreate />} />
           <Route path="vms/:id" element={<VmDetail />} />
           <Route path="vms/:id/console" element={<VmConsole />} />

@@ -11,6 +11,7 @@ pub mod vms;
 pub mod storage;
 pub mod network;
 pub mod settings;
+pub mod resource_groups;
 
 /// Build the complete API router.
 pub fn router() -> Router<Arc<AppState>> {
@@ -47,6 +48,12 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/storage/isos", get(storage::list_isos))
         .route("/api/storage/isos/upload", post(storage::upload_iso))
         .route("/api/storage/isos/{id}", delete(storage::delete_iso))
+        // Resource Groups
+        .route("/api/resource-groups", get(resource_groups::list).post(resource_groups::create))
+        .route("/api/resource-groups/permissions-list", get(resource_groups::permissions_list))
+        .route("/api/resource-groups/{id}", get(resource_groups::get).put(resource_groups::update).delete(resource_groups::delete))
+        .route("/api/resource-groups/{id}/permissions", post(resource_groups::set_permissions).delete(resource_groups::remove_permissions))
+        .route("/api/resource-groups/{id}/assign-vm", post(resource_groups::assign_vm))
         // Network
         .route("/api/network/interfaces", get(network::list_interfaces))
         .route("/api/network/stats", get(network::network_stats))

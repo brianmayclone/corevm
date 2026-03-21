@@ -134,21 +134,6 @@ pub async fn list_groups(auth: AuthUser, State(state): State<Arc<AppState>>) -> 
     require_admin(&auth)?;
     let db = state.db.lock().unwrap();
 
-    // Ensure groups table exists
-    db.execute_batch(
-        "CREATE TABLE IF NOT EXISTS groups (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
-            role TEXT NOT NULL DEFAULT 'viewer',
-            description TEXT NOT NULL DEFAULT ''
-        );
-        CREATE TABLE IF NOT EXISTS group_members (
-            group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
-            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            PRIMARY KEY (group_id, user_id)
-        );"
-    ).map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
     let mut stmt = db.prepare(
         "SELECT g.id, g.name, g.role, g.description, COUNT(gm.user_id) as member_count \
          FROM groups g LEFT JOIN group_members gm ON g.id = gm.group_id \

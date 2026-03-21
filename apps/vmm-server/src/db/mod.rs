@@ -6,6 +6,38 @@ use rusqlite::Connection;
 pub fn init(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(SCHEMA).map_err(|e| format!("DB init failed: {}", e))?;
     seed_admin(conn)?;
+    seed_default_resource_group(conn)?;
+    migrate_vms_resource_group(conn)?;
+    Ok(())
+}
+
+/// Ensure the default "All Machines" resource group exists.
+fn seed_default_resource_group(conn: &Connection) -> Result<(), String> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM resource_groups WHERE is_default = 1", [], |r| r.get(0)
+    ).map_err(|e| e.to_string())?;
+    if count == 0 {
+        conn.execute(
+            "INSERT INTO resource_groups (name, description, is_default) VALUES ('All Machines', 'Default resource group for all VMs', 1)",
+            [],
+        ).map_err(|e| e.to_string())?;
+        tracing::info!("Seeded default resource group 'All Machines'");
+    }
+    Ok(())
+}
+
+/// Add resource_group_id column to vms if it doesn't exist, default to group 1.
+fn migrate_vms_resource_group(conn: &Connection) -> Result<(), String> {
+    let has_col = conn.prepare("SELECT resource_group_id FROM vms LIMIT 0").is_ok();
+    if !has_col {
+        // SQLite doesn't allow NOT NULL + REFERENCES in ALTER TABLE — use nullable column + backfill
+        conn.execute_batch(
+            "ALTER TABLE vms ADD COLUMN resource_group_id INTEGER DEFAULT 1;"
+        ).map_err(|e| format!("Migration failed: {}", e))?;
+        conn.execute("UPDATE vms SET resource_group_id = 1 WHERE resource_group_id IS NULL", [])
+            .map_err(|e| format!("Migration backfill failed: {}", e))?;
+        tracing::info!("Migrated vms table: added resource_group_id column");
+    }
     Ok(())
 }
 
@@ -109,4 +141,42 @@ CREATE TABLE IF NOT EXISTS audit_log (
     details     TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- User groups and group membership
+CREATE TABLE IF NOT EXISTS groups (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL UNIQUE,
+    role        TEXT NOT NULL DEFAULT 'viewer',
+    description TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS group_members (
+    group_id    INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    PRIMARY KEY (group_id, user_id)
+);
+
+-- Resource groups: every VM belongs to exactly one resource group.
+-- "All Machines" (id=1) is the default and cannot be deleted.
+CREATE TABLE IF NOT EXISTS resource_groups (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    is_default  INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Permissions: which user-group has which permissions on a resource-group.
+-- permissions is a comma-separated list: vm.create,vm.edit,vm.delete,vm.start_stop,
+-- vm.console,network.edit,storage.edit,snapshots.manage
+CREATE TABLE IF NOT EXISTS resource_group_permissions (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    resource_group_id INTEGER NOT NULL REFERENCES resource_groups(id) ON DELETE CASCADE,
+    group_id          INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    permissions       TEXT NOT NULL DEFAULT '',
+    UNIQUE(resource_group_id, group_id)
+);
+
+-- Add resource_group_id to vms (migration-safe: column may already exist)
+-- We handle this in code since ALTER TABLE IF NOT EXISTS isn't standard SQLite.
 "#;

@@ -22,6 +22,7 @@ export interface VmSummary {
   ram_mb: number
   cpu_cores: number
   owner_id: number
+  resource_group_id: number
 }
 
 export interface VmConfig {
@@ -63,6 +64,7 @@ export interface VmDetail {
   state: VmState
   config: VmConfig
   owner_id: number
+  resource_group_id: number
   created_at: string
   disks: DiskInfoApi[]
 }
@@ -149,6 +151,30 @@ export interface PoolFile {
   path: string
   size_bytes: number
   is_dir: boolean
+}
+
+// ── Resource Groups ──────────────────────────────────────────────────────
+
+export interface GroupPermission {
+  id: number
+  group_id: number
+  group_name: string
+  permissions: string[]
+}
+
+export interface ResourceGroup {
+  id: number
+  name: string
+  description: string
+  is_default: boolean
+  vm_count: number
+  created_at: string
+  permissions: GroupPermission[]
+}
+
+export interface PermissionsList {
+  permissions: string[]
+  categories: Record<string, string[]>
 }
 
 // ── Settings ─────────────────────────────────────────────────────────────

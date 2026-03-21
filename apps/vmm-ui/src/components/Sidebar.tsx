@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
 import { useUiStore } from '../stores/uiStore'
-import { Monitor, HardDrive, Network, Settings, Zap, LifeBuoy, FileText, ChevronDown, Cable, Layers, Globe, Unplug, Database, Share2, Gauge, Disc, Palette, Users, Clock, Server, Shield } from 'lucide-react'
+import { Monitor, HardDrive, Network, Settings, Zap, LifeBuoy, FileText, ChevronDown, Cable, Layers, Globe, Unplug, Database, Share2, Gauge, Disc, Palette, Users, Clock, Server, Shield, LayoutDashboard, List, FolderOpen } from 'lucide-react'
 
 interface NavItem {
   to: string
@@ -11,7 +11,14 @@ interface NavItem {
 }
 
 const navItems: NavItem[] = [
-  { to: '/', icon: Monitor, label: 'My Machines' },
+  {
+    to: '/machines', icon: Monitor, label: 'Machines',
+    children: [
+      { to: '/machines/overview', icon: LayoutDashboard, label: 'Dashboard' },
+      { to: '/machines/list', icon: List, label: 'All Machines' },
+      { to: '/machines/resource-groups', icon: FolderOpen, label: 'Resource Groups' },
+    ],
+  },
   {
     to: '/storage', icon: HardDrive, label: 'Storage',
     children: [

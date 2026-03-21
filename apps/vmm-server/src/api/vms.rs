@@ -19,6 +19,7 @@ pub struct VmSummary {
     pub ram_mb: u32,
     pub cpu_cores: u32,
     pub owner_id: i64,
+    pub resource_group_id: i64,
 }
 
 #[derive(Serialize)]
@@ -35,6 +36,7 @@ pub struct VmDetail {
     pub state: VmState,
     pub config: VmConfig,
     pub owner_id: i64,
+    pub resource_group_id: i64,
     pub created_at: String,
     pub disks: Vec<DiskInfo>,
 }
@@ -49,6 +51,7 @@ pub async fn list(_auth: AuthUser, State(state): State<Arc<AppState>>) -> Result
             id: r.id, name: r.name, state: vm_state,
             guest_os: r.config.guest_os.to_config_str().to_string(),
             ram_mb: r.config.ram_mb, cpu_cores: r.config.cpu_cores, owner_id: r.owner_id,
+            resource_group_id: r.resource_group_id,
         }
     }).collect();
     Ok(Json(vms))
@@ -93,7 +96,7 @@ pub async fn get(_auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_id
         DiskInfo { path: path.clone(), size_bytes, used_bytes }
     }).collect();
 
-    Ok(Json(VmDetail { id: r.id, name: r.name, state: vm_state, config: r.config, owner_id: r.owner_id, created_at: r.created_at, disks }))
+    Ok(Json(VmDetail { id: r.id, name: r.name, state: vm_state, config: r.config, owner_id: r.owner_id, resource_group_id: r.resource_group_id, created_at: r.created_at, disks }))
 }
 
 /// PUT /api/vms/:id

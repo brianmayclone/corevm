@@ -8,3 +8,4 @@ pub mod user;
 pub mod vm;
 pub mod storage;
 pub mod audit;
+pub mod resource_groups;
