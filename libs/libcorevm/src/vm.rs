@@ -397,22 +397,16 @@ impl Vm {
             pci_bus.add_device(bridge);
         }
 
-        // VGA (QEMU stdvga) — SeaBIOS needs a PCI VGA for option ROM
+        // VGA (QEMU stdvga) — SeaBIOS needs a PCI VGA for option ROM.
+        // If VirtIO GPU is later set up, setup_virtio_gpu() removes this device.
         {
             let mut vga = PciDevice::new(0x1234, 0x1111, 0x03, 0x00, 0x00);
             vga.device = cs.slots.vga;
-            // BAR0+BAR1: 64-bit prefetchable linear framebuffer.
-            // Windows MSBDA driver requires 64-bit prefetchable BAR for the
-            // framebuffer. Uses BAR0 (low) + BAR1 (high, always 0).
             let bar0_size = unsafe { &*self.svga_ptr }.vram_size() as u32;
             vga.set_bar_64bit_prefetchable(0, cs.mmio.vga_bar0 as u32, bar0_size);
-            // BAR2: Bochs dispi MMIO registers (4KB)
             vga.set_bar(2, cs.mmio.vga_bar2 as u32, 0x1000, true);
-            // Interrupt: declare INTA so Windows PnP can allocate resources.
             vga.set_interrupt(cs.irqs.vga, 1);
-            // Power Management capability — required by Windows Basic Display Adapter.
             vga.add_pm_capability(0x40, 0x00);
-            // Expansion ROM BAR
             vga.config_space[0x30] = 0x00;
             vga.config_space[0x31] = 0x00;
             vga.config_space[0x32] = 0x00;
@@ -993,9 +987,13 @@ impl Vm {
         let bar0_addr: u64 = self.chipset.mmio.virtio_gpu_bar0;
         self.memory.add_mmio(bar0_addr, VIRTIO_GPU_BAR0_SIZE as u64, gpu);
 
-        // Register PCI device at slot 7 (00:07.0).
+        // Register PCI device and remove VGA from PCI bus.
+        // VGA I/O ports and SVGA device remain (needed for BIOS boot),
+        // but removing the PCI device prevents Linux from loading bochs-drm
+        // which would compete with the virtio-gpu driver.
         if !self.pci_bus_ptr.is_null() {
             let pci_bus = unsafe { &mut *self.pci_bus_ptr };
+            pci_bus.remove_device(self.chipset.slots.vga);
             let mut pci_dev = PciDevice::new(
                 0x1AF4, // VirtIO vendor
                 0x1050, // VirtIO GPU (non-transitional)
@@ -1014,9 +1012,8 @@ impl Vm {
             // BAR0: MMIO config space (16 KB).
             pci_dev.set_bar(0, bar0_addr as u32, VIRTIO_GPU_BAR0_SIZE, true);
 
-            // Interrupt: INTA → dedicated IRQ 5 (not shared with AHCI/E1000/VirtIO-Net on IRQ 11).
-            // Using a separate IRQ avoids missed interrupts when other devices hold IRQ 11 high.
-            pci_dev.set_interrupt(5, 1);
+            // Interrupt: INTA, IRQ from chipset config (dedicated, no sharing).
+            pci_dev.set_interrupt(self.chipset.irqs.virtio_gpu, 1);
 
             // VirtIO PCI capability list pointer.
             // Set capabilities pointer (offset 0x34) and status bit.

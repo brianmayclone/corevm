@@ -45,6 +45,10 @@ const VIRTIO_GPU_CMD_GET_CAPSET_INFO: u32 = 0x0108;
 const VIRTIO_GPU_CMD_GET_CAPSET: u32 = 0x0109;
 const VIRTIO_GPU_CMD_GET_EDID: u32 = 0x010A;
 
+// Cursor commands (cursorq)
+const VIRTIO_GPU_CMD_UPDATE_CURSOR: u32 = 0x0300;
+const VIRTIO_GPU_CMD_MOVE_CURSOR: u32 = 0x0301;
+
 // Response types
 const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
 const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
@@ -132,6 +136,9 @@ struct Virtqueue {
     used_addr: u64,
     /// Last seen available ring index.
     last_avail_idx: u16,
+    /// Set when the driver requests no interrupt notification for this queue.
+    /// Read from the avail ring flags field.
+    no_interrupt: bool,
 }
 
 impl Virtqueue {
@@ -144,6 +151,7 @@ impl Virtqueue {
             avail_addr: 0,
             used_addr: 0,
             last_avail_idx: 0,
+            no_interrupt: false,
         }
     }
 }
@@ -290,6 +298,8 @@ impl VirtioGpu {
         self.isr_status |= 1;
         self.irq_pending = true;
         #[cfg(feature = "std")]
+        eprintln!("[virtio-gpu] virtio_notify: isr_status=1 irq_pending=true");
+        #[cfg(feature = "std")]
         if let Some(ref mut cb) = self.notify_callback {
             cb();
         }
@@ -364,6 +374,7 @@ impl VirtioGpu {
             return;
         }
         self.process_controlq();
+        self.process_cursorq();
     }
 
     /// Process the control virtqueue (queue 0).
@@ -385,6 +396,22 @@ impl VirtioGpu {
             return;
         }
         let avail_idx = u16::from_le_bytes(avail_idx_buf);
+
+        // Read avail ring flags (offset 0) to check VRING_AVAIL_F_NO_INTERRUPT.
+        let mut avail_flags_buf = [0u8; 2];
+        self.dma_read(avail_addr, &mut avail_flags_buf);
+        let avail_flags = u16::from_le_bytes(avail_flags_buf);
+        let no_interrupt = (avail_flags & 1) != 0; // VRING_AVAIL_F_NO_INTERRUPT
+
+        #[cfg(feature = "std")]
+        {
+            static POLL_LOG: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            let n = POLL_LOG.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if last_avail != avail_idx && (n < 30 || n % 1000 == 0) {
+                eprintln!("[virtio-gpu] controlq: avail_idx={} last_avail={} (delta={}) no_irq={}",
+                    avail_idx, last_avail, avail_idx.wrapping_sub(last_avail), no_interrupt);
+            }
+        }
 
         let mut used_count = 0u16;
 
@@ -424,6 +451,84 @@ impl VirtioGpu {
         }
 
         self.queues[0].last_avail_idx = last_avail;
+
+        if used_count > 0 {
+            self.virtio_notify();
+        }
+    }
+
+    /// Process the cursor virtqueue (queue 1).
+    /// Cursor commands (UPDATE_CURSOR, MOVE_CURSOR) don't produce a response
+    /// body, but the descriptor must still be placed on the used ring so the
+    /// guest driver knows the command was consumed.
+    fn process_cursorq(&mut self) {
+        let q = &self.queues[1];
+        if q.ready == 0 || q.size == 0 || q.desc_addr == 0 || q.avail_addr == 0 {
+            return;
+        }
+
+        let desc_addr = q.desc_addr;
+        let avail_addr = q.avail_addr;
+        let used_addr = q.used_addr;
+        let qsize = q.size;
+        let mut last_avail = q.last_avail_idx;
+
+        let mut avail_idx_buf = [0u8; 2];
+        if !self.dma_read(avail_addr + 2, &mut avail_idx_buf) {
+            return;
+        }
+        let avail_idx = u16::from_le_bytes(avail_idx_buf);
+
+        // Read avail ring flags for NO_INTERRUPT.
+        let mut avail_flags_buf = [0u8; 2];
+        self.dma_read(avail_addr, &mut avail_flags_buf);
+        let no_interrupt = (u16::from_le_bytes(avail_flags_buf) & 1) != 0;
+
+        let mut used_count = 0u16;
+
+        while last_avail != avail_idx {
+            let avail_offset = 4 + (last_avail % qsize) as u64 * 2;
+            let mut head_buf = [0u8; 2];
+            if !self.dma_read(avail_addr + avail_offset, &mut head_buf) {
+                break;
+            }
+            let head_idx = u16::from_le_bytes(head_buf);
+
+            // Walk the descriptor chain to consume it.
+            let mut idx = head_idx;
+            let mut chain_len = 0u32;
+            loop {
+                if chain_len > 256 { break; }
+                chain_len += 1;
+                let desc_offset = (idx % qsize) as u64 * 16;
+                let mut desc = [0u8; 16];
+                if !self.dma_read(desc_addr + desc_offset, &mut desc) { break; }
+                let flags = u16::from_le_bytes([desc[12], desc[13]]);
+                let next = u16::from_le_bytes([desc[14], desc[15]]);
+                if flags & VRING_DESC_F_NEXT != 0 { idx = next; } else { break; }
+            }
+
+            // Write to used ring (0 bytes written — cursor commands have no response).
+            let used_ring_idx_addr = used_addr + 2;
+            let mut used_idx_buf = [0u8; 2];
+            if !self.dma_read(used_ring_idx_addr, &mut used_idx_buf) { break; }
+            let used_idx = u16::from_le_bytes(used_idx_buf);
+
+            let used_elem_offset = 4 + (used_idx % qsize) as u64 * 8;
+            let used_elem_addr = used_addr + used_elem_offset;
+            let mut used_elem = [0u8; 8];
+            used_elem[0..4].copy_from_slice(&(head_idx as u32).to_le_bytes());
+            used_elem[4..8].copy_from_slice(&0u32.to_le_bytes());
+            self.dma_write(used_elem_addr, &used_elem);
+
+            let new_used_idx = used_idx.wrapping_add(1);
+            self.dma_write(used_ring_idx_addr, &new_used_idx.to_le_bytes());
+
+            last_avail = last_avail.wrapping_add(1);
+            used_count += 1;
+        }
+
+        self.queues[1].last_avail_idx = last_avail;
 
         if used_count > 0 {
             self.virtio_notify();
@@ -786,23 +891,46 @@ impl VirtioGpu {
 
         #[cfg(feature = "std")]
         {
-            static mut BACKING_LOG: u32 = 0;
-            unsafe { BACKING_LOG += 1; if BACKING_LOG <= 5 {
+            static BACKING_LOG: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            let n = BACKING_LOG.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 5 || n % 500 == 0 {
                 let first_addr = resource.backing.first().map(|(a,_)| *a).unwrap_or(0);
                 let backing_nonzero = backing_buf.iter().filter(|&&b| b != 0).count();
-                eprintln!("[virtio-gpu] TRANSFER backing: {} entries, first_gpa=0x{:X} total={} dma_ok={} dma_fail={} backing_nonzero={}/{}",
-                    resource.backing.len(), first_addr, total_backing_size, dma_ok_count, dma_fail_count, backing_nonzero, backing_buf.len());
-            }}
+                // Also dump first 64 bytes of backing to see if there's any data
+                let dump_len = 64.min(backing_buf.len());
+                let hex: alloc::string::String = backing_buf[..dump_len].iter()
+                    .map(|b| alloc::format!("{:02X}", b)).collect::<Vec<_>>().join(" ");
+                // Check which pages have non-zero data
+                let mut pages_with_data = 0u32;
+                for chunk in backing_buf.chunks(4096) {
+                    if chunk.iter().any(|&b| b != 0) { pages_with_data += 1; }
+                }
+                let host_offset = if first_addr < PCI_HOLE_START {
+                    first_addr as usize
+                } else if first_addr >= PCI_HOLE_END {
+                    (PCI_HOLE_START + (first_addr - PCI_HOLE_END)) as usize
+                } else { 0 };
+                eprintln!("[virtio-gpu] TRANSFER backing: {} entries, first_gpa=0x{:X} (host_off=0x{:X}) total={} mem_len=0x{:X} dma_ok={} dma_fail={} backing_nonzero={}/{} pages_with_data={}/{}",
+                    resource.backing.len(), first_addr, host_offset, total_backing_size, mem_len,
+                    dma_ok_count, dma_fail_count, backing_nonzero, backing_buf.len(),
+                    pages_with_data, (total_backing_size + 4095) / 4096);
+                eprintln!("[virtio-gpu] TRANSFER first 64 bytes: {}", hex);
+            }
         }
 
         // Now copy the requested rectangle from the backing buffer into the resource pixels.
-        // The backing buffer layout matches the resource layout (stride = width * bpp).
+        // Per VirtIO spec 5.7.6.7: the backing buffer represents the entire resource
+        // at resource stride (width * bpp). The `offset` parameter is a starting byte
+        // offset within the backing, and we advance by the full resource stride per row
+        // (NOT the sub-rectangle width — that was the bug causing partial updates to
+        // read wrong data when the guest transfers dirty sub-rectangles).
         let offset = offset as usize;
+        let backing_stride = src_stride as usize; // resource.width * bpp
         for y in r_y..(r_y + r_h).min(resource.height) {
             let dst_row_start = (y * src_stride + r_x * bpp) as usize;
-            // Source offset: the `offset` parameter is the starting byte offset
-            // within the backing, then we advance by row stride.
-            let src_row_start = offset + ((y - r_y) as usize) * (r_w * bpp) as usize;
+            // Source: start at `offset`, advance by full resource stride per row,
+            // then skip to column r_x within each row.
+            let src_row_start = offset + ((y - r_y) as usize) * backing_stride + (r_x * bpp) as usize;
             let row_bytes = ((r_w.min(resource.width - r_x)) * bpp) as usize;
 
             if src_row_start + row_bytes <= backing_buf.len()
@@ -1174,6 +1302,14 @@ impl MmioHandler for VirtioGpu {
             // Reading ISR clears it.
             let val = self.isr_status as u64;
             self.isr_status = 0;
+            #[cfg(feature = "std")]
+            {
+                static ISR_LOG: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                let n = ISR_LOG.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if val != 0 || n < 5 || n % 10000 == 0 {
+                    eprintln!("[virtio-gpu] ISR read #{}: val={} (cleared)", n, val);
+                }
+            }
             return Ok(val);
         }
         if offset >= DEVICE_CFG_OFFSET && offset < DEVICE_CFG_OFFSET + DEVICE_CFG_SIZE {
@@ -1191,8 +1327,15 @@ impl MmioHandler for VirtioGpu {
             return Ok(());
         }
         if offset >= NOTIFY_OFFSET && offset < NOTIFY_OFFSET + NOTIFY_SIZE {
-            // Queue notification doorbell — process pending commands.
-            self.process();
+            // Queue notification doorbell.
+            // Do NOT call self.process() here — this runs in a vCPU thread,
+            // while process() is also called from the BSP thread via
+            // corevm_virtio_gpu_process(). Concurrent access to resources/
+            // queues causes data races (double-free, corruption).
+            // The BSP loop polls process() every iteration, which will pick
+            // up the new descriptors within microseconds.
+            #[cfg(feature = "std")]
+            eprintln!("[virtio-gpu] NOTIFY doorbell (queue {})", val);
             return Ok(());
         }
         if offset >= ISR_OFFSET && offset < ISR_OFFSET + ISR_SIZE {
@@ -1260,6 +1403,9 @@ fn dma_read_raw(mem_ptr: *mut u8, mem_len: usize, gpa: u64, buf: &mut [u8]) -> b
     if offset + buf.len() > mem_len {
         return false;
     }
+    // Memory fence: guest vCPU threads (KVM) write backing pages on other
+    // host threads. Ensure their stores are visible before we read.
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
     unsafe { core::ptr::copy_nonoverlapping(mem_ptr.add(offset), buf.as_mut_ptr(), buf.len()); }
     true
 }

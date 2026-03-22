@@ -320,6 +320,11 @@ impl PciBus {
         self.devices.push(pci_device);
     }
 
+    /// Remove a PCI device by slot (device number).
+    pub fn remove_device(&mut self, device_slot: u8) {
+        self.devices.retain(|d| d.device != device_slot);
+    }
+
     /// Read from PCI config space by explicit BDF and register (MMCONFIG path).
     ///
     /// Returns bytes from the device's 256-byte config space. Registers

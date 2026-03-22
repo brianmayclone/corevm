@@ -493,9 +493,21 @@ fn update_framebuffer(handle: u64, fb: &Arc<Mutex<FrameBufferData>>, diag: &Diag
             if corevm_virtio_gpu_get_framebuffer(handle, &mut fb_ptr, &mut fb_len) == 0
                 && !fb_ptr.is_null() && fb_len > 0
             {
-                let fb_size = (gpu_w as usize) * (gpu_h as usize) * 4; // BGRA32
+                let fb_size = (gpu_w as usize) * (gpu_h as usize) * 4; // RGBA32
                 if (fb_len as usize) >= fb_size {
                     let raw = unsafe { std::slice::from_raw_parts(fb_ptr, fb_size) };
+
+                    // Debug: log framebuffer content stats
+                    {
+                        static FB_DBG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                        let n = FB_DBG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if n < 5 || n % 500 == 0 {
+                            let nonzero = raw.iter().filter(|&&b| b != 0).count();
+                            eprintln!("[update_fb] VirtIO GPU {}x{} fb_len={} nonzero={}/{} seq={}",
+                                gpu_w, gpu_h, fb_len, nonzero, fb_size, n);
+                        }
+                    }
+
                     if let Ok(mut fb_data) = fb.lock() {
                         fb_data.text_mode = false;
                         fb_data.width = gpu_w;
@@ -505,7 +517,7 @@ fn update_framebuffer(handle: u64, fb: &Arc<Mutex<FrameBufferData>>, diag: &Diag
                         fb_data.pixels.resize(fb_size, 0);
                         fb_data.pixels.copy_from_slice(raw);
                         fb_data.dirty = true;
-            fb_data.seq += 1;
+                        fb_data.seq += 1;
                     }
                     return;
                 }

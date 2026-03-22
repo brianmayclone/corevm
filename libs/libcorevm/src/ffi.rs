@@ -1023,22 +1023,29 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
             // isr_status may be non-zero but nobody reads it to clear it,
             // causing IRQ 11 to stay permanently asserted → IRQ storm that
             // makes the kernel disable IRQ 11 entirely, killing AHCI too.
-            // VirtIO GPU → IRQ 5 (dedicated, no sharing with AHCI/E1000/VirtIO-Net)
-            // Previously on IRQ 11 shared with AHCI/E1000/VirtIO-Net, which caused
-            // missed interrupts when another device held the line high.
+            // VirtIO GPU — level-triggered IRQ.
+            // Read the actual IRQ line from PCI config space (SeaBIOS may
+            // remap it via PIRQ routing, overriding our initial value).
             if !vm.virtio_gpu_ptr.is_null() {
                 mmio_lock();
                 let gpu = unsafe { &mut *vm.virtio_gpu_ptr };
                 let want_asserted = gpu.isr_status != 0;
+                let gpu_irq = if !vm.pci_bus_ptr.is_null() {
+                    let bus = unsafe { &mut *vm.pci_bus_ptr };
+                    let line = bus.mmcfg_read(0, vm.chipset.slots.virtio_gpu, 0, 0x3C, 1);
+                    if line > 0 && line < 256 { line as u32 } else { vm.chipset.irqs.virtio_gpu as u32 }
+                } else {
+                    vm.chipset.irqs.virtio_gpu as u32
+                };
                 #[cfg(feature = "linux")]
                 {
                     if want_asserted && !vm.virtio_gpu_irq_asserted.load(Ordering::Relaxed) {
                         vm.virtio_gpu_irq_asserted.store(true, Ordering::Relaxed);
-                        let _ = vm.backend.set_irq_line(5, true);
+                        let _ = vm.backend.set_irq_line(gpu_irq, true);
                         injected += 1;
                     } else if !want_asserted && vm.virtio_gpu_irq_asserted.load(Ordering::Relaxed) {
                         vm.virtio_gpu_irq_asserted.store(false, Ordering::Relaxed);
-                        let _ = vm.backend.set_irq_line(5, false);
+                        let _ = vm.backend.set_irq_line(gpu_irq, false);
                     }
                 }
                 #[cfg(feature = "windows")]
@@ -1047,13 +1054,13 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         vm.virtio_gpu_irq_asserted.store(true, Ordering::Relaxed);
                         if !vm.pic_ptr.is_null() {
                             let pic = unsafe { &mut *vm.pic_ptr };
-                            pic.raise_irq(5);
+                            pic.raise_irq(gpu_irq as u8);
                         }
-                        vm.backend.ioapic_set_irq(5, true);
+                        vm.backend.ioapic_set_irq(gpu_irq as u8, true);
                         injected += 1;
                     } else if !want_asserted && vm.virtio_gpu_irq_asserted.load(Ordering::Relaxed) {
                         vm.virtio_gpu_irq_asserted.store(false, Ordering::Relaxed);
-                        vm.backend.ioapic_set_irq(5, false);
+                        vm.backend.ioapic_set_irq(gpu_irq as u8, false);
                     }
                 }
                 #[cfg(not(any(feature = "linux", feature = "windows")))]
@@ -1061,7 +1068,7 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                     if want_asserted {
                         if !vm.pic_ptr.is_null() {
                             let pic = unsafe { &mut *vm.pic_ptr };
-                            pic.raise_irq(5);
+                            pic.raise_irq(gpu_irq as u8);
                         }
                     }
                 }
@@ -3570,12 +3577,9 @@ pub extern "C" fn corevm_virtio_gpu_process(handle: u64) -> i32 {
     let vm = match get_vm(handle) { Some(v) => v, None => return 0 };
     let gpu = match vm.virtio_gpu() { Some(g) => g, None => return 0 };
     gpu.process();
-    if gpu.irq_pending {
-        gpu.irq_pending = false;
-        1
-    } else {
-        0
-    }
+    // Don't clear irq_pending here — poll_irqs handles IRQ delivery
+    // and clears it when pulsing the IRQ line.
+    if gpu.irq_pending { 1 } else { 0 }
 }
 
 /// Get VirtIO GPU scanout framebuffer pointer and size.
