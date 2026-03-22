@@ -20,6 +20,7 @@ pub mod activity;
 pub mod notifications;
 pub mod cluster_settings;
 pub mod network;
+pub mod storage_wizard;
 
 pub fn router() -> Router<Arc<ClusterState>> {
     Router::new()
@@ -65,6 +66,10 @@ pub fn router() -> Router<Arc<ClusterState>> {
         .route("/api/storage/stats", get(activity::storage_stats))
         .route("/api/storage/images", get(activity::list_images))
         .route("/api/storage/isos", get(activity::list_isos))
+        // Storage Wizard
+        .route("/api/storage/wizard/check", post(storage_wizard::check_hosts))
+        .route("/api/storage/wizard/install", post(storage_wizard::install_packages))
+        .route("/api/storage/wizard/setup", post(storage_wizard::setup))
 
         // ── Resource Groups (compat) ────────────────────
         .route("/api/resource-groups", get(activity::list_resource_groups))

@@ -496,6 +496,206 @@ pub async fn migration_receive(
     Ok(Json(AgentResponse::ok()))
 }
 
+// ── Package Management ──────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct PackageCheckRequest {
+    pub packages: Vec<String>,
+    /// Optional sudo password for privilege escalation.
+    pub sudo_password: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct PackageCheckResponse {
+    pub installed: Vec<String>,
+    pub missing: Vec<String>,
+    pub distro: String,
+    pub is_root: bool,
+}
+
+/// POST /agent/packages/check — Check if packages are installed + whether agent runs as root.
+pub async fn check_packages(
+    _agent: AgentAuth,
+    Json(req): Json<PackageCheckRequest>,
+) -> Json<PackageCheckResponse> {
+    let mut installed = Vec::new();
+    let mut missing = Vec::new();
+    let distro = detect_distro();
+    let is_root = is_running_as_root();
+
+    for pkg in &req.packages {
+        if is_package_installed(pkg, &distro) {
+            installed.push(pkg.clone());
+        } else {
+            missing.push(pkg.clone());
+        }
+    }
+
+    Json(PackageCheckResponse { installed, missing, distro, is_root })
+}
+
+/// POST /agent/packages/install — Install packages with optional sudo.
+pub async fn install_packages(
+    _agent: AgentAuth,
+    Json(req): Json<PackageCheckRequest>,
+) -> Result<Json<AgentResponse>, AppError> {
+    let distro = detect_distro();
+    let is_root = is_running_as_root();
+
+    for pkg in &req.packages {
+        if is_package_installed(pkg, &distro) { continue; }
+
+        let (program, args) = match distro.as_str() {
+            "debian" | "ubuntu" => ("apt-get", vec!["install", "-y", pkg.as_str()]),
+            "rhel" | "centos" | "fedora" | "rocky" | "almalinux" => ("yum", vec!["install", "-y", pkg.as_str()]),
+            _ => return Err(AppError(StatusCode::INTERNAL_SERVER_ERROR, format!("Unsupported distribution: {}", distro))),
+        };
+
+        let result = if is_root {
+            std::process::Command::new(program).args(&args).output()
+        } else if let Some(ref sudo_pass) = req.sudo_password {
+            // Use sudo -S (read password from stdin)
+            let full_cmd = format!("{} {}", program, args.join(" "));
+            let mut child = std::process::Command::new("sudo")
+                .args(&["-S", "sh", "-c", &full_cmd])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, format!("Cannot run sudo: {}", e)))?;
+
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = writeln!(stdin, "{}", sudo_pass);
+            }
+            child.wait_with_output()
+        } else {
+            return Err(AppError(StatusCode::FORBIDDEN,
+                "Agent is not running as root. Provide sudo_password for privilege escalation.".into()));
+        };
+
+        match result {
+            Ok(output) if output.status.success() => {
+                tracing::info!("Package '{}' installed successfully", pkg);
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(AppError(StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to install '{}': {}", pkg, stderr.trim())));
+            }
+            Err(e) => {
+                return Err(AppError(StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Cannot run package manager: {}", e)));
+            }
+        }
+    }
+
+    Ok(Json(AgentResponse::ok()))
+}
+
+/// POST /agent/exec — Execute a shell command with optional sudo.
+pub async fn exec_command(
+    _agent: AgentAuth,
+    Json(req): Json<ExecRequest>,
+) -> Result<Json<ExecResponse>, AppError> {
+    if req.command.trim().is_empty() {
+        return Err(AppError(StatusCode::BAD_REQUEST, "Empty command".into()));
+    }
+
+    let is_root = is_running_as_root();
+
+    let output = if is_root || req.sudo_password.is_none() {
+        // Run directly (as root or without sudo)
+        std::process::Command::new("sh")
+            .args(&["-c", &req.command])
+            .output()
+    } else {
+        // Run via sudo -S
+        let mut child = std::process::Command::new("sudo")
+            .args(&["-S", "sh", "-c", &req.command])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, format!("Cannot spawn sudo: {}", e)))?;
+
+        if let Some(ref pass) = req.sudo_password {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = writeln!(stdin, "{}", pass);
+            }
+        }
+        child.wait_with_output()
+    };
+
+    match output {
+        Ok(out) => {
+            let exit_code = out.status.code().unwrap_or(-1);
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            tracing::info!("Exec '{}' → exit={}", req.command, exit_code);
+            Ok(Json(ExecResponse { exit_code, stdout, stderr }))
+        }
+        Err(e) => Err(AppError(StatusCode::INTERNAL_SERVER_ERROR, format!("Command failed: {}", e))),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct ExecRequest {
+    pub command: String,
+    pub timeout_secs: Option<u32>,
+    /// Optional sudo password for privilege escalation.
+    pub sudo_password: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct ExecResponse {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+fn is_running_as_root() -> bool {
+    #[cfg(target_os = "linux")]
+    { unsafe { libc::geteuid() == 0 } }
+    #[cfg(not(target_os = "linux"))]
+    { false }
+}
+
+fn detect_distro() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(content) = std::fs::read_to_string("/etc/os-release") {
+            for line in content.lines() {
+                if let Some(id) = line.strip_prefix("ID=") {
+                    return id.trim_matches('"').to_lowercase();
+                }
+            }
+        }
+    }
+    "unknown".into()
+}
+
+fn is_package_installed(package: &str, distro: &str) -> bool {
+    match distro {
+        "debian" | "ubuntu" => {
+            std::process::Command::new("dpkg")
+                .args(&["-l", package])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+        "rhel" | "centos" | "fedora" => {
+            std::process::Command::new("rpm")
+                .args(&["-q", package])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
 // ── System info helpers ─────────────────────────────────────────────────
 
 fn get_memory_mb() -> (u64, u64) {

@@ -100,6 +100,11 @@ export default function Storage() {
           </p>
         </div>
         <div className="flex items-center gap-3">
+          {isCluster && (
+            <Button variant="outline" icon={<HardDrive size={14} />} onClick={() => navigate('/storage/wizard')}>
+              Create Cluster Storage
+            </Button>
+          )}
           <Button variant="primary" icon={<Plus size={14} />} onClick={() => setAddPoolOpen(true)}>
             {isCluster ? 'Add Datastore' : 'Add Storage Pool'}
           </Button>

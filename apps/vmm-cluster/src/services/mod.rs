@@ -32,3 +32,4 @@ pub mod ldap;
 pub mod validation;
 pub mod group;
 pub mod drs_exclusion;
+pub mod storage_wizard;
