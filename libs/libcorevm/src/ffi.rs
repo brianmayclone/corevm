@@ -804,19 +804,17 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                             injected += 1;
                         }
                     } else {
-                        // AHCI uses level-triggered IRQ 11. We must re-assert
-                        // (edge pulse) on every new completion, otherwise the
-                        // guest never sees the new interrupt if the line was
-                        // already asserted from a previous completion.
-                        if want_asserted {
-                            if vm.ahci_irq_asserted.load(Ordering::Relaxed) {
-                                // Already asserted — pulse: de-assert then re-assert
-                                let _ = vm.backend.set_irq_line(11, false);
-                            }
+                        // Legacy level-triggered IRQ 11.
+                        // Keep the line asserted as long as irq_pending is true.
+                        // The guest ACKs by writing HBA_IS which clears is and
+                        // sets irq_pending=false. We then de-assert the line.
+                        // Do NOT call clear_irq() here — the guest needs to see
+                        // the asserted line to know there's a pending interrupt.
+                        if want_asserted && !vm.ahci_irq_asserted.load(Ordering::Relaxed) {
                             let _ = vm.backend.set_irq_line(11, true);
                             vm.ahci_irq_asserted.store(true, Ordering::Relaxed);
                             injected += 1;
-                        } else if vm.ahci_irq_asserted.load(Ordering::Relaxed) {
+                        } else if !want_asserted && vm.ahci_irq_asserted.load(Ordering::Relaxed) {
                             vm.ahci_irq_asserted.store(false, Ordering::Relaxed);
                             if !vm.e1000_irq_asserted.load(Ordering::Relaxed) && !vm.virtio_net_irq_asserted.load(Ordering::Relaxed) {
                                 let _ = vm.backend.set_irq_line(11, false);
@@ -834,15 +832,13 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         }
                     } else {
                         if want_asserted {
-                            if vm.ahci_irq_asserted.load(Ordering::Relaxed) {
-                                vm.backend.ioapic_set_irq(11, false);
-                            }
                             if !vm.pic_ptr.is_null() {
                                 let pic = unsafe { &mut *vm.pic_ptr };
                                 pic.raise_irq(11);
                             }
                             vm.backend.ioapic_set_irq(11, true);
                             vm.ahci_irq_asserted.store(true, Ordering::Relaxed);
+                            ahci.clear_irq();
                             injected += 1;
                         } else if vm.ahci_irq_asserted.load(Ordering::Relaxed) {
                             vm.backend.ioapic_set_irq(11, false);
@@ -1316,7 +1312,10 @@ pub extern "C" fn corevm_ahci_poll_irq(handle: u64) {
                 }
             }
         } else {
-            // Legacy level-triggered mode (MSI not enabled by guest)
+            // Legacy level-triggered mode (MSI not enabled by guest).
+            // Assert the line when pending; do NOT clear irq_pending — the
+            // guest must ACK by writing HBA_IS. The de-assert happens when
+            // irq_pending becomes false after the guest clears port IS.
             if want_asserted && !vm.ahci_irq_asserted.load(Ordering::Relaxed) {
                 ahci.diag_irqs_delivered += 1;
                 let _ = vm.backend.set_irq_line(11, true);
@@ -1338,14 +1337,15 @@ pub extern "C" fn corevm_ahci_poll_irq(handle: u64) {
                     Ok(_) => {},
                     Err(_e) => {
                         // Fallback to legacy IRQ
-                        if !vm.ahci_irq_asserted.load(Ordering::Relaxed) {
-                            if !vm.pic_ptr.is_null() {
-                                let pic = unsafe { &mut *vm.pic_ptr };
-                                pic.raise_irq(11);
-                            }
-                            vm.backend.ioapic_set_irq(11, true);
-                            vm.ahci_irq_asserted.store(true, Ordering::Relaxed);
+                        if vm.ahci_irq_asserted.load(Ordering::Relaxed) {
+                            vm.backend.ioapic_set_irq(11, false);
                         }
+                        if !vm.pic_ptr.is_null() {
+                            let pic = unsafe { &mut *vm.pic_ptr };
+                            pic.raise_irq(11);
+                        }
+                        vm.backend.ioapic_set_irq(11, true);
+                        vm.ahci_irq_asserted.store(true, Ordering::Relaxed);
                     }
                 }
                 ahci.clear_irq();
@@ -1356,15 +1356,16 @@ pub extern "C" fn corevm_ahci_poll_irq(handle: u64) {
                 }
             }
         } else {
-            // Legacy level-triggered mode
-            if want_asserted && !vm.ahci_irq_asserted.load(Ordering::Relaxed) {
+            // Legacy level-triggered mode — assert and clear irq_pending
+            if want_asserted {
                 if !vm.pic_ptr.is_null() {
                     let pic = unsafe { &mut *vm.pic_ptr };
                     pic.raise_irq(11);
                 }
                 vm.backend.ioapic_set_irq(11, true);
                 vm.ahci_irq_asserted.store(true, Ordering::Relaxed);
-            } else if !want_asserted && vm.ahci_irq_asserted.load(Ordering::Relaxed) {
+                ahci.clear_irq();
+            } else if vm.ahci_irq_asserted.load(Ordering::Relaxed) {
                 vm.backend.ioapic_set_irq(11, false);
                 vm.ahci_irq_asserted.store(false, Ordering::Relaxed);
             }
