@@ -1152,6 +1152,7 @@ impl eframe::App for CoreVmApp {
                                 self.last_key_label = Some(label);
                                 self.last_key_time = std::time::Instant::now();
                                 evdev_had_events = true;
+                                ctx.request_repaint();
                             }
                         }
                         // Fallback: egui-based keyboard input (always available)
@@ -1159,6 +1160,7 @@ impl eframe::App for CoreVmApp {
                             if let Some(label) = input::handle_keyboard_events(ctx, handle, true) {
                                 self.last_key_label = Some(label);
                                 self.last_key_time = std::time::Instant::now();
+                                ctx.request_repaint();
                             }
                         }
                     }
@@ -1458,8 +1460,10 @@ impl eframe::App for CoreVmApp {
                 if let Some((state, fb, vm_handle)) = vm_info {
                     if state == VmState::Running || state == VmState::Paused {
                         let use_evdev = self.preferences.evdev_capture;
-                        let (display_focused, _display_rect) = if let Ok(fb_data) = fb.lock() {
-                            self.display.show(ui, ctx, &fb_data, vm_handle, use_evdev)
+                        let (display_focused, _display_rect) = if let Ok(mut fb_data) = fb.lock() {
+                            let result = self.display.show(ui, ctx, &fb_data, vm_handle, use_evdev);
+                            fb_data.dirty = false;
+                            result
                         } else {
                             (false, None)
                         };

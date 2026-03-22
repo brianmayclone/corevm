@@ -219,10 +219,10 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
         corevm_setup_virtio_gpu(handle, gpu_vram);
         entry.diag_log.log(DiagCategory::Info, format!("VirtIO GPU enabled (VRAM={}MB)", gpu_vram));
 
-        // VirtIO Input devices — always enabled alongside VirtIO GPU.
-        // The guest expects virtio-input when using virtio-gpu for input routing.
-        corevm_setup_virtio_input(handle);
-        entry.diag_log.log(DiagCategory::Info, "VirtIO Input (keyboard + tablet) enabled".into());
+        // VirtIO Input devices — disabled for now. PS/2 keyboard/mouse works
+        // fine with VirtIO GPU. Re-enable once VirtIO Input driver issues are resolved.
+        // corevm_setup_virtio_input(handle);
+        // entry.diag_log.log(DiagCategory::Info, "VirtIO Input (keyboard + tablet) enabled".into());
     }
 
     // ACPI tables — MUST be generated AFTER all PCI devices are set up,
@@ -344,7 +344,7 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
     let num_cpus = entry.config.cpu_cores.max(1).min(32);
 
     let has_virtio_gpu = entry.config.gpu_model == crate::config::GpuModel::VirtioGpu;
-    let has_virtio_input = has_virtio_gpu; // VirtIO Input is enabled alongside VirtIO GPU
+    let has_virtio_input = false; // VirtIO Input disabled — PS/2 works fine with VirtIO GPU
 
     let rt_config = VmRuntimeConfig {
         handle,

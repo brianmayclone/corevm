@@ -804,13 +804,20 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                             injected += 1;
                         }
                     } else {
-                        if want_asserted && !vm.ahci_irq_asserted.load(Ordering::Relaxed) {
+                        // AHCI uses level-triggered IRQ 11. We must re-assert
+                        // (edge pulse) on every new completion, otherwise the
+                        // guest never sees the new interrupt if the line was
+                        // already asserted from a previous completion.
+                        if want_asserted {
+                            if vm.ahci_irq_asserted.load(Ordering::Relaxed) {
+                                // Already asserted — pulse: de-assert then re-assert
+                                let _ = vm.backend.set_irq_line(11, false);
+                            }
                             let _ = vm.backend.set_irq_line(11, true);
                             vm.ahci_irq_asserted.store(true, Ordering::Relaxed);
                             injected += 1;
-                        } else if !want_asserted && vm.ahci_irq_asserted.load(Ordering::Relaxed) {
+                        } else if vm.ahci_irq_asserted.load(Ordering::Relaxed) {
                             vm.ahci_irq_asserted.store(false, Ordering::Relaxed);
-                            // Only de-assert IRQ 11 if no other device on IRQ 11 needs it
                             if !vm.e1000_irq_asserted.load(Ordering::Relaxed) && !vm.virtio_net_irq_asserted.load(Ordering::Relaxed) {
                                 let _ = vm.backend.set_irq_line(11, false);
                             }
@@ -826,7 +833,10 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                             injected += 1;
                         }
                     } else {
-                        if want_asserted && !vm.ahci_irq_asserted.load(Ordering::Relaxed) {
+                        if want_asserted {
+                            if vm.ahci_irq_asserted.load(Ordering::Relaxed) {
+                                vm.backend.ioapic_set_irq(11, false);
+                            }
                             if !vm.pic_ptr.is_null() {
                                 let pic = unsafe { &mut *vm.pic_ptr };
                                 pic.raise_irq(11);
@@ -834,7 +844,7 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                             vm.backend.ioapic_set_irq(11, true);
                             vm.ahci_irq_asserted.store(true, Ordering::Relaxed);
                             injected += 1;
-                        } else if !want_asserted && vm.ahci_irq_asserted.load(Ordering::Relaxed) {
+                        } else if vm.ahci_irq_asserted.load(Ordering::Relaxed) {
                             vm.backend.ioapic_set_irq(11, false);
                             vm.ahci_irq_asserted.store(false, Ordering::Relaxed);
                         }
@@ -3516,6 +3526,15 @@ pub extern "C" fn corevm_uhci_process(handle: u64) -> i32 {
 #[no_mangle]
 pub extern "C" fn corevm_setup_virtio_gpu(handle: u64, vram_mb: u32) -> i32 {
     let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
+
+    // Remove VGA PCI device from the bus so the guest only sees VirtIO GPU.
+    // The VGA I/O ports and SVGA device remain active for BIOS text-mode boot.
+    if !vm.pci_bus_ptr.is_null() {
+        let pci_bus = unsafe { &mut *vm.pci_bus_ptr };
+        let vga_slot = vm.chipset.slots.vga;
+        pci_bus.devices.retain(|d| d.device != vga_slot);
+    }
+
     vm.setup_virtio_gpu(vram_mb);
 
     // Update the PCI MMIO router if it exists.
