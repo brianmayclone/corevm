@@ -45,9 +45,12 @@ apps/vmm-cluster/src/
 │   ├── vms.rs              Cluster-wide VM management
 │   ├── hosts.rs            Host/node management
 │   ├── clusters.rs         Cluster configuration
+│   ├── cluster_settings.rs LDAP, DRS exclusions, SMTP settings
 │   ├── storage.rs          Cluster-wide storage
+│   ├── storage_wizard.rs   Guided filesystem setup API
 │   ├── datastores.rs       Shared datastore management
-│   ├── network.rs          Network interface aggregation
+│   ├── network.rs          SDN virtual networks + DHCP/DNS/PXE
+│   ├── notifications.rs    Notification channels and rules
 │   ├── migration.rs        VM migration endpoints
 │   ├── tasks.rs            Long-running operation tracking
 │   ├── events.rs           Event log
@@ -57,14 +60,22 @@ apps/vmm-cluster/src/
 │   └── ...
 │
 ├── services/               Business logic
-│   ├── host.rs             Host registration, status tracking
+│   ├── host.rs             Host registration, status tracking, VM import
 │   ├── cluster.rs          Cluster config management
 │   ├── vm.rs               Cluster-wide VM operations
 │   ├── datastore.rs        Datastore management
-│   ├── migration.rs        VM migration orchestration
+│   ├── migration.rs        Direct host-to-host migration orchestration
 │   ├── task.rs             Task tracking
 │   ├── drs_service.rs      DRS scheduling logic
+│   ├── drs_exclusion.rs    DRS exclusion rules (per-VM, per-group)
 │   ├── alarm.rs            Alarm evaluation
+│   ├── notification.rs     Notification channels, rules, dispatch
+│   ├── network.rs          SDN network CRUD + DHCP/DNS/PXE
+│   ├── storage_wizard.rs   NFS/GlusterFS/CephFS setup orchestration
+│   ├── validation.rs       Input validation (IP, CIDR, MAC, VLAN, etc.)
+│   ├── group.rs            User group management with role mapping
+│   ├── ldap.rs             LDAP/AD configuration and connection testing
+│   ├── auth.rs             Authentication (local + LDAP)
 │   └── ...
 │
 ├── engine/                 Background orchestration engines
@@ -72,7 +83,10 @@ apps/vmm-cluster/src/
 │   ├── drs.rs              Distributed Resource Scheduler (5m interval)
 │   ├── ha.rs               High Availability engine
 │   ├── maintenance.rs      Host maintenance mode (VM drain)
-│   └── scheduler.rs        VM placement scheduler
+│   ├── scheduler.rs        VM placement scheduler
+│   ├── notifier.rs         Async notification dispatcher (email/webhook/log)
+│   ├── reconciler.rs       State reconciliation on node reconnect
+│   └── sdn.rs              dnsmasq config generation for SDN networks
 │
 ├── node_client/            HTTP client for agent communication
 │   └── mod.rs              reqwest-based client for /agent/* endpoints
@@ -121,6 +135,11 @@ Communication between cluster and nodes uses HTTP:
 | Cluster → Node | `POST /agent/vms/force-stop` | Force stop VM on node |
 | Cluster → Node | `POST /agent/vms/destroy` | Destroy VM on node |
 | Cluster → Node | `POST /agent/storage/*` | Storage operations |
+| Cluster → Node | `POST /agent/migration/send` | Send VM disks to target host |
+| Cluster → Node | `POST /agent/migration/receive` | Receive VM disks from source host |
+| Cluster → Node | `POST /agent/packages/check` | Check installed packages |
+| Cluster → Node | `POST /agent/packages/install` | Install packages (apt/dnf/yum) |
+| Cluster → Node | `POST /agent/exec` | Execute shell command with optional sudo |
 
 Authentication uses `X-Agent-Token` header with a shared secret established during registration.
 
@@ -148,6 +167,30 @@ Engines are async Tokio tasks spawned at startup:
 - **Action:** Reschedules failed node's VMs on healthy nodes
 - **Selection:** Chooses target nodes based on available capacity
 
+#### Reconciler Engine (`engine/reconciler.rs`)
+
+- **Trigger:** Node transitions from offline → online
+- **Action:** Syncs cluster DB with actual host state to prevent split-brain
+- **Logic:**
+  1. Queries agent for all VMs running on the reconnected host
+  2. If a VM is assigned to a **different** host in the DB → **force-stop** on this host (HA already moved it)
+  3. If a VM is orphaned (running but not in DB) → **force-stop**
+  4. If a VM is orphaned but matches a lost record → **reclaim** to this host
+
+#### Notifier Engine (`engine/notifier.rs`)
+
+- **Type:** Async worker (mpsc channel consumer)
+- **Action:** Dispatches queued notifications to configured channels
+- **Email:** Raw SMTP (EHLO, AUTH PLAIN, MAIL FROM, DATA) with optional TLS
+- **Webhook:** HTTP POST with JSON payload + optional HMAC-SHA256 signature
+- **Log:** Writes to stdout/tracing
+
+#### SDN Engine (`engine/sdn.rs`)
+
+- **Purpose:** Generates dnsmasq configuration files for SDN networks
+- **Output:** `/etc/vmm/dnsmasq-net-{network_id}.conf` on each host
+- **Contents:** DHCP range, static reservations, DNS records, PXE options, upstream DNS
+
 #### Maintenance Engine (`engine/maintenance.rs`)
 
 - **Trigger:** Host enters maintenance mode
@@ -158,14 +201,18 @@ Engines are async Tokio tasks spawned at startup:
 - **Purpose:** VM placement decisions for new VM creation
 - **Algorithm:** Selects the node with the most available resources
 
-### VM Migration Flow
+### VM Migration Flow (Direct Host-to-Host)
 
 1. Client requests `POST /api/vms/{id}/migrate` with target host
-2. Migration service validates source and target nodes
-3. Source node stops the VM gracefully
-4. VM configuration is transferred to the target node
-5. Target node provisions and starts the VM
-6. Migration task is updated with success/failure status
+2. Migration service checks if source and target share a datastore
+3. Cluster generates a one-time migration token (UUID, 5-minute expiry)
+4. **Shared storage path:** Source stops VM, cluster tells target to provision + start (no disk copy)
+5. **Local storage path:**
+   - Cluster tells target to expect transfer: `POST /agent/migration/receive` with token
+   - Cluster tells source to send: `POST /agent/migration/send` with target address + token
+   - Source streams disk files directly to target via HTTP (bypasses cluster)
+   - Target provisions VM config and starts
+6. Migration task is updated with progress (bytes_sent/bytes_total) and final status
 
 ## Adding a New Engine
 

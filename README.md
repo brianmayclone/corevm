@@ -97,11 +97,16 @@ CoreVM ships with **vmm-server**, **vmm-cluster**, and **vmm-ui** — a full-fea
 ### Cluster Orchestration (vmm-cluster)
 
 - **Multi-Node Management** — central authority managing multiple vmm-server nodes
-- **DRS (Distributed Resource Scheduler)** — automatic VM load balancing across hosts
-- **High Availability** — automatic VM failover when nodes go offline
-- **Live Migration** — move running VMs between nodes
+- **DRS (Distributed Resource Scheduler)** — automatic VM load balancing with per-VM/group exclusions
+- **High Availability** — automatic VM failover when nodes go offline, with state reconciliation
+- **Direct Host-to-Host Migration** — disk transfer directly between nodes with one-time tokens
 - **Host Maintenance Mode** — safely drain VMs before host maintenance
-- **Datastores** — cluster-wide shared storage management
+- **SDN (Software-Defined Networking)** — cluster-wide virtual networks with integrated DHCP, DNS, and PXE
+- **Storage Wizard** — guided setup for NFS, GlusterFS, and CephFS cluster filesystems
+- **Notifications** — email, webhook, and log channels with configurable rules and cooldowns
+- **LDAP / Active Directory** — external authentication with group-to-role mapping
+- **Managed Mode Enforcement** — blocks direct API access on managed nodes, redirects to cluster
+- **State Reconciler** — prevents split-brain after node reconnect
 - **Events & Alarms** — cluster event logging and alert system
 - **Task Tracking** — monitor long-running operations (migrations, provisioning)
 
@@ -244,7 +249,9 @@ cargo +stable build --release
 │    vmm-cluster (Axum)     │          │  vmctl (CLI)             │
 │  Central authority        │          │  Headless VM runner      │
 │  DRS · HA · Migration     │          └────────────┬────────────┘
-│  Events · Alarms · Tasks  │                       │
+│  SDN · Notifications      │                       │
+│  Reconciler · LDAP        │                       │
+│  Storage Wizard · Tasks   │                       │
 └─────────────┬─────────────┘                       │
               │  manages multiple nodes              │
      ┌────────┼────────┐                            │
@@ -376,6 +383,68 @@ DELETE /api/settings/groups/{id}    # Delete group
 
 ```
 GET    /ws/console/{vm_id}          # Live VGA console (framebuffer + input)
+```
+
+### Cluster API (vmm-cluster only)
+
+```
+GET    /api/hosts                   # List cluster nodes
+POST   /api/hosts                   # Add node to cluster
+GET    /api/hosts/{id}              # Node details
+POST   /api/hosts/{id}/maintenance  # Enter maintenance mode
+POST   /api/hosts/{id}/activate     # Exit maintenance mode
+GET    /api/clusters                # List clusters
+POST   /api/clusters                # Create cluster
+GET    /api/clusters/{id}           # Cluster details
+PUT    /api/clusters/{id}           # Update cluster config
+DELETE /api/clusters/{id}           # Delete cluster
+POST   /api/vms/{id}/migrate       # Migrate VM to another host
+GET    /api/tasks                   # Long-running operations
+GET    /api/events                  # Cluster event log
+GET    /api/alarms                  # Active alerts
+GET    /api/drs                     # DRS status
+```
+
+### SDN Networks (vmm-cluster only)
+
+```
+GET    /api/networks                # List virtual networks
+POST   /api/networks                # Create network (CIDR, DHCP, DNS, PXE)
+GET    /api/networks/{id}           # Network details + leases + DNS records
+PUT    /api/networks/{id}           # Update network config
+DELETE /api/networks/{id}           # Delete network
+```
+
+### Storage Wizard (vmm-cluster only)
+
+```
+POST   /api/storage/wizard/check    # Check packages on hosts
+POST   /api/storage/wizard/install  # Install missing packages
+POST   /api/storage/wizard/setup    # Setup NFS/GlusterFS/CephFS
+```
+
+### Notifications (vmm-cluster only)
+
+```
+GET    /api/notifications/channels           # List channels
+POST   /api/notifications/channels           # Create channel (email/webhook/log)
+PUT    /api/notifications/channels/{id}      # Update channel
+DELETE /api/notifications/channels/{id}      # Delete channel
+POST   /api/notifications/channels/{id}/test # Test notification
+GET    /api/notifications/rules              # List rules
+POST   /api/notifications/rules              # Create rule
+GET    /api/notifications/log                # Notification history
+```
+
+### Cluster Settings (vmm-cluster only)
+
+```
+GET    /api/cluster/drs-exclusions           # List DRS exclusions
+POST   /api/cluster/drs-exclusions           # Create exclusion (VM or group)
+DELETE /api/cluster/drs-exclusions/{id}      # Remove exclusion
+GET    /api/cluster/ldap                     # LDAP configuration
+PUT    /api/cluster/ldap                     # Update LDAP settings
+POST   /api/cluster/ldap/test               # Test LDAP connection
 ```
 
 ---
@@ -545,11 +614,17 @@ libcorevm exposes 58 C ABI functions for dynamic loading (`dlopen`/`dlsym`):
 - [x] Storage & network management
 - [x] User & group management with audit logging
 - [x] **Cluster management** — multi-node orchestration (vmm-cluster)
-- [x] **DRS** — Distributed Resource Scheduler for automatic load balancing
-- [x] **High Availability** — automatic VM failover on node failure
-- [x] **Live Migration** — move VMs between hosts
+- [x] **DRS** — Distributed Resource Scheduler with exclusion rules
+- [x] **High Availability** — automatic VM failover with state reconciliation
+- [x] **Direct host-to-host migration** — token-based disk transfer between nodes
 - [x] **Host maintenance mode** — safe node drain before maintenance
 - [x] **Datastores** — cluster-wide shared storage
+- [x] **Storage Wizard** — guided NFS, GlusterFS, CephFS cluster filesystem setup
+- [x] **SDN** — software-defined networking with DHCP, DNS, and PXE
+- [x] **Notifications** — email, webhook, and log channels with rules
+- [x] **LDAP / Active Directory** — external authentication integration
+- [x] **Managed mode enforcement** — API guard on cluster-managed nodes
+- [x] **State reconciler** — split-brain prevention on node reconnect
 - [x] **Events & Alarms** — cluster event logging and alert system
 
 ---
@@ -575,11 +650,20 @@ CoreVM includes **vmm-cluster** — a central authority for managing multiple vm
 
 ### Key Features
 
-- **DRS (Distributed Resource Scheduler)** — automatically balances VM workloads across hosts
-- **High Availability** — restarts failed VMs on healthy nodes
-- **Live Migration** — move running VMs between hosts
+- **DRS (Distributed Resource Scheduler)** — automatically balances VM workloads across hosts, with per-VM and resource-group exclusions
+- **High Availability** — restarts failed VMs on healthy nodes, with state reconciliation on reconnect
+- **Direct Host-to-Host Migration** — disk data transfers directly between nodes using one-time tokens (bypasses cluster)
 - **Host Maintenance Mode** — safely drain VMs before host maintenance
-- **Cluster-wide Datastores** — shared storage visible to all nodes
+- **SDN (Software-Defined Networking)** — cluster-wide virtual networks with integrated DHCP, DNS, and PXE boot
+  - Static DHCP reservations, automatic DNS A-record registration, PXE boot configuration
+  - dnsmasq config generation, VLAN support, input validation (CIDR, IP, MAC)
+- **Storage Wizard** — guided 4-step setup for NFS, GlusterFS, and CephFS cluster filesystems
+  - Automatic package detection and installation, volume creation, mount on all hosts
+- **Notifications** — email (SMTP), webhook (with HMAC signing), and log channels
+  - Configurable rules with severity filters, category matching, and cooldowns
+- **LDAP / Active Directory** — external authentication with group-to-role mapping and TLS support
+- **Managed Mode Enforcement** — blocks direct API access on cluster-managed vmm-server nodes
+- **State Reconciler** — prevents split-brain after node reconnect (stops duplicate VMs, reclaims orphans)
 - **Events & Alarms** — centralized event logging and alert system
 - **Task Tracking** — monitor migrations, provisioning, and other long-running operations
 

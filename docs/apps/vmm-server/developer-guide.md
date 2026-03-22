@@ -55,9 +55,11 @@ apps/vmm-server/src/
 │   ├── system.rs       System info, dashboard stats, activity log
 │   └── resources.rs    Resource groups and permissions
 │
+├── api/guard.rs        Managed-mode middleware (blocks API when cluster-managed)
+│
 ├── agent/              Agent API (for cluster mode)
 │   ├── mod.rs          Agent router
-│   └── handlers.rs     Register, status, VM/storage commands
+│   └── handlers.rs     Register, status, VM/storage, migration, packages, exec
 │
 ├── services/           Business logic
 │   ├── vm_service.rs   VM creation, config management, lifecycle
@@ -129,6 +131,33 @@ When the server registers with a vmm-cluster instance, it enters "managed" mode:
 - Additional `/agent/*` endpoints become active
 - The cluster can remotely manage VMs and storage
 - Authentication uses `X-Agent-Token` header instead of JWT
+
+### Managed Mode Guard (`api/guard.rs`)
+
+An Axum middleware that intercepts all `/api/*` requests when the server is cluster-managed:
+- **Allowed:** `/agent/*`, `/ws/*`, `/api/system/info`, `/api/auth/login`, `/api/auth/me`
+- **Blocked:** All other `/api/*` endpoints return `403` with:
+  ```json
+  {"error": "managed_by_cluster", "cluster_url": "...", "message": "..."}
+  ```
+- Prevents out-of-band changes that could desync cluster state
+
+### Agent Endpoints
+
+Extended agent handlers in `agent/handlers.rs`:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /agent/register` | Register with cluster |
+| `GET /agent/status` | Report health (CPU, RAM, VMs, datastores) |
+| `POST /agent/vms/provision` | Create VM from cluster |
+| `POST /agent/vms/start\|stop\|force-stop\|destroy` | VM lifecycle |
+| `POST /agent/storage/*` | Storage operations |
+| `POST /agent/migration/send` | Stream VM disks to target host |
+| `POST /agent/migration/receive` | Receive VM disks from source host |
+| `POST /agent/packages/check` | Check if packages are installed (detects distro) |
+| `POST /agent/packages/install` | Install packages via apt/dnf/yum with optional sudo |
+| `POST /agent/exec` | Execute shell command with optional timeout and sudo |
 
 ## Adding a New API Endpoint
 

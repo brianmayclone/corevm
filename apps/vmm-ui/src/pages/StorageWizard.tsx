@@ -34,9 +34,13 @@ export default function StorageWizard() {
   const [mountPath, setMountPath] = useState('')
   const [selectedHostIds, setSelectedHostIds] = useState<string[]>([])
   // NFS
-  const [nfsServer, setNfsServer] = useState('')
-  const [nfsExport, setNfsExport] = useState('')
+  const [nfsMode, setNfsMode] = useState<'create' | 'existing'>('create') // create = setup NFS server on a host
+  const [nfsServerHostId, setNfsServerHostId] = useState('') // host that becomes the NFS server
+  const [nfsServer, setNfsServer] = useState('') // external server address (existing mode)
+  const [nfsExport, setNfsExport] = useState('/vmm/nfs-export')
   const [nfsOpts, setNfsOpts] = useState('vers=4,noatime')
+  // CephFS
+  const [cephMode, setCephMode] = useState<'create' | 'existing'>('create')
   // GlusterFS
   const [glusterVolume, setGlusterVolume] = useState('')
   const [glusterBrick, setGlusterBrick] = useState('')
@@ -100,12 +104,23 @@ export default function StorageWizard() {
   const runSetup = async () => {
     setSetupRunning(true); setSetupError('')
     try {
+      // For NFS create mode: use the selected host's IP as NFS server
+      let effectiveNfsServer = nfsServer
+      if (fsType === 'nfs' && nfsMode === 'create' && nfsServerHostId) {
+        const serverHost = clusterHosts.find(h => h.id === nfsServerHostId)
+        if (serverHost) {
+          effectiveNfsServer = serverHost.address.replace('https://', '').replace('http://', '').split(':')[0]
+        }
+      }
+
       const config = {
         fs_type: fsType, cluster_id: clusterId, datastore_name: datastoreName,
         host_ids: selectedHostIds, mount_path: mountPath,
-        nfs_server: nfsServer || undefined, nfs_export: nfsExport || undefined, nfs_opts: nfsOpts || undefined,
+        nfs_server: effectiveNfsServer || undefined, nfs_export: nfsExport || undefined, nfs_opts: nfsOpts || undefined,
+        nfs_server_host_id: (fsType === 'nfs' && nfsMode === 'create') ? nfsServerHostId : undefined,
         gluster_volume: glusterVolume || undefined, gluster_brick_path: glusterBrick || undefined, gluster_replica: glusterReplica,
         ceph_monitors: cephMonitors || undefined, ceph_path: cephPath || undefined, ceph_secret: cephSecret || undefined,
+        ceph_create_new: fsType === 'cephfs' && cephMode === 'create',
         sudo_passwords: sudoPasswords,
       }
       const { data } = await api.post('/api/storage/wizard/setup', config)
@@ -136,9 +151,9 @@ export default function StorageWizard() {
           <h2 className="text-lg font-semibold text-vmm-text">Choose Filesystem Type</h2>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             {([
-              { id: 'nfs', icon: Server, title: 'NFS', desc: 'I have an NFS server', detail: 'Mount an existing NFS export on all hosts. Simplest option.' },
-              { id: 'glusterfs', icon: Database, title: 'GlusterFS', desc: 'Replicated cluster storage', detail: 'Hosts form their own replicated storage. No external server needed. Recommended.' },
-              { id: 'cephfs', icon: HardDrive, title: 'CephFS', desc: 'I have a Ceph cluster', detail: 'Mount from an existing Ceph cluster. Enterprise-grade.' },
+              { id: 'nfs', icon: Server, title: 'NFS', desc: 'Network File Share', detail: 'Sets up one host as NFS server and mounts the share on all others. Simple and reliable. Everything is installed and configured automatically.' },
+              { id: 'glusterfs', icon: Database, title: 'GlusterFS', desc: 'Distributed Replicated Storage', detail: 'Installs GlusterFS on all hosts and creates a replicated volume from scratch. No external server needed. Recommended for most setups.' },
+              { id: 'cephfs', icon: HardDrive, title: 'CephFS', desc: 'Enterprise Scale-Out Storage', detail: 'Installs and configures a Ceph cluster across your hosts with CephFS. Maximum scalability and fault tolerance.' },
             ] as const).map(opt => (
               <Card key={opt.id}>
                 <div onClick={() => setFsType(opt.id)}
@@ -253,34 +268,105 @@ export default function StorageWizard() {
 
               {/* NFS */}
               {fsType === 'nfs' && (
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-xs text-vmm-text-muted mb-1">NFS Server</label>
-                    <input type="text" value={nfsServer} onChange={e => setNfsServer(e.target.value)}
-                      placeholder="192.168.1.100" className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm" />
+                <div className="space-y-4">
+                  <div className="flex gap-3">
+                    <button onClick={() => setNfsMode('create')}
+                      className={`flex-1 px-4 py-3 rounded-lg border text-sm text-left ${nfsMode === 'create' ? 'border-vmm-accent bg-vmm-accent/5' : 'border-vmm-border hover:border-vmm-border-light'}`}>
+                      <div className="font-medium text-vmm-text">Set up a new NFS server</div>
+                      <div className="text-xs text-vmm-text-muted mt-0.5">One host becomes the NFS server, others mount from it</div>
+                    </button>
+                    <button onClick={() => setNfsMode('existing')}
+                      className={`flex-1 px-4 py-3 rounded-lg border text-sm text-left ${nfsMode === 'existing' ? 'border-vmm-accent bg-vmm-accent/5' : 'border-vmm-border hover:border-vmm-border-light'}`}>
+                      <div className="font-medium text-vmm-text">Use existing NFS server</div>
+                      <div className="text-xs text-vmm-text-muted mt-0.5">Connect to a server that's already set up</div>
+                    </button>
                   </div>
-                  <div>
-                    <label className="block text-xs text-vmm-text-muted mb-1">Export Path</label>
-                    <input type="text" value={nfsExport} onChange={e => setNfsExport(e.target.value)}
-                      placeholder="/export/vmm" className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm" />
-                  </div>
+                  {nfsMode === 'create' ? (
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs text-vmm-text-muted mb-1">NFS Server Host</label>
+                        <select value={nfsServerHostId} onChange={e => setNfsServerHostId(e.target.value)}
+                          className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm">
+                          <option value="">Select a host...</option>
+                          {clusterHosts.map(h => <option key={h.id} value={h.id}>{h.hostname}</option>)}
+                        </select>
+                        <p className="text-[10px] text-vmm-text-muted mt-1">This host will run the NFS server. nfs-kernel-server will be installed automatically.</p>
+                      </div>
+                      <div>
+                        <label className="block text-xs text-vmm-text-muted mb-1">Export Directory</label>
+                        <input type="text" value={nfsExport} onChange={e => setNfsExport(e.target.value)}
+                          className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm" />
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs text-vmm-text-muted mb-1">NFS Server Address</label>
+                        <input type="text" value={nfsServer} onChange={e => setNfsServer(e.target.value)}
+                          placeholder="192.168.1.100" className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm" />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-vmm-text-muted mb-1">Export Path</label>
+                        <input type="text" value={nfsExport} onChange={e => setNfsExport(e.target.value)}
+                          className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm" />
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
-              {/* GlusterFS — Easy mode shows almost nothing */}
+              {/* GlusterFS — Easy mode: just confirm, everything auto-configured */}
               {fsType === 'glusterfs' && (
-                <div className="bg-vmm-accent/5 border border-vmm-accent/20 rounded-lg p-3 text-xs text-vmm-text-muted">
-                  GlusterFS will create a replicated volume across {selectedHostIds.length} hosts with replica factor {glusterReplica}.
-                  All data is automatically replicated for high availability.
+                <div className="bg-vmm-accent/5 border border-vmm-accent/20 rounded-lg p-4 space-y-2">
+                  <div className="text-sm font-medium text-vmm-text">Ready to create replicated storage</div>
+                  <div className="text-xs text-vmm-text-muted">
+                    A GlusterFS volume will be created across <strong>{selectedHostIds.length} hosts</strong> with
+                    <strong> {glusterReplica}-way replication</strong>. Every file is stored on {glusterReplica} hosts simultaneously —
+                    if a host fails, your data remains available.
+                  </div>
+                  <div className="text-xs text-vmm-text-muted mt-1">
+                    No external storage server needed — your cluster hosts provide the storage.
+                  </div>
                 </div>
               )}
 
               {/* CephFS */}
               {fsType === 'cephfs' && (
-                <div>
-                  <label className="block text-xs text-vmm-text-muted mb-1">Ceph Monitor Addresses</label>
-                  <input type="text" value={cephMonitors} onChange={e => setCephMonitors(e.target.value)}
-                    placeholder="mon1,mon2,mon3" className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm" />
+                <div className="space-y-4">
+                  <div className="flex gap-3">
+                    <button onClick={() => setCephMode('create')}
+                      className={`flex-1 px-4 py-3 rounded-lg border text-sm text-left ${cephMode === 'create' ? 'border-vmm-accent bg-vmm-accent/5' : 'border-vmm-border hover:border-vmm-border-light'}`}>
+                      <div className="font-medium text-vmm-text">Set up new Ceph cluster</div>
+                      <div className="text-xs text-vmm-text-muted mt-0.5">Install and configure Ceph on your hosts from scratch</div>
+                    </button>
+                    <button onClick={() => setCephMode('existing')}
+                      className={`flex-1 px-4 py-3 rounded-lg border text-sm text-left ${cephMode === 'existing' ? 'border-vmm-accent bg-vmm-accent/5' : 'border-vmm-border hover:border-vmm-border-light'}`}>
+                      <div className="font-medium text-vmm-text">Connect to existing Ceph</div>
+                      <div className="text-xs text-vmm-text-muted mt-0.5">Use monitors and credentials from an existing cluster</div>
+                    </button>
+                  </div>
+                  {cephMode === 'create' ? (
+                    <div className="bg-vmm-accent/5 border border-vmm-accent/20 rounded-lg p-4 space-y-2">
+                      <div className="text-sm font-medium text-vmm-text">Ceph will be installed on all selected hosts</div>
+                      <div className="text-xs text-vmm-text-muted">
+                        A Ceph monitor + OSD will be set up on each host. CephFS will be created automatically.
+                        Requires at least 3 hosts for a production deployment. All packages are installed automatically.
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-xs text-vmm-text-muted mb-1">Monitor Addresses</label>
+                        <input type="text" value={cephMonitors} onChange={e => setCephMonitors(e.target.value)}
+                          placeholder="mon1,mon2,mon3" className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm" />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-vmm-text-muted mb-1">Ceph Secret / Keyring</label>
+                        <input type="password" value={cephSecret} onChange={e => setCephSecret(e.target.value)}
+                          className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm" />
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 

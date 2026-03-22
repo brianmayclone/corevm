@@ -136,6 +136,23 @@ When connected to vmm-cluster, additional pages appear:
 - Node health overview
 - Resource utilization heat map
 
+### SDN Networks
+
+- Create cluster-wide virtual networks with CIDR, VLAN, DHCP, DNS
+- Network detail page with tabs for:
+  - **DHCP Leases** — active leases and static reservations
+  - **DNS Records** — A records and CNAME records
+  - **PXE Configuration** — boot file, TFTP root, next-server
+- Input validation (CIDR, IP, MAC format)
+
+### Storage Wizard
+
+Guided 4-step wizard for setting up cluster shared storage:
+1. Choose filesystem type (NFS, GlusterFS, CephFS) and cluster
+2. Check package status on selected hosts
+3. Install missing packages (with sudo password support)
+4. Configure and mount the filesystem on all hosts
+
 ### Datastores
 
 - Manage cluster-wide shared storage
@@ -144,18 +161,27 @@ When connected to vmm-cluster, additional pages appear:
 ### Migration
 
 - Migrate VMs between nodes (from VM detail page)
-- View migration history
+- Direct host-to-host transfer with progress tracking
+- View migration history in Tasks
 
 ### DRS (Distributed Resource Scheduler)
 
 - View current resource distribution
 - See DRS recommendations
 - Configure DRS mode (manual/automatic)
+- Manage DRS exclusions (per-VM or per-resource-group)
+
+### Notifications
+
+- Configure notification channels (email, webhook, log)
+- Create notification rules with severity and category filters
+- Test channels with a test notification
+- View notification history and delivery status
 
 ### Tasks
 
 - Track long-running operations (migrations, provisioning)
-- View task status and history
+- View task status, progress, and history
 
 ### Events
 
@@ -166,6 +192,12 @@ When connected to vmm-cluster, additional pages appear:
 
 - View active alerts
 - Configure alarm thresholds
+
+### Cluster Settings
+
+- LDAP / Active Directory configuration
+- DRS exclusion management
+- SMTP settings for email notifications
 
 ## Responsive Design
 

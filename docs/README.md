@@ -17,8 +17,8 @@ docs/
 │   │   ├── user-guide.md      Installation, configuration, usage
 │   │   └── developer-guide.md Architecture, API internals, extending
 │   ├── vmm-cluster/           Cluster orchestration
-│   │   ├── user-guide.md      Deployment, node management, DRS
-│   │   └── developer-guide.md Architecture, engines, agent protocol
+│   │   ├── user-guide.md      Deployment, DRS, HA, SDN, migration, notifications
+│   │   └── developer-guide.md Engines, agent protocol, reconciler, SDN, notifier
 │   ├── vmm-ui/                Web frontend
 │   │   ├── user-guide.md      UI walkthrough, features
 │   │   └── developer-guide.md Build, stack, component structure
@@ -40,6 +40,10 @@ docs/
 | **CLI Usage** | [vmctl User Guide](apps/vmctl/user-guide.md) |
 | **Desktop App** | [vmmanager User Guide](apps/vmmanager/user-guide.md) |
 | **Cluster Setup** | [vmm-cluster User Guide](apps/vmm-cluster/user-guide.md) |
+| **SDN Networking** | [vmm-cluster User Guide — SDN](apps/vmm-cluster/user-guide.md#sdn-software-defined-networking) |
+| **Storage Wizard** | [vmm-cluster User Guide — Storage Wizard](apps/vmm-cluster/user-guide.md#storage-wizard) |
+| **Notifications** | [vmm-cluster User Guide — Notifications](apps/vmm-cluster/user-guide.md#notifications) |
+| **LDAP / AD** | [vmm-cluster User Guide — LDAP](apps/vmm-cluster/user-guide.md#ldap--active-directory) |
 | **VM Engine Internals** | [libcorevm Overview](libcorevm/overview.md) |
 | **Hardware Devices** | [Device Reference](libcorevm/devices.md) |
 | **C FFI** | [FFI Reference](libcorevm/ffi.md) |

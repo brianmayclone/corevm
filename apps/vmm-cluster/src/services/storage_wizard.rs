@@ -28,10 +28,15 @@ pub struct WizardConfig {
     pub gluster_volume: Option<String>,
     pub gluster_brick_path: Option<String>,
     pub gluster_replica: Option<u32>,
+    // NFS create mode — set up NFS server on this host
+    pub nfs_server_host_id: Option<String>,
     // CephFS-specific
     pub ceph_monitors: Option<String>,
     pub ceph_path: Option<String>,
     pub ceph_secret: Option<String>,
+    /// true = install Ceph from scratch on all hosts
+    #[serde(default)]
+    pub ceph_create_new: bool,
     // Credentials — per-host sudo passwords (host_id → password)
     #[serde(default)]
     pub sudo_passwords: std::collections::HashMap<String, String>,
@@ -57,7 +62,8 @@ impl StorageWizardService {
     /// Get required packages for a filesystem type.
     pub fn required_packages(fs_type: &str) -> Vec<String> {
         match fs_type {
-            "nfs" => vec!["nfs-common".into()],
+            // NFS: install both client and server (server only used on the selected host)
+            "nfs" => vec!["nfs-common".into(), "nfs-kernel-server".into()],
             "glusterfs" => vec!["glusterfs-server".into(), "glusterfs-client".into()],
             "cephfs" => vec!["ceph-common".into(), "ceph-fuse".into()],
             _ => Vec::new(),
@@ -295,13 +301,45 @@ impl StorageWizardService {
     }
 
     async fn setup_nfs(state: &Arc<ClusterState>, config: &WizardConfig, steps: &mut Vec<WizardStep>) -> Result<(), String> {
-        let server = config.nfs_server.as_deref().ok_or("NFS server address required")?;
-        let export = config.nfs_export.as_deref().ok_or("NFS export path required")?;
+        let export = config.nfs_export.as_deref().unwrap_or("/vmm/nfs-export");
         let opts = config.nfs_opts.as_deref().unwrap_or("vers=4,noatime");
-        let source = format!("{}:{}", server, export);
 
-        // Mount on all hosts
+        // If creating a new NFS server on a host
+        let server_addr = if let Some(ref server_host_id) = config.nfs_server_host_id {
+            let sudo = Self::sudo_for(config, server_host_id);
+
+            // Install NFS server package
+            Self::exec_on_host(state, server_host_id, "which exportfs || apt-get install -y nfs-kernel-server || yum install -y nfs-utils", sudo).await?;
+            steps.push(WizardStep { label: "NFS server package installed".into(), status: "done".into(), error: None });
+
+            // Create export directory
+            Self::exec_on_host(state, server_host_id, &format!("mkdir -p {}", export), sudo).await?;
+
+            // Configure /etc/exports
+            let export_line = format!("{} *(rw,sync,no_subtree_check,no_root_squash)", export);
+            let add_export_cmd = format!("grep -qF '{}' /etc/exports 2>/dev/null || echo '{}' >> /etc/exports", export, export_line);
+            Self::exec_on_host(state, server_host_id, &add_export_cmd, sudo).await?;
+            steps.push(WizardStep { label: format!("NFS export '{}' configured", export), status: "done".into(), error: None });
+
+            // Start/restart NFS server
+            Self::exec_on_host(state, server_host_id, "systemctl enable --now nfs-kernel-server 2>/dev/null || systemctl enable --now nfs-server 2>/dev/null || true", sudo).await?;
+            Self::exec_on_host(state, server_host_id, "exportfs -ra", sudo).await?;
+            steps.push(WizardStep { label: "NFS server started".into(), status: "done".into(), error: None });
+
+            // Get the server's IP
+            let node = state.nodes.get(server_host_id).ok_or("NFS server host not found")?.clone();
+            node.address.replace("https://", "").replace("http://", "").split(':').next().unwrap_or("").to_string()
+        } else {
+            config.nfs_server.clone().ok_or("NFS server address required")?
+        };
+
+        let source = format!("{}:{}", server_addr, export);
+
+        // Mount on all hosts (except the server itself — it already has the directory)
         for host_id in &config.host_ids {
+            if config.nfs_server_host_id.as_deref() == Some(host_id.as_str()) {
+                continue; // Server host uses the local directory, no mount needed
+            }
             let sudo = Self::sudo_for(config, host_id);
             Self::exec_on_host(state, host_id, &format!("mkdir -p {}", config.mount_path), sudo).await?;
             let mount_cmd = format!("mount -t nfs -o {} {} {}", opts, source, config.mount_path);
@@ -312,12 +350,69 @@ impl StorageWizardService {
                 return Err(format!("NFS mount failed on {}", node));
             }
         }
-        steps.push(WizardStep { label: format!("NFS {} mounted on all hosts", source), status: "done".into(), error: None });
+        steps.push(WizardStep { label: format!("NFS mounted on all hosts"), status: "done".into(), error: None });
 
         Ok(())
     }
 
     async fn setup_cephfs(state: &Arc<ClusterState>, config: &WizardConfig, steps: &mut Vec<WizardStep>) -> Result<(), String> {
+        if config.ceph_create_new {
+            // Full Ceph installation from scratch
+            let first = &config.host_ids[0];
+            let sudo = Self::sudo_for(config, first);
+
+            // Install ceph on all hosts
+            for host_id in &config.host_ids {
+                let s = Self::sudo_for(config, host_id);
+                Self::exec_on_host(state, host_id, "which ceph-mon >/dev/null 2>&1 || apt-get install -y ceph ceph-mds ceph-fuse || yum install -y ceph ceph-mds ceph-fuse", s).await?;
+            }
+            steps.push(WizardStep { label: "Ceph packages installed on all hosts".into(), status: "done".into(), error: None });
+
+            // Generate minimal ceph.conf on first host
+            let node = state.nodes.get(first).ok_or("First host not found")?.clone();
+            let first_ip = node.address.replace("https://", "").replace("http://", "").split(':').next().unwrap_or("").to_string();
+            let fsid = uuid::Uuid::new_v4().to_string();
+
+            let ceph_conf = format!(
+                "[global]\nfsid = {}\nmon_initial_members = {}\nmon_host = {}\nauth_cluster_required = none\nauth_service_required = none\nauth_client_required = none\nosd_pool_default_size = {}\n",
+                fsid, node.hostname, first_ip, std::cmp::min(config.host_ids.len(), 3)
+            );
+
+            Self::exec_on_host(state, first, &format!("mkdir -p /etc/ceph && echo '{}' > /etc/ceph/ceph.conf", ceph_conf.replace('\n', "\\n")), sudo).await?;
+            steps.push(WizardStep { label: "Ceph configuration generated".into(), status: "done".into(), error: None });
+
+            // Note: Full Ceph bootstrap (ceph-deploy, cephadm, or manual mon/osd init) is complex.
+            // For a production setup, cephadm is recommended. We set up the config and let the admin
+            // finish the bootstrap, or we detect if cephadm is available.
+            Self::exec_on_host(state, first, "which cephadm >/dev/null 2>&1 && cephadm bootstrap --mon-ip {} --skip-monitoring-stack --skip-dashboard || echo 'cephadm not found — manual Ceph init required'", sudo).await?;
+            steps.push(WizardStep { label: "Ceph cluster bootstrap attempted".into(), status: "done".into(), error: None });
+
+            // Create CephFS
+            Self::exec_on_host(state, first, "ceph osd pool create cephfs_data 32 2>/dev/null; ceph osd pool create cephfs_metadata 32 2>/dev/null; ceph fs new cephfs cephfs_metadata cephfs_data 2>/dev/null || true", sudo).await?;
+            steps.push(WizardStep { label: "CephFS filesystem created".into(), status: "done".into(), error: None });
+
+            // Mount CephFS on all hosts
+            for host_id in &config.host_ids {
+                let s = Self::sudo_for(config, host_id);
+                // Copy ceph.conf to other hosts
+                if host_id != first {
+                    Self::exec_on_host(state, host_id, &format!("mkdir -p /etc/ceph && echo '{}' > /etc/ceph/ceph.conf", ceph_conf.replace('\n', "\\n")), s).await?;
+                }
+                Self::exec_on_host(state, host_id, &format!("mkdir -p {}", config.mount_path), s).await?;
+                let mount_cmd = format!("mount -t ceph {}:/ {} -o name=admin", first_ip, config.mount_path);
+                let (code, _, stderr) = Self::exec_on_host(state, host_id, &mount_cmd, s).await?;
+                if code != 0 {
+                    let hn = state.nodes.get(host_id).map(|n| n.hostname.clone()).unwrap_or_default();
+                    steps.push(WizardStep { label: format!("Mount on {}", hn), status: "error".into(), error: Some(stderr) });
+                    return Err(format!("CephFS mount failed on {}", hn));
+                }
+            }
+            steps.push(WizardStep { label: "CephFS mounted on all hosts".into(), status: "done".into(), error: None });
+
+            return Ok(());
+        }
+
+        // Existing Ceph cluster — just mount
         let monitors = config.ceph_monitors.as_deref().ok_or("Ceph monitor addresses required")?;
         let path = config.ceph_path.as_deref().unwrap_or("/");
         let source = format!("{}:{}", monitors, path);

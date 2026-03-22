@@ -139,10 +139,28 @@ Connect to `ws://localhost:8443/ws/console/{vm_id}` with a valid JWT token to ge
 
 ## Cluster Agent Mode
 
-vmm-server can operate as a managed agent in a vmm-cluster deployment. When registered with a cluster, it exposes additional `/agent/*` endpoints that the cluster authority uses to:
+vmm-server can operate as a managed agent in a vmm-cluster deployment. When registered with a cluster, it enters **managed mode**:
 
-- Monitor node health (heartbeat)
-- Provision, start, stop, and destroy VMs remotely
-- Manage storage across the cluster
+### Managed Mode Enforcement
+
+In managed mode, the regular REST API is blocked to prevent out-of-band changes:
+- Direct VM creation, deletion, and management return `403 managed_by_cluster`
+- The error response includes the cluster URL for redirection to the correct management interface
+- Only these endpoints remain accessible:
+  - `/agent/*` — agent API for cluster communication
+  - `/ws/*` — WebSocket connections (console)
+  - `/api/system/info` — system information (shows managed status)
+  - `/api/auth/login` — allows UI to display managed-by-cluster message
+
+### Agent Capabilities
+
+The cluster communicates with managed nodes via the `/agent/*` endpoints:
+
+- **Health monitoring** — heartbeat polling with CPU, RAM, VM, and datastore status
+- **VM lifecycle** — provision, start, stop, force-stop, and destroy VMs remotely
+- **Storage management** — mount/unmount datastores, create disks
+- **Direct migration** — send/receive VM disk data directly between nodes
+- **Package management** — check and install packages (for Storage Wizard)
+- **Command execution** — execute shell commands with optional sudo (for filesystem setup)
 
 See the [vmm-cluster User Guide](../vmm-cluster/user-guide.md) for details.

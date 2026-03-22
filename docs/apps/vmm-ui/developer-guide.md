@@ -43,16 +43,19 @@ apps/vmm-ui/src/
 ├── main.tsx                    Entry point
 ├── index.css                   Tailwind + custom styles
 │
-├── pages/                      Page components (38 pages)
+├── pages/                      Page components (40+ pages)
 │   ├── Login.tsx               Authentication
 │   ├── Dashboard.tsx           System overview
 │   ├── MachinesList.tsx        VM listing
-│   ├── VmCreate.tsx            VM creation wizard
+│   ├── VmCreate.tsx            VM creation wizard (with SDN network selection)
 │   ├── VmDetail.tsx            VM detail + config editor
 │   ├── VmConsole.tsx           Live VGA console
 │   ├── Storage*.tsx            Storage pages (5)
+│   ├── StorageWizard.tsx       Guided cluster filesystem setup (NFS/Gluster/Ceph)
 │   ├── Network*.tsx            Network pages (5)
-│   ├── Settings*.tsx           Settings pages (4)
+│   ├── SdnNetworks.tsx         SDN network list + creation
+│   ├── SdnNetworkDetail.tsx    Network detail (DHCP leases, DNS, PXE tabs)
+│   ├── Settings*.tsx           Settings pages (4+)
 │   ├── Users*.tsx              User management
 │   ├── Resources*.tsx          Resource groups
 │   ├── Terminal*.tsx           In-browser terminal
@@ -147,6 +150,9 @@ React Router v7 with nested layouts:
 /events            → EventsList       (cluster only)
 /alarms            → AlarmsList       (cluster only)
 /drs               → DRSOverview      (cluster only)
+/networks          → SdnNetworks      (cluster only)
+/networks/:id      → SdnNetworkDetail (cluster only)
+/storage/wizard    → StorageWizard    (cluster only)
 ```
 
 ## Adding a New Page
