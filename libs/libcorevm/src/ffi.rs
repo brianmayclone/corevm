@@ -124,6 +124,50 @@ fn ahci_try_lock() -> bool {
     AHCI_LOCK.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok()
 }
 
+// ── MMIO device lock ───────────────────────────────────────────────────────
+//
+// Serialises MMIO access to non-AHCI devices (VGA/SVGA, E1000, VirtIO).
+// AHCI has its own AHCI_LOCK and is excluded. Without this lock, multiple
+// vCPU threads can race on device state (VBE registers, framebuffer Vec,
+// E1000 ring descriptors) causing segfaults and data corruption.
+//
+// This lock is NOT held for AHCI MMIO — AHCI uses deferred I/O with
+// AHCI_LOCK to avoid blocking other vCPUs during disk I/O.
+static MMIO_LOCK: AtomicBool = AtomicBool::new(false);
+
+#[inline]
+fn mmio_lock() {
+    if MMIO_LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+        return;
+    }
+    mmio_lock_slow();
+}
+
+#[cold]
+fn mmio_lock_slow() {
+    let mut spin_count = 0u32;
+    loop {
+        if MMIO_LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            return;
+        }
+        spin_count += 1;
+        if spin_count < 64 {
+            core::hint::spin_loop();
+        } else {
+            #[cfg(feature = "std")]
+            std::thread::sleep(core::time::Duration::from_micros(1));
+            #[cfg(not(feature = "std"))]
+            core::hint::spin_loop();
+            spin_count = 0;
+        }
+    }
+}
+
+#[inline]
+fn mmio_unlock() {
+    MMIO_LOCK.store(false, Ordering::Release);
+}
+
 // ── Per-vCPU I/O context ────────────────────────────────────────────────────
 //
 // Tracks which vCPU is currently executing a port I/O handler.
@@ -760,14 +804,14 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                             injected += 1;
                         }
                     } else {
-                        if want_asserted && !vm.ahci_irq_asserted {
+                        if want_asserted && !vm.ahci_irq_asserted.load(Ordering::Relaxed) {
                             let _ = vm.backend.set_irq_line(11, true);
-                            vm.ahci_irq_asserted = true;
+                            vm.ahci_irq_asserted.store(true, Ordering::Relaxed);
                             injected += 1;
-                        } else if !want_asserted && vm.ahci_irq_asserted {
-                            vm.ahci_irq_asserted = false;
+                        } else if !want_asserted && vm.ahci_irq_asserted.load(Ordering::Relaxed) {
+                            vm.ahci_irq_asserted.store(false, Ordering::Relaxed);
                             // Only de-assert IRQ 11 if no other device on IRQ 11 needs it
-                            if !vm.e1000_irq_asserted && !vm.virtio_net_irq_asserted {
+                            if !vm.e1000_irq_asserted.load(Ordering::Relaxed) && !vm.virtio_net_irq_asserted.load(Ordering::Relaxed) {
                                 let _ = vm.backend.set_irq_line(11, false);
                             }
                         }
@@ -782,17 +826,17 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                             injected += 1;
                         }
                     } else {
-                        if want_asserted && !vm.ahci_irq_asserted {
+                        if want_asserted && !vm.ahci_irq_asserted.load(Ordering::Relaxed) {
                             if !vm.pic_ptr.is_null() {
                                 let pic = unsafe { &mut *vm.pic_ptr };
                                 pic.raise_irq(11);
                             }
                             vm.backend.ioapic_set_irq(11, true);
-                            vm.ahci_irq_asserted = true;
+                            vm.ahci_irq_asserted.store(true, Ordering::Relaxed);
                             injected += 1;
-                        } else if !want_asserted && vm.ahci_irq_asserted {
+                        } else if !want_asserted && vm.ahci_irq_asserted.load(Ordering::Relaxed) {
                             vm.backend.ioapic_set_irq(11, false);
-                            vm.ahci_irq_asserted = false;
+                            vm.ahci_irq_asserted.store(false, Ordering::Relaxed);
                         }
                     }
                 }
@@ -810,7 +854,10 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
             }
 
             // E1000 NIC — MSI or legacy IRQ 11
+            // MMIO_LOCK: E1000 registers may be concurrently accessed by AP
+            // threads via MMIO exits to the E1000 BAR0 region.
             if !vm.e1000_ptr.is_null() {
+                mmio_lock();
                 let e1000 = unsafe { &mut *vm.e1000_ptr };
 
                 // Check if guest enabled MSI (read MSI control from PCI config)
@@ -884,6 +931,7 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         }
                     }
                 }
+                mmio_unlock();
             }
 
             // HPET Timer 0 → IRQ (edge-triggered pulse on KVM)
@@ -948,31 +996,32 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
             // Previously on IRQ 11 shared with AHCI/E1000/VirtIO-Net, which caused
             // missed interrupts when another device held the line high.
             if !vm.virtio_gpu_ptr.is_null() {
+                mmio_lock();
                 let gpu = unsafe { &mut *vm.virtio_gpu_ptr };
                 let want_asserted = gpu.isr_status != 0;
                 #[cfg(feature = "linux")]
                 {
-                    if want_asserted && !vm.virtio_gpu_irq_asserted {
-                        vm.virtio_gpu_irq_asserted = true;
+                    if want_asserted && !vm.virtio_gpu_irq_asserted.load(Ordering::Relaxed) {
+                        vm.virtio_gpu_irq_asserted.store(true, Ordering::Relaxed);
                         let _ = vm.backend.set_irq_line(5, true);
                         injected += 1;
-                    } else if !want_asserted && vm.virtio_gpu_irq_asserted {
-                        vm.virtio_gpu_irq_asserted = false;
+                    } else if !want_asserted && vm.virtio_gpu_irq_asserted.load(Ordering::Relaxed) {
+                        vm.virtio_gpu_irq_asserted.store(false, Ordering::Relaxed);
                         let _ = vm.backend.set_irq_line(5, false);
                     }
                 }
                 #[cfg(feature = "windows")]
                 {
-                    if want_asserted && !vm.virtio_gpu_irq_asserted {
-                        vm.virtio_gpu_irq_asserted = true;
+                    if want_asserted && !vm.virtio_gpu_irq_asserted.load(Ordering::Relaxed) {
+                        vm.virtio_gpu_irq_asserted.store(true, Ordering::Relaxed);
                         if !vm.pic_ptr.is_null() {
                             let pic = unsafe { &mut *vm.pic_ptr };
                             pic.raise_irq(5);
                         }
                         vm.backend.ioapic_set_irq(5, true);
                         injected += 1;
-                    } else if !want_asserted && vm.virtio_gpu_irq_asserted {
-                        vm.virtio_gpu_irq_asserted = false;
+                    } else if !want_asserted && vm.virtio_gpu_irq_asserted.load(Ordering::Relaxed) {
+                        vm.virtio_gpu_irq_asserted.store(false, Ordering::Relaxed);
                         vm.backend.ioapic_set_irq(5, false);
                     }
                 }
@@ -985,38 +1034,40 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         }
                     }
                 }
+                mmio_unlock();
             }
 
             // VirtIO-Net → IRQ 11 (level-triggered, shares with AHCI/E1000/VirtIO GPU)
             if !vm.virtio_net_ptr.is_null() {
+                mmio_lock();
                 let net = unsafe { &mut *vm.virtio_net_ptr };
                 let want_asserted = net.isr_status != 0;
                 #[cfg(feature = "linux")]
                 {
-                    if want_asserted && !vm.virtio_net_irq_asserted {
-                        vm.virtio_net_irq_asserted = true;
+                    if want_asserted && !vm.virtio_net_irq_asserted.load(Ordering::Relaxed) {
+                        vm.virtio_net_irq_asserted.store(true, Ordering::Relaxed);
                         let _ = vm.backend.set_irq_line(11, true);
                         injected += 1;
-                    } else if !want_asserted && vm.virtio_net_irq_asserted {
-                        vm.virtio_net_irq_asserted = false;
-                        if !vm.ahci_irq_asserted && !vm.e1000_irq_asserted {
+                    } else if !want_asserted && vm.virtio_net_irq_asserted.load(Ordering::Relaxed) {
+                        vm.virtio_net_irq_asserted.store(false, Ordering::Relaxed);
+                        if !vm.ahci_irq_asserted.load(Ordering::Relaxed) && !vm.e1000_irq_asserted.load(Ordering::Relaxed) {
                             let _ = vm.backend.set_irq_line(11, false);
                         }
                     }
                 }
                 #[cfg(feature = "windows")]
                 {
-                    if want_asserted && !vm.virtio_net_irq_asserted {
-                        vm.virtio_net_irq_asserted = true;
+                    if want_asserted && !vm.virtio_net_irq_asserted.load(Ordering::Relaxed) {
+                        vm.virtio_net_irq_asserted.store(true, Ordering::Relaxed);
                         if !vm.pic_ptr.is_null() {
                             let pic = unsafe { &mut *vm.pic_ptr };
                             pic.raise_irq(11);
                         }
                         vm.backend.ioapic_set_irq(11, true);
                         injected += 1;
-                    } else if !want_asserted && vm.virtio_net_irq_asserted {
-                        vm.virtio_net_irq_asserted = false;
-                        if !vm.ahci_irq_asserted && !vm.e1000_irq_asserted {
+                    } else if !want_asserted && vm.virtio_net_irq_asserted.load(Ordering::Relaxed) {
+                        vm.virtio_net_irq_asserted.store(false, Ordering::Relaxed);
+                        if !vm.ahci_irq_asserted.load(Ordering::Relaxed) && !vm.e1000_irq_asserted.load(Ordering::Relaxed) {
                             vm.backend.ioapic_set_irq(11, false);
                         }
                     }
@@ -1030,10 +1081,13 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         }
                     }
                 }
+                mmio_unlock();
             }
 
             // VirtIO Input (Keyboard + Tablet) → IRQ 10 (edge-triggered)
+            // MMIO_LOCK: VirtIO input devices may be accessed via MMIO from APs.
             if !vm.virtio_kbd_ptr.is_null() {
+                mmio_lock();
                 let kbd = unsafe { &mut *vm.virtio_kbd_ptr };
                 if kbd.isr_status != 0 {
                     #[cfg(feature = "linux")]
@@ -1053,8 +1107,10 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         injected += 1;
                     }
                 }
+                mmio_unlock();
             }
             if !vm.virtio_tablet_ptr.is_null() {
+                mmio_lock();
                 let tablet = unsafe { &mut *vm.virtio_tablet_ptr };
                 if tablet.isr_status != 0 {
                     #[cfg(feature = "linux")]
@@ -1074,6 +1130,7 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         injected += 1;
                     }
                 }
+                mmio_unlock();
             }
 
             // Software PIC injection (non-Linux only).
@@ -1214,27 +1271,27 @@ pub extern "C" fn corevm_ahci_poll_irq(handle: u64) {
                     let _ = vm.backend.signal_msi(ahci.msi_address, ahci.msi_data);
                 }
                 // Also assert legacy IRQ as safety net
-                if !vm.ahci_irq_asserted {
+                if !vm.ahci_irq_asserted.load(Ordering::Relaxed) {
                     let _ = vm.backend.set_irq_line(11, true);
-                    vm.ahci_irq_asserted = true;
+                    vm.ahci_irq_asserted.store(true, Ordering::Relaxed);
                 }
                 ahci.clear_irq();
-            } else if vm.ahci_irq_asserted {
+            } else if vm.ahci_irq_asserted.load(Ordering::Relaxed) {
                 // Deassert legacy IRQ when no longer needed
-                vm.ahci_irq_asserted = false;
-                if !vm.e1000_irq_asserted && !vm.virtio_net_irq_asserted {
+                vm.ahci_irq_asserted.store(false, Ordering::Relaxed);
+                if !vm.e1000_irq_asserted.load(Ordering::Relaxed) && !vm.virtio_net_irq_asserted.load(Ordering::Relaxed) {
                     let _ = vm.backend.set_irq_line(11, false);
                 }
             }
         } else {
             // Legacy level-triggered mode (MSI not enabled by guest)
-            if want_asserted && !vm.ahci_irq_asserted {
+            if want_asserted && !vm.ahci_irq_asserted.load(Ordering::Relaxed) {
                 ahci.diag_irqs_delivered += 1;
                 let _ = vm.backend.set_irq_line(11, true);
-                vm.ahci_irq_asserted = true;
-            } else if !want_asserted && vm.ahci_irq_asserted {
-                vm.ahci_irq_asserted = false;
-                if !vm.e1000_irq_asserted && !vm.virtio_net_irq_asserted {
+                vm.ahci_irq_asserted.store(true, Ordering::Relaxed);
+            } else if !want_asserted && vm.ahci_irq_asserted.load(Ordering::Relaxed) {
+                vm.ahci_irq_asserted.store(false, Ordering::Relaxed);
+                if !vm.e1000_irq_asserted.load(Ordering::Relaxed) && !vm.virtio_net_irq_asserted.load(Ordering::Relaxed) {
                     let _ = vm.backend.set_irq_line(11, false);
                 }
             }
@@ -1249,35 +1306,35 @@ pub extern "C" fn corevm_ahci_poll_irq(handle: u64) {
                     Ok(_) => {},
                     Err(_e) => {
                         // Fallback to legacy IRQ
-                        if !vm.ahci_irq_asserted {
+                        if !vm.ahci_irq_asserted.load(Ordering::Relaxed) {
                             if !vm.pic_ptr.is_null() {
                                 let pic = unsafe { &mut *vm.pic_ptr };
                                 pic.raise_irq(11);
                             }
                             vm.backend.ioapic_set_irq(11, true);
-                            vm.ahci_irq_asserted = true;
+                            vm.ahci_irq_asserted.store(true, Ordering::Relaxed);
                         }
                     }
                 }
                 ahci.clear_irq();
                 // Deassert legacy IRQ line if it was still asserted
-                if vm.ahci_irq_asserted {
+                if vm.ahci_irq_asserted.load(Ordering::Relaxed) {
                     vm.backend.ioapic_set_irq(11, false);
-                    vm.ahci_irq_asserted = false;
+                    vm.ahci_irq_asserted.store(false, Ordering::Relaxed);
                 }
             }
         } else {
             // Legacy level-triggered mode
-            if want_asserted && !vm.ahci_irq_asserted {
+            if want_asserted && !vm.ahci_irq_asserted.load(Ordering::Relaxed) {
                 if !vm.pic_ptr.is_null() {
                     let pic = unsafe { &mut *vm.pic_ptr };
                     pic.raise_irq(11);
                 }
                 vm.backend.ioapic_set_irq(11, true);
-                vm.ahci_irq_asserted = true;
-            } else if !want_asserted && vm.ahci_irq_asserted {
+                vm.ahci_irq_asserted.store(true, Ordering::Relaxed);
+            } else if !want_asserted && vm.ahci_irq_asserted.load(Ordering::Relaxed) {
                 vm.backend.ioapic_set_irq(11, false);
-                vm.ahci_irq_asserted = false;
+                vm.ahci_irq_asserted.store(false, Ordering::Relaxed);
             }
         }
     }
@@ -1298,8 +1355,8 @@ pub extern "C" fn corevm_check_reset(handle: u64) -> i32 {
                 }
             }
             // Check port 0xCF9 reset (stored in VM state)
-            if vm.cf9_reset_pending {
-                vm.cf9_reset_pending = false;
+            if vm.cf9_reset_pending.load(Ordering::Relaxed) {
+                vm.cf9_reset_pending.store(false, Ordering::Relaxed);
                 return 1;
             }
             0
@@ -1579,6 +1636,23 @@ pub extern "C" fn corevm_complete_string_io(
     0
 }
 
+/// Check if a physical address falls in the AHCI BAR5 MMIO region.
+/// Used to skip MMIO_LOCK for AHCI accesses (AHCI has its own AHCI_LOCK).
+///
+/// # Safety
+/// Uses `&mut *pci_bus_ptr` because `mmcfg_read` takes `&mut self` (even
+/// though it only reads). This is safe here because we are only reading
+/// the PCI config space BAR value — no mutation occurs.
+#[inline]
+fn is_ahci_mmio(vm: &Vm, addr: u64) -> bool {
+    if vm.ahci_ptr.is_null() || vm.pci_bus_ptr.is_null() {
+        return false;
+    }
+    let bus = unsafe { &mut *vm.pci_bus_ptr };
+    let ahci_bar5 = bus.mmcfg_read(0, vm.chipset.slots.ahci, 0, 0x24, 4) & 0xFFFFFFF0;
+    ahci_bar5 != 0 && addr >= ahci_bar5 && addr < ahci_bar5 + 0x1000
+}
+
 /// Dispatch an MMIO exit to the registered device handler.
 ///
 /// For reads (`is_write`=0), `data` is filled with the result.
@@ -1590,22 +1664,20 @@ pub extern "C" fn corevm_handle_mmio_exit(
     handle: u64, vcpu_id: u32, addr: u64, is_write: u8, size: u8, data: *mut u8,
     dest_reg: u8, instr_len: u8,
 ) -> i32 {
-    // MMIO exits do NOT take the global IO_LOCK.
-    //
-    // AHCI command processing (triggered by PORT_CI writes) performs
-    // synchronous disk I/O (pread/pwrite) which can block for milliseconds.
-    // Holding the global spinlock during disk I/O starves all AP vCPU threads,
-    // causing 10-100x disk throughput degradation with SMP.
-    //
-    // Instead, AHCI has its own dedicated AHCI_LOCK (acquired inside
-    // PciMmioRouter) that serialises only AHCI accesses. Other MMIO
-    // devices (VGA, E1000, VirtIO) are accessed only from the BSP and
-    // do not need locking. The IO_LOCK remains on port I/O exits to
-    // serialise PCI config space and other shared port-I/O devices.
+    // SMP MMIO locking: MMIO_LOCK serialises non-AHCI device access.
+    // AHCI uses its own AHCI_LOCK with deferred I/O inside PciMmioRouter.
     let vm = match get_vm(handle) { Some(v) => v, None => { return -1 } };
     if data.is_null() { return -1; }
+
+    let is_ahci = is_ahci_mmio(vm, addr);
+    if !is_ahci {
+        mmio_lock();
+    }
     let buf = unsafe { core::slice::from_raw_parts_mut(data, size as usize) };
     vm.handle_mmio(addr, is_write != 0, size, buf);
+    if !is_ahci {
+        mmio_unlock();
+    }
 
     // For MMIO reads, write response back to backend.
     if is_write == 0 {
@@ -1623,8 +1695,8 @@ pub extern "C" fn corevm_handle_mmio_exit(
         }
         #[cfg(feature = "windows")]
         {
-            // Store pending response — applied inside run_vcpu before next VM entry.
-            vm.set_pending_mmio_read(val, dest_reg);
+            // Store pending response for THIS vCPU — applied inside run_vcpu before next VM entry.
+            vm.set_pending_mmio_read(vcpu_id, val, dest_reg);
         }
         #[cfg(not(any(feature = "linux", feature = "windows")))]
         {

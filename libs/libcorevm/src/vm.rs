@@ -6,6 +6,8 @@ use crate::backend::types::*;
 use crate::io::IoDispatch;
 use crate::memory::{GuestMemory, MemoryBus};
 
+use core::sync::atomic::AtomicBool;
+
 use crate::devices::serial::Serial;
 use crate::devices::ps2::Ps2Controller;
 use crate::devices::svga::Svga;
@@ -73,19 +75,20 @@ pub struct Vm {
     /// Tracks whether AHCI IRQ 11 is currently asserted on the in-kernel irqchip.
     /// Used for level-triggered interrupt semantics: only call set_irq_line when
     /// the state changes.
-    pub ahci_irq_asserted: bool,
+    /// AtomicBool for SMP safety — accessed from BSP and AP threads concurrently.
+    pub ahci_irq_asserted: AtomicBool,
 
     /// Tracks whether E1000 IRQ 11 is currently asserted (level-triggered).
-    pub e1000_irq_asserted: bool,
+    pub e1000_irq_asserted: AtomicBool,
 
     /// Tracks whether VirtIO GPU IRQ is currently asserted (level-triggered).
-    pub virtio_gpu_irq_asserted: bool,
+    pub virtio_gpu_irq_asserted: AtomicBool,
 
     /// Tracks whether VirtIO Net IRQ is currently asserted (level-triggered).
-    pub virtio_net_irq_asserted: bool,
+    pub virtio_net_irq_asserted: AtomicBool,
 
     /// Set when the guest writes to port 0xCF9 requesting a system reset.
-    pub cf9_reset_pending: bool,
+    pub cf9_reset_pending: AtomicBool,
 
     /// Pointer to ACPI PM device for shutdown detection.
     pub acpi_pm_ptr: *mut crate::devices::acpi::AcpiPm,
@@ -213,11 +216,11 @@ impl Vm {
             virtio_tablet_ptr: core::ptr::null_mut(),
             pci_mmio_router_ptr: core::ptr::null_mut(),
             pci_io_router_ptr: core::ptr::null_mut(),
-            ahci_irq_asserted: false,
-            e1000_irq_asserted: false,
-            virtio_gpu_irq_asserted: false,
-            virtio_net_irq_asserted: false,
-            cf9_reset_pending: false,
+            ahci_irq_asserted: AtomicBool::new(false),
+            e1000_irq_asserted: AtomicBool::new(false),
+            virtio_gpu_irq_asserted: AtomicBool::new(false),
+            virtio_net_irq_asserted: AtomicBool::new(false),
+            cf9_reset_pending: AtomicBool::new(false),
             acpi_pm_ptr: core::ptr::null_mut(),
             vram_mb: 0,
             cpu_count: 1,
@@ -531,10 +534,10 @@ impl Vm {
         self.backend.set_vcpu_regs(id, regs)
     }
 
-    /// Store a pending MMIO read response (WHP only).
+    /// Store a pending MMIO read response for a specific vCPU (WHP only).
     #[cfg(feature = "windows")]
-    pub fn set_pending_mmio_read(&mut self, value: u64, dest_reg: u8) {
-        self.backend.set_pending_mmio_read(value, dest_reg);
+    pub fn set_pending_mmio_read(&mut self, vcpu_id: u32, value: u64, dest_reg: u8) {
+        self.backend.set_pending_mmio_read(vcpu_id, value, dest_reg);
     }
 
     pub fn get_vcpu_sregs(&self, id: u32) -> Result<VcpuSregs, VmError> {

@@ -728,10 +728,12 @@ pub struct WhpBackend {
     api: WhpApi,
     pub lapic: SoftLapic,
     pub ioapic: SoftIoapic,
-    /// Pending MMIO read response: (value, dest_reg).
+    /// Per-vCPU pending MMIO read response: (value, dest_reg).
     /// Set by the FFI handler after dispatching to the device.
     /// Applied at the top of run_vcpu before re-entering the guest.
-    pending_mmio_read: Option<(u64, u8)>,
+    /// Per-vCPU to prevent SMP races where multiple vCPUs simultaneously
+    /// perform MMIO reads and overwrite each other's responses.
+    pending_mmio_read: [Option<(u64, u8)>; 16],
     /// Cached interrupt state from the last vCPU exit context.
     /// QEMU's WHPX reads these from the exit context (VpContext.ExecutionState),
     /// NOT from WHvGetVirtualProcessorRegisters, which returns stale/wrong
@@ -910,7 +912,7 @@ impl WhpBackend {
                 api,
                 lapic: SoftLapic::new(),
                 ioapic: SoftIoapic::new(),
-                pending_mmio_read: None,
+                pending_mmio_read: [None; 16],
                 exit_ctx_interrupt_ok: false,
                 pending_pic_inject: None,
                 ready_for_pic_interrupt: false,
@@ -919,9 +921,12 @@ impl WhpBackend {
         }
     }
 
-    /// Store a pending MMIO read response to be applied before the next VM entry.
-    pub fn set_pending_mmio_read(&mut self, value: u64, dest_reg: u8) {
-        self.pending_mmio_read = Some((value, dest_reg));
+    /// Store a pending MMIO read response for a specific vCPU.
+    /// Applied before the next VM entry for that vCPU.
+    pub fn set_pending_mmio_read(&mut self, vcpu_id: u32, value: u64, dest_reg: u8) {
+        if (vcpu_id as usize) < self.pending_mmio_read.len() {
+            self.pending_mmio_read[vcpu_id as usize] = Some((value, dest_reg));
+        }
     }
 
     fn get_regs_raw(&self, id: u32, names: &[u32], values: &mut [WHV_REGISTER_VALUE]) -> Result<(), VmError> {
@@ -1429,7 +1434,7 @@ impl VmBackend for WhpBackend {
         // Reset software-emulated LAPIC and IOAPIC state
         self.lapic = SoftLapic::new();
         self.ioapic = SoftIoapic::new();
-        self.pending_mmio_read = None;
+        self.pending_mmio_read = [None; 16];
         Ok(())
     }
 
@@ -1595,9 +1600,11 @@ impl VmBackend for WhpBackend {
                 }
             }
 
-            // Apply pending MMIO read response before re-entering the guest.
+            // Apply pending MMIO read response for THIS vCPU before re-entering.
             // This sets the destination register with the device's read value.
-            if let Some((value, dest_reg)) = self.pending_mmio_read.take() {
+            // Per-vCPU array prevents SMP races where multiple vCPUs overwrite
+            // each other's MMIO read responses.
+            if let Some((value, dest_reg)) = self.pending_mmio_read.get_mut(id as usize).and_then(|s| s.take()) {
                 let mut regs = self.get_vcpu_regs(id)?;
                 // apply MMIO logging removed to save budget
                 match dest_reg {
