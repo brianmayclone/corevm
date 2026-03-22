@@ -49,7 +49,7 @@ pub async fn install_packages(
     Json(body): Json<InstallRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_admin(&user)?;
-    StorageWizardService::install_on_hosts(&state, &body.host_ids, &body.fs_type).await
+    StorageWizardService::install_on_hosts(&state, &body.host_ids, &body.fs_type, &body.sudo_passwords).await
         .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(serde_json::json!({"ok": true})))
 }

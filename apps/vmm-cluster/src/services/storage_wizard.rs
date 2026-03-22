@@ -116,8 +116,13 @@ impl StorageWizardService {
         results
     }
 
-    /// Install packages on specified hosts.
-    pub async fn install_on_hosts(state: &Arc<ClusterState>, host_ids: &[String], fs_type: &str) -> Result<(), String> {
+    /// Install packages on specified hosts (with optional sudo passwords per host).
+    pub async fn install_on_hosts(
+        state: &Arc<ClusterState>,
+        host_ids: &[String],
+        fs_type: &str,
+        sudo_passwords: &std::collections::HashMap<String, String>,
+    ) -> Result<(), String> {
         let packages = Self::required_packages(fs_type);
 
         for host_id in host_ids {
@@ -131,9 +136,14 @@ impl StorageWizardService {
                 .timeout(std::time::Duration::from_secs(120))
                 .build().map_err(|e| e.to_string())?;
 
+            let mut body = serde_json::json!({ "packages": packages });
+            if let Some(pass) = sudo_passwords.get(host_id) {
+                body["sudo_password"] = serde_json::Value::String(pass.clone());
+            }
+
             let resp = client.post(format!("{}/agent/packages/install", &node.address))
                 .header("X-Agent-Token", &node.agent_token)
-                .json(&serde_json::json!({ "packages": packages }))
+                .json(&body)
                 .send().await
                 .map_err(|e| format!("Cannot reach host '{}': {}", node.hostname, e))?;
 
