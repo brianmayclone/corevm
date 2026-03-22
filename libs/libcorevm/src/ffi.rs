@@ -790,10 +790,11 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
             io_unlock();
 
             // AHCI IRQ → MSI (preferred) or legacy IRQ 11 (level-triggered)
-            // Use blocking lock so fix_stuck_irq() is always checked.
-            // The lock is brief — only state reads and IRQ line updates.
-            if !vm.ahci_ptr.is_null() {
-                ahci_lock();
+            // Use try_lock: if an AP holds AHCI_LOCK (doing disk I/O), skip
+            // this iteration. The AP delivers IRQs via corevm_ahci_poll_irq().
+            // fix_stuck_irq() runs on every successful lock to recover from
+            // any inconsistency between port IS and irq_pending.
+            if !vm.ahci_ptr.is_null() && ahci_try_lock() {
                 let ahci = unsafe { &mut *vm.ahci_ptr };
                 // Auto-recover stuck IRQ: is!=0 but irq_pending=false
                 ahci.fix_stuck_irq();
@@ -2301,31 +2302,11 @@ impl crate::memory::mmio::MmioHandler for PciMmioRouter {
                 let reg = abs_addr - e1000_base;
                 #[cfg(feature = "std")]
                 {
-                    // Use try_lock to avoid blocking AP threads during
-                    // net_poll/poll_irqs. If the lock is contended, fall
-                    // back to a plain register read (no side effects like
-                    // clear-on-read for ICR). On x86_64, aligned u32 reads
-                    // are atomic, so we get a consistent (possibly stale)
-                    // value without racing on the Vec's internal pointer
-                    // (which never changes — regs is never reallocated).
-                    let arc = self.e1000.as_ref().unwrap();
-                    match arc.try_lock() {
-                        Ok(mut e1000) => return e1000.read(reg, size),
-                        Err(_) => {
-                            // Contended — spin briefly then try once more.
-                            // Most contention is < 1us (net_poll enqueue).
-                            core::hint::spin_loop();
-                            match arc.try_lock() {
-                                Ok(mut e1000) => return e1000.read(reg, size),
-                                Err(_) => {
-                                    // Still contended. Return 0 to avoid
-                                    // blocking the vCPU. The guest will
-                                    // re-read shortly.
-                                    return Ok(0);
-                                }
-                            }
-                        }
-                    }
+                    // E1000 reads MUST acquire the lock because some registers
+                    // are clear-on-read (ICR). Returning 0 on contention would
+                    // cause the guest driver to miss interrupts permanently.
+                    let mut e1000 = self.e1000.as_ref().unwrap().lock().unwrap();
+                    return e1000.read(reg, size);
                 }
                 #[cfg(not(feature = "std"))]
                 {

@@ -411,6 +411,13 @@ pub(crate) fn bsp_loop(
         // of waiting for the next cancel-kick (10ms delay kills TCP throughput).
         corevm_poll_irqs(handle);
 
+        // ── Periodic AHCI stuck-IRQ recovery ──────────────────────────
+        // Every ~5000 iterations, take the AHCI lock and run fix_stuck_irq
+        // to catch any IRQ delivery race that try_lock in poll_irqs missed.
+        if bsp_iterations % 5000 == 0 {
+            corevm_ahci_poll_irq(handle);
+        }
+
         // ── Disk cache flush ────────────────────────────────────────────
 
         cache_flush_counter += 1;
