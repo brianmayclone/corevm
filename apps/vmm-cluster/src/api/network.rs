@@ -82,7 +82,38 @@ pub async fn update_network(
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_operator(&user)?;
+    use crate::services::validation;
+
+    // Validate DHCP range vs gateway if both are being set
     let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
+    let current = NetworkService::get_network(&db, id).map_err(|e| AppError(StatusCode::NOT_FOUND, e))?;
+
+    let subnet = body.get("subnet").and_then(|v| v.as_str()).unwrap_or(&current.subnet);
+    let gateway = body.get("gateway").and_then(|v| v.as_str()).unwrap_or(&current.gateway);
+    let dhcp_start = body.get("dhcp_range_start").and_then(|v| v.as_str()).unwrap_or(&current.dhcp_range_start);
+    let dhcp_end = body.get("dhcp_range_end").and_then(|v| v.as_str()).unwrap_or(&current.dhcp_range_end);
+
+    // Validate subnet/gateway if changed
+    if body.get("subnet").is_some() {
+        validation::validate_cidr(subnet).map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+    }
+    if body.get("gateway").is_some() {
+        validation::validate_ipv4(gateway).map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+        validation::validate_ip_in_subnet(gateway, subnet).map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+    }
+
+    // Validate DHCP range — check gateway collision
+    if !dhcp_start.is_empty() && !dhcp_end.is_empty() {
+        if body.get("dhcp_range_start").is_some() || body.get("dhcp_range_end").is_some() || body.get("gateway").is_some() {
+            validation::validate_dhcp_range(dhcp_start, dhcp_end, subnet, gateway)
+                .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+        }
+    }
+
+    if let Some(vlan) = body.get("vlan_id").and_then(|v| v.as_i64()) {
+        validation::validate_vlan(vlan as i32).map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+    }
+
     NetworkService::update_network(&db, id, &body).map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
     AuditService::log(&db, user.id, "network.update", "network", &id.to_string(), None);
     Ok(Json(serde_json::json!({"ok": true})))

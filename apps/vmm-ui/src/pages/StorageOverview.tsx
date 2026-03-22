@@ -44,12 +44,19 @@ export default function Storage() {
 
   const refresh = () => {
     const clusterParam = isCluster && selectedClusterId ? `?cluster_id=${encodeURIComponent(selectedClusterId)}` : ''
-    api.get<StoragePool[]>(`/api/storage/pools${clusterParam}`).then(({ data }) => setPools(data))
-    api.get<StorageStats>('/api/storage/stats').then(({ data }) => setStats(data))
+    api.get<StoragePool[]>(`/api/storage/pools${clusterParam}`)
+      .then(({ data }) => { setPools(data) })
+      .catch(() => setPools([]))
+    api.get<StorageStats>('/api/storage/stats').then(({ data }) => setStats(data)).catch(() => {})
     api.get<DiskImage[]>('/api/storage/images').then(({ data }) => setImages(data)).catch(() => {})
     api.get<Iso[]>('/api/storage/isos').then(({ data }) => setIsos(data)).catch(() => {})
   }
-  useEffect(() => { refresh() }, [selectedClusterId])
+  // Refresh when cluster selection changes, or on mount in standalone mode
+  useEffect(() => {
+    // In cluster mode, wait until a cluster is selected before loading
+    if (isCluster && !selectedClusterId && clusters.length === 0) return
+    refresh()
+  }, [selectedClusterId, isCluster])
 
   const usedBytes = stats?.used_bytes || 0
   const totalBytes = stats?.total_bytes || 1

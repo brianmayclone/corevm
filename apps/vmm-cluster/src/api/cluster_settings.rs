@@ -55,9 +55,8 @@ pub async fn rename_host(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_admin(&user)?;
     let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
-    db.execute("UPDATE hosts SET display_name = ?1 WHERE id = ?2",
-        rusqlite::params![&body.display_name, &id])
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    crate::services::host::HostService::rename(&db, &id, &body.display_name)
+        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     AuditService::log(&db, user.id, "host.rename", "host", &id, Some(&body.display_name));
     Ok(Json(serde_json::json!({"ok": true})))
 }
@@ -69,27 +68,15 @@ pub async fn list_drs_exclusions(
     _user: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
-    let mut stmt = db.prepare(
-        "SELECT id, cluster_id, exclusion_type, target_id, reason, created_at FROM drs_exclusions ORDER BY created_at DESC"
-    ).map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let rows = stmt.query_map([], |row| {
-        Ok(serde_json::json!({
-            "id": row.get::<_, i64>(0)?,
-            "cluster_id": row.get::<_, String>(1)?,
-            "exclusion_type": row.get::<_, String>(2)?,
-            "target_id": row.get::<_, String>(3)?,
-            "reason": row.get::<_, String>(4)?,
-            "created_at": row.get::<_, String>(5)?,
-        }))
-    }).map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let exclusions: Vec<serde_json::Value> = rows.filter_map(|r| r.ok()).collect();
+    let exclusions = crate::services::drs_exclusion::DrsExclusionService::list(&db)
+        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(serde_json::Value::Array(exclusions)))
 }
 
 #[derive(Deserialize)]
 pub struct CreateDrsExclusionRequest {
     pub cluster_id: String,
-    pub exclusion_type: String,  // "vm" or "resource_group"
+    pub exclusion_type: String,
     pub target_id: String,
     #[serde(default)]
     pub reason: String,
@@ -101,15 +88,10 @@ pub async fn create_drs_exclusion(
     Json(body): Json<CreateDrsExclusionRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_admin(&user)?;
-    if !["vm", "resource_group"].contains(&body.exclusion_type.as_str()) {
-        return Err(AppError(StatusCode::BAD_REQUEST, "exclusion_type must be 'vm' or 'resource_group'".into()));
-    }
     let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
-    db.execute(
-        "INSERT INTO drs_exclusions (cluster_id, exclusion_type, target_id, reason) VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![&body.cluster_id, &body.exclusion_type, &body.target_id, &body.reason],
-    ).map_err(|e| AppError(StatusCode::BAD_REQUEST, e.to_string()))?;
-    let id = db.last_insert_rowid();
+    let id = crate::services::drs_exclusion::DrsExclusionService::create(
+        &db, &body.cluster_id, &body.exclusion_type, &body.target_id, &body.reason,
+    ).map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
     AuditService::log(&db, user.id, "drs.exclusion.create", &body.exclusion_type, &body.target_id, Some(&body.reason));
     Ok(Json(serde_json::json!({"id": id})))
 }
@@ -121,8 +103,8 @@ pub async fn delete_drs_exclusion(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_admin(&user)?;
     let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
-    db.execute("DELETE FROM drs_exclusions WHERE id = ?1", rusqlite::params![id])
-        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e.to_string()))?;
+    crate::services::drs_exclusion::DrsExclusionService::delete(&db, id)
+        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
     AuditService::log(&db, user.id, "drs.exclusion.delete", "drs_exclusion", &id.to_string(), None);
     Ok(Json(serde_json::json!({"ok": true})))
 }

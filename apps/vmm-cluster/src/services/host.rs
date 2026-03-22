@@ -152,6 +152,13 @@ impl HostService {
         Ok(())
     }
 
+    /// Rename a host (set custom display name).
+    pub fn rename(db: &Connection, id: &str, display_name: &str) -> Result<(), String> {
+        db.execute("UPDATE hosts SET display_name = ?1 WHERE id = ?2",
+            rusqlite::params![display_name, id]).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// Mark a host as offline (missed heartbeats).
     pub fn mark_offline(db: &Connection, id: &str) -> Result<(), String> {
         db.execute(

@@ -57,7 +57,7 @@ export default function PoolBrowser({ open, onClose, filterExt, onSelect, title,
         <Select
           options={pools.map((p) => ({ value: String(p.id), label: `${p.name} (${p.pool_type})` }))}
           value={selectedPool ? String(selectedPool) : ''}
-          onChange={(e) => setSelectedPool(parseInt(e.target.value))}
+          onChange={(e) => setSelectedPool(e.target.value)}
         />
 
         {/* File list */}

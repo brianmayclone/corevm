@@ -88,19 +88,8 @@ pub async fn list_settings_groups(
     _auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
-    let mut stmt = db.prepare(
-        "SELECT g.id, g.name, g.role, g.description, \
-                (SELECT COUNT(*) FROM group_members gm WHERE gm.group_id = g.id) \
-         FROM groups g ORDER BY g.name"
-    ).map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let rows = stmt.query_map([], |row| {
-        Ok(serde_json::json!({
-            "id": row.get::<_, i64>(0)?, "name": row.get::<_, String>(1)?,
-            "role": row.get::<_, String>(2)?, "description": row.get::<_, String>(3)?,
-            "member_count": row.get::<_, i64>(4)?,
-        }))
-    }).map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let groups: Vec<serde_json::Value> = rows.filter_map(|r| r.ok()).collect();
+    let groups = crate::services::group::GroupService::list(&db)
+        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(serde_json::Value::Array(groups)))
 }
 
@@ -112,12 +101,10 @@ pub async fn create_settings_group(
     let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let role = body.get("role").and_then(|v| v.as_str()).unwrap_or("viewer");
     let desc = body.get("description").and_then(|v| v.as_str()).unwrap_or("");
-    if name.is_empty() { return Err(AppError(StatusCode::BAD_REQUEST, "Name required".into())); }
     let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
-    db.execute("INSERT INTO groups (name, role, description) VALUES (?1, ?2, ?3)",
-        rusqlite::params![name, role, desc])
-        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e.to_string()))?;
-    Ok(Json(serde_json::json!({"id": db.last_insert_rowid()})))
+    let id = crate::services::group::GroupService::create(&db, name, role, desc)
+        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(serde_json::json!({"id": id})))
 }
 
 pub async fn delete_settings_group(
@@ -126,8 +113,8 @@ pub async fn delete_settings_group(
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
-    db.execute("DELETE FROM groups WHERE id = ?1", rusqlite::params![id])
-        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e.to_string()))?;
+    crate::services::group::GroupService::delete(&db, id)
+        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
@@ -166,9 +153,22 @@ pub async fn list_storage_pools(
     Query(q): Query<PoolsQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
-    let pools = StorageCompatService::list_pools(&db, q.cluster_id.as_deref())
+    // Treat empty string as None (no filter)
+    let cid = q.cluster_id.as_deref().filter(|s| !s.is_empty());
+    let pools = StorageCompatService::list_pools(&db, cid)
         .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(serde_json::Value::Array(pools)))
+}
+
+pub async fn delete_storage_pool(
+    State(state): State<Arc<ClusterState>>,
+    _auth: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
+    crate::services::datastore::DatastoreService::delete(&db, &id)
+        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 
 #[derive(Deserialize)]

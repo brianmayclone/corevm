@@ -11,26 +11,16 @@ impl StorageCompatService {
     /// mounted on ALL hosts in the given cluster.
     pub fn list_pools(db: &Connection, cluster_id: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
         if let Some(cid) = cluster_id {
-            let host_count = BaseService::count(db, "hosts", "cluster_id = ?1 AND status != 'offline'",
-                &[&cid as &dyn rusqlite::types::ToSql]);
-            if host_count == 0 {
-                return Ok(Vec::new());
-            }
-
+            // Show ALL datastores for the cluster (not just fully-mounted ones)
             let mut stmt = db.prepare(
                 "SELECT d.id, d.name, d.mount_path, d.store_type, 1, d.mount_source, d.mount_opts,
                         d.total_bytes, d.free_bytes
                  FROM datastores d
                  WHERE d.cluster_id = ?1
-                   AND d.status = 'online'
-                   AND (SELECT COUNT(*) FROM datastore_hosts dh
-                        JOIN hosts h ON dh.host_id = h.id
-                        WHERE dh.datastore_id = d.id AND dh.mounted = 1
-                          AND h.cluster_id = ?1 AND h.status != 'offline') = ?2
                  ORDER BY d.name"
             ).map_err(|e| e.to_string())?;
 
-            let rows = stmt.query_map(rusqlite::params![cid, host_count], |row| {
+            let rows = stmt.query_map(rusqlite::params![cid], |row| {
                 Self::row_to_pool(row)
             }).map_err(|e| e.to_string())?;
             Ok(rows.filter_map(|r| r.ok()).collect())

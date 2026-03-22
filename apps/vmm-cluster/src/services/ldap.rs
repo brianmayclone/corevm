@@ -88,11 +88,30 @@ impl LdapService {
     }
 
     pub fn test_connection(db: &Connection, id: i64) -> Result<String, String> {
-        let config = db.query_row(
+        let server_url: String = db.query_row(
             "SELECT server_url FROM ldap_configs WHERE id = ?1",
-            rusqlite::params![id], |r| r.get::<_, String>(0),
+            rusqlite::params![id], |r| r.get(0),
         ).map_err(|_| "LDAP config not found".to_string())?;
-        // TODO: actual LDAP connection test with ldap3 crate
-        Ok(format!("Connection test to {} queued", config))
+
+        // Parse URL and attempt TCP connection
+        let url = server_url.trim();
+        let (host, port) = if let Some(rest) = url.strip_prefix("ldap://") {
+            let parts: Vec<&str> = rest.split(':').collect();
+            (parts[0], parts.get(1).and_then(|p| p.parse::<u16>().ok()).unwrap_or(389))
+        } else if let Some(rest) = url.strip_prefix("ldaps://") {
+            let parts: Vec<&str> = rest.split(':').collect();
+            (parts[0], parts.get(1).and_then(|p| p.parse::<u16>().ok()).unwrap_or(636))
+        } else {
+            return Err(format!("Invalid LDAP URL: {}", url));
+        };
+
+        let addr = format!("{}:{}", host, port);
+        match std::net::TcpStream::connect_timeout(
+            &addr.parse().map_err(|_| format!("Invalid address: {}", addr))?,
+            std::time::Duration::from_secs(5),
+        ) {
+            Ok(_) => Ok(format!("Connection to {} successful (port {} open)", host, port)),
+            Err(e) => Err(format!("Cannot connect to {}: {}", addr, e)),
+        }
     }
 }

@@ -231,36 +231,85 @@ export default function SdnNetworkDetail() {
           </Card>
 
           {net.dhcp_enabled && (
-            <div>
-              <SectionLabel>Active Leases ({leases.length})</SectionLabel>
-              <Card padding={false}>
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-vmm-border text-xs text-vmm-text-muted uppercase tracking-wider">
-                      <th className="text-left px-4 py-2">IP Address</th>
-                      <th className="text-left px-4 py-2">MAC Address</th>
-                      <th className="text-left px-4 py-2">Hostname</th>
-                      <th className="text-left px-4 py-2">Lease Start</th>
-                      <th className="text-left px-4 py-2">Expires</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {leases.map(l => (
-                      <tr key={l.id} className="border-b border-vmm-border last:border-b-0">
-                        <td className="px-4 py-2 font-mono text-vmm-text">{l.ip_address}</td>
-                        <td className="px-4 py-2 font-mono text-vmm-text-dim">{l.mac_address}</td>
-                        <td className="px-4 py-2 text-vmm-text">{l.hostname || '—'}</td>
-                        <td className="px-4 py-2 text-vmm-text-muted">{l.lease_start}</td>
-                        <td className="px-4 py-2 text-vmm-text-muted">{l.lease_end || '—'}</td>
+            <>
+              {/* Static Reservations */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <SectionLabel>Static Reservations (MAC → IP)</SectionLabel>
+                  <button onClick={() => {
+                    const mac = prompt('MAC Address (XX:XX:XX:XX:XX:XX):')
+                    if (!mac) return
+                    const ip = prompt('IP Address:')
+                    if (!ip) return
+                    const hostname = prompt('Hostname (optional):') || undefined
+                    api.post(`/api/networks/${id}/reservations`, { mac_address: mac, ip_address: ip, hostname })
+                      .then(fetchData).catch(e => alert(e.response?.data?.error || 'Failed'))
+                  }}
+                    className="flex items-center gap-1 px-3 py-1.5 bg-vmm-accent/10 text-vmm-accent hover:bg-vmm-accent/20 rounded-lg text-xs font-medium">
+                    <Plus size={12} /> Add Reservation
+                  </button>
+                </div>
+                {leases.filter(l => l.lease_end === '9999-12-31 23:59:59').length > 0 && (
+                  <Card padding={false}>
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-vmm-border text-xs text-vmm-text-muted uppercase tracking-wider">
+                          <th className="text-left px-4 py-2">MAC Address</th>
+                          <th className="text-left px-4 py-2">IP Address</th>
+                          <th className="text-left px-4 py-2">Hostname</th>
+                          <th className="text-right px-4 py-2"></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {leases.filter(l => l.lease_end === '9999-12-31 23:59:59').map(l => (
+                          <tr key={l.id} className="border-b border-vmm-border last:border-b-0">
+                            <td className="px-4 py-2 font-mono text-vmm-text">{l.mac_address}</td>
+                            <td className="px-4 py-2 font-mono text-vmm-accent">{l.ip_address}</td>
+                            <td className="px-4 py-2 text-vmm-text">{l.hostname || '—'}</td>
+                            <td className="px-4 py-2 text-right">
+                              <button onClick={() => api.delete(`/api/networks/${id}/${l.id}/reservation`).then(fetchData)}
+                                className="text-vmm-text-muted hover:text-vmm-danger"><Trash2 size={13} /></button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </Card>
+                )}
+              </div>
+
+              {/* Dynamic Leases */}
+              <div>
+                <SectionLabel>Active Leases ({leases.filter(l => l.lease_end !== '9999-12-31 23:59:59').length})</SectionLabel>
+                <Card padding={false}>
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-vmm-border text-xs text-vmm-text-muted uppercase tracking-wider">
+                        <th className="text-left px-4 py-2">IP Address</th>
+                        <th className="text-left px-4 py-2">MAC Address</th>
+                        <th className="text-left px-4 py-2">Hostname</th>
+                        <th className="text-left px-4 py-2">Lease Start</th>
+                        <th className="text-left px-4 py-2">Expires</th>
                       </tr>
-                    ))}
-                    {leases.length === 0 && (
-                      <tr><td colSpan={5} className="px-4 py-6 text-center text-vmm-text-muted">No active DHCP leases</td></tr>
-                    )}
-                  </tbody>
-                </table>
-              </Card>
-            </div>
+                    </thead>
+                    <tbody>
+                      {leases.filter(l => l.lease_end !== '9999-12-31 23:59:59').map(l => (
+                        <tr key={l.id} className="border-b border-vmm-border last:border-b-0">
+                          <td className="px-4 py-2 font-mono text-vmm-text">{l.ip_address}</td>
+                          <td className="px-4 py-2 font-mono text-vmm-text-dim">{l.mac_address}</td>
+                          <td className="px-4 py-2 text-vmm-text">{l.hostname || '—'}</td>
+                          <td className="px-4 py-2 text-vmm-text-muted">{l.lease_start}</td>
+                          <td className="px-4 py-2 text-vmm-text-muted">{l.lease_end || '—'}</td>
+                        </tr>
+                      ))}
+                      {leases.filter(l => l.lease_end !== '9999-12-31 23:59:59').length === 0 && (
+                        <tr><td colSpan={5} className="px-4 py-6 text-center text-vmm-text-muted">No active DHCP leases</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </Card>
+              </div>
+            </>
           )}
         </div>
       )}
@@ -299,7 +348,21 @@ export default function SdnNetworkDetail() {
 
           {net.dns_enabled && (
             <div>
-              <SectionLabel>DNS Records ({dnsRecords.length})</SectionLabel>
+              <div className="flex items-center justify-between mb-2">
+                <SectionLabel>DNS Records ({dnsRecords.length})</SectionLabel>
+                <button onClick={() => {
+                  const name = prompt('Record Name (e.g. myserver.vm.local):')
+                  if (!name) return
+                  const value = prompt('Value (e.g. 10.0.0.50):')
+                  if (!value) return
+                  const type_ = prompt('Record Type (A, AAAA, CNAME, PTR):', 'A') || 'A'
+                  api.post(`/api/networks/${id}/dns-records`, { record_type: type_, name, value, ttl: 3600 })
+                    .then(fetchData).catch(e => alert(e.response?.data?.error || 'Failed'))
+                }}
+                  className="flex items-center gap-1 px-3 py-1.5 bg-vmm-accent/10 text-vmm-accent hover:bg-vmm-accent/20 rounded-lg text-xs font-medium">
+                  <Plus size={12} /> Add Record
+                </button>
+              </div>
               <Card padding={false}>
                 <table className="w-full text-sm">
                   <thead>
@@ -309,6 +372,7 @@ export default function SdnNetworkDetail() {
                       <th className="text-left px-4 py-2">Value</th>
                       <th className="text-left px-4 py-2">TTL</th>
                       <th className="text-left px-4 py-2">Source</th>
+                      <th className="text-right px-4 py-2"></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -322,6 +386,12 @@ export default function SdnNetworkDetail() {
                           <span className={`text-xs px-2 py-0.5 rounded-full ${r.auto_registered ? 'bg-vmm-accent/10 text-vmm-accent' : 'bg-vmm-surface text-vmm-text-muted'}`}>
                             {r.auto_registered ? 'Auto' : 'Manual'}
                           </span>
+                        </td>
+                        <td className="px-4 py-2 text-right">
+                          {!r.auto_registered && (
+                            <button onClick={() => api.delete(`/api/networks/${id}/${r.id}/dns-record`).then(fetchData)}
+                              className="text-vmm-text-muted hover:text-vmm-danger"><Trash2 size={13} /></button>
+                          )}
                         </td>
                       </tr>
                     ))}

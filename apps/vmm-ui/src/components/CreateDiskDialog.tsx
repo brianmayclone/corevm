@@ -63,7 +63,7 @@ export default function CreateDiskDialog({ open, onClose, vmName, vmId, onCreate
           <Select
             options={pools.map((p) => ({ value: String(p.id), label: `${p.name} (${p.pool_type})` }))}
             value={poolId ? String(poolId) : ''}
-            onChange={(e) => setPoolId(parseInt(e.target.value))}
+            onChange={(e) => setPoolId(e.target.value)}
           />
         </FormField>
         <FormField label="Disk Size (GB)">

@@ -30,3 +30,5 @@ pub mod settings;
 pub mod network;
 pub mod ldap;
 pub mod validation;
+pub mod group;
+pub mod drs_exclusion;

@@ -60,6 +60,7 @@ pub fn router() -> Router<Arc<ClusterState>> {
         .route("/api/storage/datastores", get(storage::list_datastores).post(storage::create_datastore))
         .route("/api/storage/datastores/{id}", get(storage::get_datastore).delete(storage::delete_datastore))
         .route("/api/storage/pools", get(activity::list_storage_pools))
+        .route("/api/storage/pools/{id}", delete(activity::delete_storage_pool))
         .route("/api/storage/pools/{id}/browse", get(activity::browse_storage_pool))
         .route("/api/storage/stats", get(activity::storage_stats))
         .route("/api/storage/images", get(activity::list_images))
