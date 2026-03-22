@@ -24,3 +24,11 @@ std = []
 libheap = { path = "../stubs/libheap", optional = true }
 libsyscall = { path = "../stubs/libsyscall", optional = true }
 libc = { version = "0.2", optional = true }
+
+[profile.dev]
+debug = 2            # Full debug info (DWARF)
+opt-level = 1        # Slight optimization so it doesn't crawl
+
+[profile.release]
+debug = 2            # Full debug info even in release builds
+overflow-checks = true  # Catch integer overflow (panic instead of UB)

@@ -84,6 +84,38 @@ fn check_hardware_support() -> Result<(), String> {
 }
 
 fn main() -> eframe::Result {
+    // Install signal handlers (Linux) to print backtraces on SIGSEGV/SIGABRT.
+    // This catches glibc "double free or corruption" (SIGABRT) and segfaults
+    // (SIGSEGV) so we can see the actual call stack in the crash.
+    #[cfg(target_os = "linux")]
+    {
+        use std::io::Write;
+        unsafe {
+            extern "C" fn crash_handler(sig: libc::c_int) {
+                let name = match sig {
+                    libc::SIGSEGV => "SIGSEGV",
+                    libc::SIGABRT => "SIGABRT",
+                    libc::SIGBUS => "SIGBUS",
+                    _ => "UNKNOWN",
+                };
+                let _ = writeln!(std::io::stderr(), "\n=== CRASH: {} (signal {}) ===", name, sig);
+                // Use backtrace crate or std::backtrace
+                let bt = std::backtrace::Backtrace::force_capture();
+                let _ = writeln!(std::io::stderr(), "{}", bt);
+                let _ = std::io::stderr().flush();
+                // Re-raise with default handler to get core dump
+                unsafe {
+                    libc::signal(sig, libc::SIG_DFL);
+                    libc::raise(sig);
+                }
+            }
+
+            libc::signal(libc::SIGSEGV, crash_handler as libc::sighandler_t);
+            libc::signal(libc::SIGABRT, crash_handler as libc::sighandler_t);
+            libc::signal(libc::SIGBUS, crash_handler as libc::sighandler_t);
+        }
+    }
+
     // Attach to parent console so eprintln! works when launched from a
     // terminal. Rust's std::io::stderr() calls GetStdHandle internally,
     // which returns the new console handle after AttachConsole succeeds.

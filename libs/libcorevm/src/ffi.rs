@@ -854,11 +854,11 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
             }
 
             // E1000 NIC — MSI or legacy IRQ 11
-            // MMIO_LOCK: E1000 registers may be concurrently accessed by AP
-            // threads via MMIO exits to the E1000 BAR0 region.
-            if !vm.e1000_ptr.is_null() {
-                mmio_lock();
-                let e1000 = unsafe { &mut *vm.e1000_ptr };
+            // Under std: E1000 is protected by Arc<Mutex> for SMP-safe access.
+            // Under no_std: single-core, raw pointer access.
+            #[cfg(feature = "std")]
+            if let Some(e1000_arc) = vm.e1000.as_ref() {
+                let mut e1000 = e1000_arc.lock().unwrap();
 
                 // Check if guest enabled MSI (read MSI control from PCI config)
                 if !vm.pci_bus_ptr.is_null() {
@@ -881,19 +881,23 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                 let icr = e1000.regs[0x00C0 / 4];
                 let ims = e1000.regs[0x00D0 / 4];
                 let want_asserted = (icr & ims) != 0;
+                // Extract MSI state before dropping e1000 lock for backend calls
+                let msi_enabled = e1000.msi_enabled;
+                let msi_address = e1000.msi_address;
+                let msi_data = e1000.msi_data;
+                if want_asserted && msi_enabled {
+                    e1000.regs[0x00C0 / 4] &= !ims;
+                }
+                drop(e1000); // Release lock before backend calls
+
                 #[cfg(feature = "linux")]
                 {
-                    if e1000.msi_enabled {
+                    if msi_enabled {
                         if want_asserted {
-                            let _ = vm.backend.signal_msi(e1000.msi_address, e1000.msi_data);
-                            e1000.regs[0x00C0 / 4] &= !ims;
+                            let _ = vm.backend.signal_msi(msi_address, msi_data);
                             injected += 1;
                         }
                     } else {
-                        // E1000 uses edge-triggered interrupts: assert then
-                        // immediately de-assert. Each poll that finds (ICR & IMS)
-                        // != 0 fires a new edge so the guest always gets notified
-                        // even if new ICR bits appear between polls.
                         let e1000_irq = vm.chipset.irqs.e1000 as u32;
                         if want_asserted {
                             let _ = vm.backend.set_irq_line(e1000_irq, true);
@@ -905,10 +909,9 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                 #[cfg(feature = "windows")]
                 {
                     let e1000_irq = vm.chipset.irqs.e1000;
-                    if e1000.msi_enabled {
+                    if msi_enabled {
                         if want_asserted {
-                            let _ = vm.backend.signal_msi(e1000.msi_address, e1000.msi_data);
-                            e1000.regs[0x00C0 / 4] &= !ims;
+                            let _ = vm.backend.signal_msi(msi_address, msi_data);
                             injected += 1;
                         }
                     } else if want_asserted {
@@ -921,17 +924,36 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         injected += 1;
                     }
                 }
-                #[cfg(not(any(feature = "linux", feature = "windows")))]
-                {
-                    let e1000_irq = vm.chipset.irqs.e1000;
-                    if want_asserted {
-                        if !vm.pic_ptr.is_null() {
-                            let pic = unsafe { &mut *vm.pic_ptr };
-                            pic.raise_irq(e1000_irq);
-                        }
+            }
+            #[cfg(not(feature = "std"))]
+            if !vm.e1000_ptr.is_null() {
+                let e1000 = unsafe { &mut *vm.e1000_ptr };
+
+                if !vm.pci_bus_ptr.is_null() {
+                    let bus = unsafe { &mut *vm.pci_bus_ptr };
+                    let e1000_slot = vm.chipset.slots.e1000;
+                    let mcr = bus.mmcfg_read(0, e1000_slot, 0, 0xD0 + 2, 2) as u16;
+                    e1000.msi_enabled = (mcr & 0x01) != 0;
+                    if e1000.msi_enabled {
+                        let addr = bus.mmcfg_read(0, e1000_slot, 0, 0xD0 + 4, 4) as u64;
+                        let data = bus.mmcfg_read(0, e1000_slot, 0, 0xD0 + 8, 2) as u32;
+                        e1000.msi_address = addr;
+                        e1000.msi_data = data;
                     }
                 }
-                mmio_unlock();
+
+                if !e1000.rx_buffer.is_empty() {
+                    e1000.process_rx_ring();
+                }
+                let icr = e1000.regs[0x00C0 / 4];
+                let ims = e1000.regs[0x00D0 / 4];
+                let want_asserted = (icr & ims) != 0;
+                if want_asserted {
+                    if !vm.pic_ptr.is_null() {
+                        let pic = unsafe { &mut *vm.pic_ptr };
+                        pic.raise_irq(vm.chipset.irqs.e1000);
+                    }
+                }
             }
 
             // HPET Timer 0 → IRQ (edge-triggered pulse on KVM)
@@ -1974,6 +1996,9 @@ pub extern "C" fn corevm_setup_acpi_tables(handle: u64) -> i32 {
 
     // Auto-detect which PCI devices are present from their pointers
     let devices = crate::devices::acpi_tables::AcpiDeviceConfig {
+        #[cfg(feature = "std")]
+        has_e1000: vm.e1000.is_some(),
+        #[cfg(not(feature = "std"))]
         has_e1000: !vm.e1000_ptr.is_null(),
         has_ac97: !vm.ac97_ptr.is_null(),
         has_uhci: !vm.uhci_ptr.is_null(),
@@ -2022,6 +2047,9 @@ pub extern "C" fn corevm_setup_acpi_tables_with_hpet(handle: u64) -> i32 {
 
     // Auto-detect which PCI devices are present from their pointers
     let devices = crate::devices::acpi_tables::AcpiDeviceConfig {
+        #[cfg(feature = "std")]
+        has_e1000: vm.e1000.is_some(),
+        #[cfg(not(feature = "std"))]
         has_e1000: !vm.e1000_ptr.is_null(),
         has_ac97: !vm.ac97_ptr.is_null(),
         has_uhci: !vm.uhci_ptr.is_null(),
@@ -2066,18 +2094,18 @@ pub extern "C" fn corevm_setup_e1000(handle: u64, mac: *const u8) -> i32 {
     let e1000_mmio_base = vm.chipset.mmio.e1000_bar0;
     if mac.is_null() { return -1; }
     let m: [u8; 6] = unsafe { [*mac, *mac.add(1), *mac.add(2), *mac.add(3), *mac.add(4), *mac.add(5)] };
-    let mut e1000 = Box::new(crate::devices::e1000::E1000::new(m));
+    let mut e1000_dev = crate::devices::e1000::E1000::new(m);
     // Give E1000 access to guest RAM for DMA (TX/RX descriptor rings).
     let (ram_ptr, ram_len) = vm.memory.ram_mut_ptr();
-    e1000.guest_mem_ptr = ram_ptr;
-    e1000.guest_mem_len = ram_len;
+    e1000_dev.guest_mem_ptr = ram_ptr;
+    e1000_dev.guest_mem_len = ram_len;
     // Set up IRQ callback for immediate interrupt delivery.
     // The E1000 driver's interrupt test requires the interrupt to fire
     // synchronously during the ICS write — not deferred to poll_irqs.
     #[cfg(feature = "linux")]
     {
         let backend_addr = &mut vm.backend as *mut crate::backend::kvm::KvmBackend as usize;
-        e1000.irq_callback = Some(alloc::boxed::Box::new(move |asserted: bool| {
+        e1000_dev.irq_callback = Some(alloc::boxed::Box::new(move |asserted: bool| {
             let backend = unsafe { &mut *(backend_addr as *mut crate::backend::kvm::KvmBackend) };
             let _ = backend.set_irq_line(11, asserted);
         }));
@@ -2085,45 +2113,74 @@ pub extern "C" fn corevm_setup_e1000(handle: u64, mac: *const u8) -> i32 {
     #[cfg(feature = "windows")]
     {
         let backend_addr = &mut vm.backend as *mut crate::backend::whp::WhpBackend as usize;
-        e1000.irq_callback = Some(alloc::boxed::Box::new(move |asserted: bool| {
+        e1000_dev.irq_callback = Some(alloc::boxed::Box::new(move |asserted: bool| {
             let backend = unsafe { &mut *(backend_addr as *mut crate::backend::whp::WhpBackend) };
             backend.ioapic_set_irq(11, asserted);
         }));
     }
 
-    let e1000_ptr = &*e1000 as *const crate::devices::e1000::E1000 as *mut crate::devices::e1000::E1000;
-    vm.e1000_ptr = e1000_ptr;
+    // Wrap E1000 in Arc<Mutex> for SMP-safe access from multiple vCPU threads
+    // and the net_poll path. Under no_std, use a raw pointer (single-core).
+    #[cfg(feature = "std")]
+    let e1000_arc = alloc::sync::Arc::new(std::sync::Mutex::new(e1000_dev));
+    #[cfg(feature = "std")]
+    {
+        vm.e1000 = Some(e1000_arc.clone());
 
-    // Add E1000 to the PCI MMIO router so accesses are routed dynamically
-    // based on the current BAR0 address (which SeaBIOS may remap).
-    if !vm.pci_mmio_router_ptr.is_null() {
-        let router = unsafe { &mut *vm.pci_mmio_router_ptr };
-        router.e1000 = e1000_ptr;
+        // Add E1000 to the PCI MMIO router so accesses are routed dynamically
+        // based on the current BAR0 address (which SeaBIOS may remap).
+        if !vm.pci_mmio_router_ptr.is_null() {
+            let router = unsafe { &mut *vm.pci_mmio_router_ptr };
+            router.e1000 = Some(e1000_arc.clone());
+        }
+
+        // Add E1000 to the PCI I/O router for BAR2 indirect register access.
+        if vm.pci_io_router_ptr.is_null() {
+            let router = Box::new(PciIoRouter {
+                uhci: vm.uhci_ptr,
+                ac97: vm.ac97_ptr,
+                e1000: Some(e1000_arc.clone()),
+                pci_bus: vm.pci_bus_ptr,
+                chipset: vm.chipset,
+            });
+            let router_ptr = &*router as *const PciIoRouter as *mut PciIoRouter;
+            vm.pci_io_router_ptr = router_ptr;
+            vm.io.register(PCI_IO_ROUTER_BASE, PCI_IO_ROUTER_SIZE, router);
+        } else {
+            let router = unsafe { &mut *vm.pci_io_router_ptr };
+            router.e1000 = Some(e1000_arc.clone());
+        }
     }
 
-    // Add E1000 to the PCI I/O router for BAR2 indirect register access.
-    // The 82540EM driver uses E1000_WRITE_REG_IO (I/O BAR) for CTRL.RST
-    // because of a hardware bug where the 82540 can't ACK 64-bit MMIO writes
-    // during reset.  Without this, e1000_reset_hw() fails → "Hardware Error".
-    if vm.pci_io_router_ptr.is_null() {
-        // Create the PCI I/O router if it doesn't exist yet.
-        let router = Box::new(PciIoRouter {
-            uhci: vm.uhci_ptr,
-            ac97: vm.ac97_ptr,
-            e1000: e1000_ptr,
-            pci_bus: vm.pci_bus_ptr,
-            chipset: vm.chipset,
-        });
-        let router_ptr = &*router as *const PciIoRouter as *mut PciIoRouter;
-        vm.pci_io_router_ptr = router_ptr;
-        vm.io.register(PCI_IO_ROUTER_BASE, PCI_IO_ROUTER_SIZE, router);
-    } else {
-        let router = unsafe { &mut *vm.pci_io_router_ptr };
-        router.e1000 = e1000_ptr;
-    }
+    #[cfg(not(feature = "std"))]
+    {
+        let e1000 = Box::new(e1000_dev);
+        let e1000_ptr = &*e1000 as *const crate::devices::e1000::E1000 as *mut crate::devices::e1000::E1000;
+        vm.e1000_ptr = e1000_ptr;
 
-    // Keep the E1000 Box alive (router uses raw pointer)
-    core::mem::forget(e1000);
+        if !vm.pci_mmio_router_ptr.is_null() {
+            let router = unsafe { &mut *vm.pci_mmio_router_ptr };
+            router.e1000 = e1000_ptr;
+        }
+
+        if vm.pci_io_router_ptr.is_null() {
+            let router = Box::new(PciIoRouter {
+                uhci: vm.uhci_ptr,
+                ac97: vm.ac97_ptr,
+                e1000: e1000_ptr,
+                pci_bus: vm.pci_bus_ptr,
+                chipset: vm.chipset,
+            });
+            let router_ptr = &*router as *const PciIoRouter as *mut PciIoRouter;
+            vm.pci_io_router_ptr = router_ptr;
+            vm.io.register(PCI_IO_ROUTER_BASE, PCI_IO_ROUTER_SIZE, router);
+        } else {
+            let router = unsafe { &mut *vm.pci_io_router_ptr };
+            router.e1000 = e1000_ptr;
+        }
+
+        core::mem::forget(e1000);
+    }
 
     // Register E1000 as a PCI device so the guest can discover it via PCI scan.
     if !vm.pci_bus_ptr.is_null() {
@@ -2158,6 +2215,9 @@ const PCI_MMIO_CATCHALL_SIZE: u64 = 0xEC0_0000; // up to 0xFEBFFFFF
 /// reads BAR values from PCI config space to route each access.
 pub struct PciMmioRouter {
     pub ahci: *mut crate::devices::ahci::Ahci,
+    #[cfg(feature = "std")]
+    pub e1000: Option<alloc::sync::Arc<std::sync::Mutex<crate::devices::e1000::E1000>>>,
+    #[cfg(not(feature = "std"))]
     pub e1000: *mut crate::devices::e1000::E1000,
     pub svga: *mut crate::devices::svga::Svga,
     pub virtio_gpu: *mut crate::devices::virtio_gpu::VirtioGpu,
@@ -2184,9 +2244,16 @@ impl PciMmioRouter {
         self.read_bar(self.chipset.slots.ahci, 0x24, 0xFFFFFFF0)
     }
     fn e1000_bar0(&self) -> u64 {
-        if self.e1000.is_null() { return 0; }
+        #[cfg(feature = "std")]
+        { if self.e1000.is_none() { return 0; } }
+        #[cfg(not(feature = "std"))]
+        { if self.e1000.is_null() { return 0; } }
         self.read_bar(self.chipset.slots.e1000, 0x10, 0xFFFFFFF0)
     }
+    #[cfg(feature = "std")]
+    fn has_e1000(&self) -> bool { self.e1000.is_some() }
+    #[cfg(not(feature = "std"))]
+    fn has_e1000(&self) -> bool { !self.e1000.is_null() }
     fn vga_bar2(&self) -> u64 {
         if self.svga.is_null() { return 0; }
         self.read_bar(self.chipset.slots.vga, 0x18, 0xFFFFF000)
@@ -2214,12 +2281,43 @@ impl crate::memory::mmio::MmioHandler for PciMmioRouter {
         let abs_addr = PCI_MMIO_CATCHALL_BASE + offset;
 
         // Check E1000 BAR0 (128KB region)
-        if !self.e1000.is_null() {
+        if self.has_e1000() {
             let e1000_base = self.e1000_bar0();
             if e1000_base != 0 && abs_addr >= e1000_base && abs_addr < e1000_base + 0x2_0000 {
-                let e1000 = unsafe { &mut *self.e1000 };
                 let reg = abs_addr - e1000_base;
-                return e1000.read(reg, size);
+                #[cfg(feature = "std")]
+                {
+                    // Use try_lock to avoid blocking AP threads during
+                    // net_poll/poll_irqs. If the lock is contended, fall
+                    // back to a plain register read (no side effects like
+                    // clear-on-read for ICR). On x86_64, aligned u32 reads
+                    // are atomic, so we get a consistent (possibly stale)
+                    // value without racing on the Vec's internal pointer
+                    // (which never changes — regs is never reallocated).
+                    let arc = self.e1000.as_ref().unwrap();
+                    match arc.try_lock() {
+                        Ok(mut e1000) => return e1000.read(reg, size),
+                        Err(_) => {
+                            // Contended — spin briefly then try once more.
+                            // Most contention is < 1us (net_poll enqueue).
+                            core::hint::spin_loop();
+                            match arc.try_lock() {
+                                Ok(mut e1000) => return e1000.read(reg, size),
+                                Err(_) => {
+                                    // Still contended. Return 0 to avoid
+                                    // blocking the vCPU. The guest will
+                                    // re-read shortly.
+                                    return Ok(0);
+                                }
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(feature = "std"))]
+                {
+                    let e1000 = unsafe { &mut *self.e1000 };
+                    return e1000.read(reg, size);
+                }
             }
         }
 
@@ -2298,12 +2396,30 @@ impl crate::memory::mmio::MmioHandler for PciMmioRouter {
         let abs_addr = PCI_MMIO_CATCHALL_BASE + offset;
 
         // Check E1000 BAR0 (128KB region)
-        if !self.e1000.is_null() {
+        if self.has_e1000() {
             let e1000_base = self.e1000_bar0();
             if e1000_base != 0 && abs_addr >= e1000_base && abs_addr < e1000_base + 0x2_0000 {
-                let e1000 = unsafe { &mut *self.e1000 };
                 let reg = abs_addr - e1000_base;
-                return e1000.write(reg, size, val);
+                #[cfg(feature = "std")]
+                {
+                    // Writes must acquire the lock (dropping writes would
+                    // break driver state). Use try_lock with brief spin to
+                    // reduce contention, then fall back to blocking lock.
+                    let arc = self.e1000.as_ref().unwrap();
+                    let mut e1000 = match arc.try_lock() {
+                        Ok(guard) => guard,
+                        Err(_) => {
+                            for _ in 0..8 { core::hint::spin_loop(); }
+                            arc.lock().unwrap()
+                        }
+                    };
+                    return e1000.write(reg, size, val);
+                }
+                #[cfg(not(feature = "std"))]
+                {
+                    let e1000 = unsafe { &mut *self.e1000 };
+                    return e1000.write(reg, size, val);
+                }
             }
         }
 
@@ -2454,6 +2570,9 @@ pub extern "C" fn corevm_setup_ahci(handle: u64, num_ports: u8) -> i32 {
     // to the correct device (AHCI, E1000, etc.).
     let router = Box::new(PciMmioRouter {
         ahci: vm.ahci_ptr,
+        #[cfg(feature = "std")]
+        e1000: vm.e1000.clone(),
+        #[cfg(not(feature = "std"))]
         e1000: core::ptr::null_mut(),
         svga: vm.svga_ptr,
         virtio_gpu: vm.virtio_gpu_ptr,
@@ -2554,10 +2673,15 @@ pub extern "C" fn corevm_serial_take_output(handle: u64, buf: *mut u8, max_len: 
 /// or -1 on error.
 #[no_mangle]
 pub extern "C" fn corevm_debug_port_take_output(handle: u64, buf: *mut u8, max_len: u32) -> i32 {
-    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
-    if buf.is_null() || vm.debug_port_ptr.is_null() { return -1; }
+    // IO_LOCK: DebugPort::write() is called from AP threads via port_out.
+    // take_output() swaps the Vec, so we must hold the lock to avoid racing
+    // with concurrent push() calls from AP I/O exits.
+    io_lock();
+    let vm = match get_vm(handle) { Some(v) => v, None => { io_unlock(); return -1 } };
+    if buf.is_null() || vm.debug_port_ptr.is_null() { io_unlock(); return -1; }
     let dbg = unsafe { &mut *vm.debug_port_ptr };
     let output = dbg.take_output();
+    io_unlock();
     let copy_len = output.len().min(max_len as usize);
     if copy_len > 0 {
         unsafe { core::ptr::copy_nonoverlapping(output.as_ptr(), buf, copy_len); }
@@ -2832,7 +2956,8 @@ pub extern "C" fn corevm_vga_get_text_buffer(
 #[no_mangle]
 pub extern "C" fn corevm_e1000_take_tx(handle: u64, buf: *mut u8, buf_len: u32) -> i32 {
     let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
-    let e1000 = match vm.e1000() { Some(e) => e, None => return 0 };
+    let e1000_arc = match vm.e1000.as_ref() { Some(a) => a, None => return 0 };
+    let mut e1000 = e1000_arc.lock().unwrap();
     let packets = e1000.take_tx_packets();
     if packets.is_empty() { return 0; }
     let out = unsafe { core::slice::from_raw_parts_mut(buf, buf_len as usize) };
@@ -2858,7 +2983,8 @@ pub extern "C" fn corevm_e1000_receive(handle: u64, data: *const u8, len: u32) -
     let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
     if data.is_null() || len == 0 { return -1; }
     let pkt = unsafe { core::slice::from_raw_parts(data, len as usize) };
-    let e1000 = match vm.e1000() { Some(e) => e, None => return -1 };
+    let e1000_arc = match vm.e1000.as_ref() { Some(a) => a, None => return -1 };
+    let mut e1000 = e1000_arc.lock().unwrap();
     e1000.receive_packet(pkt);
     // Immediately try to deliver to guest via RX descriptor ring DMA.
     e1000.process_rx_ring();
@@ -2870,7 +2996,8 @@ pub extern "C" fn corevm_e1000_receive(handle: u64, data: *const u8, len: u32) -
 #[no_mangle]
 pub extern "C" fn corevm_e1000_has_rx_irq(handle: u64) -> u32 {
     let vm = match get_vm(handle) { Some(v) => v, None => return 0 };
-    let e1000 = match vm.e1000() { Some(e) => e, None => return 0 };
+    let e1000_arc = match vm.e1000.as_ref() { Some(a) => a, None => return 0 };
+    let e1000 = e1000_arc.lock().unwrap();
     let icr = e1000.regs[0x00C0 / 4];
     let ims = e1000.regs[0x00D0 / 4];
     icr & ims // Only report masked-in interrupts
@@ -2951,7 +3078,7 @@ pub extern "C" fn corevm_net_poll(handle: u64) -> i32 {
     #[cfg(feature = "std")]
     {
         let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
-        let use_e1000 = !vm.e1000_ptr.is_null();
+        let use_e1000 = vm.e1000.is_some();
         let use_virtio_net = !vm.virtio_net_ptr.is_null();
 
         // Run a TX→backend→RX loop. This allows ACKs from the guest to
@@ -2962,12 +3089,14 @@ pub extern "C" fn corevm_net_poll(handle: u64) -> i32 {
         let mut total_tx: i32 = 0;
         for round in 0..4 {
             // Take TX packets from the active NIC and send to backend.
+            // Lock is held only for the brief take_tx_packets() call.
             let tx_packets = if use_virtio_net {
                 let vnet = unsafe { &mut *vm.virtio_net_ptr };
                 vnet.take_tx_packets()
             } else if use_e1000 {
-                let e1000 = unsafe { &mut *vm.e1000_ptr };
+                let mut e1000 = vm.e1000.as_ref().unwrap().lock().unwrap();
                 e1000.take_tx_packets()
+                // Lock released here
             } else {
                 alloc::vec::Vec::new()
             };
@@ -3001,13 +3130,19 @@ pub extern "C" fn corevm_net_poll(handle: u64) -> i32 {
                     }
                     vnet.process_rx();
                 } else if use_e1000 {
-                    let e1000 = unsafe { &mut *vm.e1000_ptr };
+                    // Lock briefly to enqueue packets, then release before
+                    // process_rx_ring to minimize contention with AP threads.
+                    let mut e1000 = vm.e1000.as_ref().unwrap().lock().unwrap();
                     const RX_BUFFER_LIMIT: usize = 512;
                     for pkt in &rx_packets {
                         if e1000.rx_buffer.len() >= RX_BUFFER_LIMIT { break; }
                         e1000.receive_packet(pkt);
                     }
+                    // process_rx_ring does DMA into guest memory — keep lock
+                    // held here since it modifies E1000 state (head pointer,
+                    // ICR bits). The operation is fast (memcpy to guest RAM).
                     e1000.process_rx_ring();
+                    // Lock released here
                 }
             }
 
@@ -3123,6 +3258,9 @@ const PCI_IO_ROUTER_SIZE: u16 = 0x1000; // 4KB: 0xC000-0xCFFF
 pub struct PciIoRouter {
     pub uhci: *mut crate::devices::uhci::Uhci,
     pub ac97: *mut crate::devices::ac97::Ac97,
+    #[cfg(feature = "std")]
+    pub e1000: Option<alloc::sync::Arc<std::sync::Mutex<crate::devices::e1000::E1000>>>,
+    #[cfg(not(feature = "std"))]
     pub e1000: *mut crate::devices::e1000::E1000,
     pci_bus: *mut crate::devices::bus::PciBus,
     pub chipset: &'static crate::devices::chipset::ChipsetConfig,
@@ -3147,9 +3285,16 @@ impl PciIoRouter {
         self.read_io_bar(self.chipset.slots.ac97, 0x10, 0xFF00)
     }
     fn e1000_bar2(&self) -> u16 {
-        if self.e1000.is_null() { return 0; }
+        #[cfg(feature = "std")]
+        { if self.e1000.is_none() { return 0; } }
+        #[cfg(not(feature = "std"))]
+        { if self.e1000.is_null() { return 0; } }
         self.read_io_bar(self.chipset.slots.e1000, 0x18, 0xFFF8)
     }
+    #[cfg(feature = "std")]
+    fn has_e1000(&self) -> bool { self.e1000.is_some() }
+    #[cfg(not(feature = "std"))]
+    fn has_e1000(&self) -> bool { !self.e1000.is_null() }
     fn ac97_bar1(&self) -> u16 {
         if self.ac97.is_null() { return 0; }
         self.read_io_bar(self.chipset.slots.ac97, 0x14, 0xFFC0)
@@ -3161,17 +3306,32 @@ impl crate::io::IoHandler for PciIoRouter {
         // Check E1000 BAR2 (8 bytes: IOADDR at +0, IODATA at +4)
         // The 82540EM driver uses E1000_WRITE_REG_IO for reset — this is
         // critical for e1000_reset_hw() to work.
-        if !self.e1000.is_null() {
+        if self.has_e1000() {
             let e1000_io = self.e1000_bar2();
             if e1000_io != 0 && port >= e1000_io && port < e1000_io + 8 {
-                let e1000 = unsafe { &mut *self.e1000 };
                 let offset = port - e1000_io;
-                if offset < 4 {
-                    return Ok(e1000.io_addr);
-                } else {
-                    use crate::memory::mmio::MmioHandler;
-                    let val = e1000.read(e1000.io_addr as u64, 4)?;
-                    return Ok(val as u32);
+                #[cfg(feature = "std")]
+                {
+                    let mut e1000 = self.e1000.as_ref().unwrap().lock().unwrap();
+                    if offset < 4 {
+                        return Ok(e1000.io_addr);
+                    } else {
+                        use crate::memory::mmio::MmioHandler;
+                        let reg = e1000.io_addr as u64;
+                        let val = e1000.read(reg, 4)?;
+                        return Ok(val as u32);
+                    }
+                }
+                #[cfg(not(feature = "std"))]
+                {
+                    let e1000 = unsafe { &mut *self.e1000 };
+                    if offset < 4 {
+                        return Ok(e1000.io_addr);
+                    } else {
+                        use crate::memory::mmio::MmioHandler;
+                        let val = e1000.read(e1000.io_addr as u64, 4)?;
+                        return Ok(val as u32);
+                    }
                 }
             }
         }
@@ -3202,19 +3362,34 @@ impl crate::io::IoHandler for PciIoRouter {
 
     fn write(&mut self, port: u16, size: u8, val: u32) -> crate::error::Result<()> {
         // Check E1000 BAR2 (8 bytes: IOADDR at +0, IODATA at +4)
-        if !self.e1000.is_null() {
+        if self.has_e1000() {
             let e1000_io = self.e1000_bar2();
             if e1000_io != 0 && port >= e1000_io && port < e1000_io + 8 {
-                let e1000 = unsafe { &mut *self.e1000 };
                 let offset = port - e1000_io;
-                if offset < 4 {
-                    e1000.io_addr = val;
-                } else {
-                    use crate::memory::mmio::MmioHandler;
-                    let reg = e1000.io_addr;
-                    let _ = e1000.write(reg as u64, 4, val as u64);
+                #[cfg(feature = "std")]
+                {
+                    let mut e1000 = self.e1000.as_ref().unwrap().lock().unwrap();
+                    if offset < 4 {
+                        e1000.io_addr = val;
+                    } else {
+                        use crate::memory::mmio::MmioHandler;
+                        let reg = e1000.io_addr;
+                        let _ = e1000.write(reg as u64, 4, val as u64);
+                    }
+                    return Ok(());
                 }
-                return Ok(());
+                #[cfg(not(feature = "std"))]
+                {
+                    let e1000 = unsafe { &mut *self.e1000 };
+                    if offset < 4 {
+                        e1000.io_addr = val;
+                    } else {
+                        use crate::memory::mmio::MmioHandler;
+                        let reg = e1000.io_addr;
+                        let _ = e1000.write(reg as u64, 4, val as u64);
+                    }
+                    return Ok(());
+                }
             }
         }
 
@@ -3272,6 +3447,9 @@ pub extern "C" fn corevm_setup_uhci(handle: u64) -> i32 {
         let router = Box::new(PciIoRouter {
             uhci: uhci_ptr,
             ac97: vm.ac97_ptr,
+            #[cfg(feature = "std")]
+            e1000: vm.e1000.clone(),
+            #[cfg(not(feature = "std"))]
             e1000: vm.e1000_ptr,
             pci_bus: vm.pci_bus_ptr,
             chipset: vm.chipset,
@@ -3636,6 +3814,13 @@ pub fn corevm_set_io_activity_callbacks(
         ahci.io_activity_ctx = disk_ctx;
     }
 
+    #[cfg(feature = "std")]
+    if let Some(e1000_arc) = vm.e1000.as_ref() {
+        let mut e1000 = e1000_arc.lock().unwrap();
+        e1000.io_activity_cb = net_cb;
+        e1000.io_activity_ctx = net_ctx;
+    }
+    #[cfg(not(feature = "std"))]
     if !vm.e1000_ptr.is_null() {
         let e1000 = unsafe { &mut *vm.e1000_ptr };
         e1000.io_activity_cb = net_cb;

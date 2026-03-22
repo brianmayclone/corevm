@@ -56,6 +56,9 @@ pub struct Vm {
     pub cmos_ptr: *mut crate::devices::cmos::Cmos,
     pub hpet_ptr: *mut Hpet,
     pub ide_ptr: *mut crate::devices::ide::Ide,
+    #[cfg(feature = "std")]
+    pub e1000: Option<alloc::sync::Arc<std::sync::Mutex<E1000>>>,
+    #[cfg(not(feature = "std"))]
     pub e1000_ptr: *mut E1000,
     pub ac97_ptr: *mut Ac97,
     pub uhci_ptr: *mut crate::devices::uhci::Uhci,
@@ -207,6 +210,9 @@ impl Vm {
             cmos_ptr: core::ptr::null_mut(),
             hpet_ptr: core::ptr::null_mut(),
             ide_ptr: core::ptr::null_mut(),
+            #[cfg(feature = "std")]
+            e1000: None,
+            #[cfg(not(feature = "std"))]
             e1000_ptr: core::ptr::null_mut(),
             ac97_ptr: core::ptr::null_mut(),
             uhci_ptr: core::ptr::null_mut(),
@@ -912,7 +918,14 @@ impl Vm {
         }
     }
 
-    /// Get a mutable reference to the E1000 NIC, if set up.
+    /// Get a reference to the E1000 Arc<Mutex>, if set up.
+    #[cfg(feature = "std")]
+    pub fn e1000_arc(&self) -> Option<&alloc::sync::Arc<std::sync::Mutex<E1000>>> {
+        self.e1000.as_ref()
+    }
+
+    /// Get a mutable reference to the E1000 NIC, if set up. (no_std only)
+    #[cfg(not(feature = "std"))]
     pub fn e1000(&mut self) -> Option<&mut E1000> {
         if self.e1000_ptr.is_null() {
             None
