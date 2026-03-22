@@ -61,7 +61,7 @@ pub fn router() -> Router<Arc<ClusterState>> {
         .route("/api/storage/datastores", get(storage::list_datastores).post(storage::create_datastore))
         .route("/api/storage/datastores/{id}", get(storage::get_datastore).delete(storage::delete_datastore))
         .route("/api/storage/pools", get(activity::list_storage_pools))
-        .route("/api/storage/pools/{id}", delete(activity::delete_storage_pool))
+        .route("/api/storage/pools/{id}", put(activity::update_storage_pool).delete(activity::delete_storage_pool))
         .route("/api/storage/pools/{id}/browse", get(activity::browse_storage_pool))
         .route("/api/storage/stats", get(activity::storage_stats))
         .route("/api/storage/images", get(activity::list_images))
@@ -92,6 +92,8 @@ pub fn router() -> Router<Arc<ClusterState>> {
         .route("/api/networks/{network_id}/{reservation_id}/reservation", delete(network::delete_reservation))
         .route("/api/networks/{id}/dns-records", post(network::create_dns_record))
         .route("/api/networks/{network_id}/{record_id}/dns-record", delete(network::delete_dns_record))
+        .route("/api/networks/{id}/pxe-entries", get(network::list_pxe_entries).post(network::create_pxe_entry))
+        .route("/api/networks/{network_id}/{entry_id}/pxe-entry", delete(network::delete_pxe_entry))
 
         // ── Network (compat stubs) ──────────────────────
         .route("/api/network/interfaces", get(activity::network_interfaces))

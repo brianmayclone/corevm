@@ -111,6 +111,24 @@ impl DatastoreService {
         if affected == 0 { Err("Datastore not found".into()) } else { Ok(()) }
     }
 
+    /// Update datastore properties.
+    pub fn update(db: &Connection, id: &str, name: Option<&str>, mount_source: Option<&str>,
+                  mount_opts: Option<&str>, mount_path: Option<&str>) -> Result<(), String> {
+        if let Some(v) = name {
+            db.execute("UPDATE datastores SET name = ?1 WHERE id = ?2", rusqlite::params![v, id]).map_err(|e| e.to_string())?;
+        }
+        if let Some(v) = mount_source {
+            db.execute("UPDATE datastores SET mount_source = ?1 WHERE id = ?2", rusqlite::params![v, id]).map_err(|e| e.to_string())?;
+        }
+        if let Some(v) = mount_opts {
+            db.execute("UPDATE datastores SET mount_opts = ?1 WHERE id = ?2", rusqlite::params![v, id]).map_err(|e| e.to_string())?;
+        }
+        if let Some(v) = mount_path {
+            db.execute("UPDATE datastores SET mount_path = ?1 WHERE id = ?2", rusqlite::params![v, id]).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
     /// Update datastore status.
     pub fn update_status(db: &Connection, id: &str, status: &str) -> Result<(), String> {
         db.execute(

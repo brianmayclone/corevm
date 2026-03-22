@@ -189,7 +189,13 @@ export default function Storage() {
               <StoragePoolRow
                 key={pool.id}
                 pool={pool}
-                onEdit={() => {/* TODO: Edit pool dialog */}}
+                onEdit={() => {
+                  const name = prompt('Pool name:', pool.name)
+                  if (name === null) return
+                  api.put(`/api/storage/pools/${pool.id}`, { name })
+                    .then(refresh)
+                    .catch(e => alert(e.response?.data?.error || 'Failed to update'))
+                }}
                 onDelete={() => setDeletePool(pool)}
               />
             ))}

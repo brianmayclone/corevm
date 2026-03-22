@@ -60,6 +60,7 @@ export default function SdnNetworkDetail() {
       setNet(data.network)
       setLeases(data.leases || [])
       setDnsRecords(data.dns_records || [])
+      setPxeEntries(data.pxe_entries || [])
     }).catch(() => {})
     api.get<Iso[]>('/api/storage/isos').then(({ data }) => setIsos(data)).catch(() => {})
   }
@@ -468,21 +469,52 @@ export default function SdnNetworkDetail() {
                     <div className="flex gap-2 justify-end">
                       <button type="button" onClick={() => setShowAddPxe(false)} className="px-3 py-1.5 text-sm text-vmm-text-muted">Cancel</button>
                       <button onClick={async () => {
-                        // TODO: POST /api/networks/{id}/pxe-entries
+                        if (!pxeForm.name || !pxeForm.iso_path) { alert('Name and ISO are required'); return }
+                        await api.post(`/api/networks/${id}/pxe-entries`, pxeForm)
                         setShowAddPxe(false)
+                        setPxeForm({ name: '', iso_path: '', boot_args: '' })
+                        fetchData()
                       }} className="px-4 py-1.5 bg-vmm-accent text-white rounded-lg text-sm font-medium">Add Entry</button>
                     </div>
                   </div>
                 </Card>
               )}
 
-              <Card>
-                <div className="p-4 text-center text-vmm-text-muted text-sm py-8">
-                  <Disc size={28} className="mx-auto mb-2 opacity-30" />
-                  <p>PXE boot entries will appear here.</p>
-                  <p className="text-xs mt-1">Link ISOs from your datastores to offer them via network boot to VMs.</p>
-                </div>
-              </Card>
+              {pxeEntries.length > 0 ? (
+                <Card padding={false}>
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-vmm-border text-xs text-vmm-text-muted uppercase tracking-wider">
+                        <th className="text-left px-4 py-2">Menu Label</th>
+                        <th className="text-left px-4 py-2">ISO</th>
+                        <th className="text-left px-4 py-2">Boot Args</th>
+                        <th className="text-right px-4 py-2"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pxeEntries.map(e => (
+                        <tr key={e.id} className="border-b border-vmm-border last:border-b-0">
+                          <td className="px-4 py-2 text-vmm-text font-medium">{e.name}</td>
+                          <td className="px-4 py-2 text-vmm-text-dim font-mono text-xs">{e.iso_path}</td>
+                          <td className="px-4 py-2 text-vmm-text-muted text-xs">{e.boot_args || '—'}</td>
+                          <td className="px-4 py-2 text-right">
+                            <button onClick={() => api.delete(`/api/networks/${id}/${e.id}/pxe-entry`).then(fetchData)}
+                              className="text-vmm-text-muted hover:text-vmm-danger"><Trash2 size={13} /></button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </Card>
+              ) : (
+                <Card>
+                  <div className="p-4 text-center text-vmm-text-muted text-sm py-8">
+                    <Disc size={28} className="mx-auto mb-2 opacity-30" />
+                    <p>No PXE boot entries yet.</p>
+                    <p className="text-xs mt-1">Link ISOs from your datastores to offer them via network boot to VMs.</p>
+                  </div>
+                </Card>
+              )}
             </div>
           )}
         </div>

@@ -249,4 +249,48 @@ impl NetworkService {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+
+    // ── PXE Boot Entries ─────────────────────────────────────────
+
+    pub fn list_pxe_entries(db: &Connection, network_id: i64) -> Result<Vec<PxeBootEntry>, String> {
+        let mut stmt = db.prepare(
+            "SELECT id, name, iso_id, iso_path, boot_args, sort_order, enabled, created_at \
+             FROM pxe_boot_entries WHERE network_id = ?1 ORDER BY sort_order, name"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(rusqlite::params![network_id], |row| {
+            Ok(PxeBootEntry {
+                id: row.get(0)?, name: row.get(1)?, iso_id: row.get(2)?,
+                iso_path: row.get(3)?, boot_args: row.get(4)?,
+                sort_order: row.get(5)?, enabled: row.get::<_, i32>(6)? != 0,
+                created_at: row.get(7)?,
+            })
+        }).map_err(|e| e.to_string())?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    pub fn create_pxe_entry(db: &Connection, network_id: i64, name: &str, iso_path: &str, boot_args: &str) -> Result<i64, String> {
+        db.execute(
+            "INSERT INTO pxe_boot_entries (network_id, name, iso_path, boot_args) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![network_id, name, iso_path, boot_args],
+        ).map_err(|e| e.to_string())?;
+        Ok(db.last_insert_rowid())
+    }
+
+    pub fn delete_pxe_entry(db: &Connection, id: i64) -> Result<(), String> {
+        db.execute("DELETE FROM pxe_boot_entries WHERE id = ?1", rusqlite::params![id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct PxeBootEntry {
+    pub id: i64,
+    pub name: String,
+    pub iso_id: Option<String>,
+    pub iso_path: String,
+    pub boot_args: String,
+    pub sort_order: i64,
+    pub enabled: bool,
+    pub created_at: String,
 }

@@ -171,6 +171,23 @@ pub async fn delete_storage_pool(
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
+pub async fn update_storage_pool(
+    State(state): State<Arc<ClusterState>>,
+    _auth: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
+    crate::services::datastore::DatastoreService::update(
+        &db, &id,
+        body.get("name").and_then(|v| v.as_str()),
+        body.get("mount_source").and_then(|v| v.as_str()),
+        body.get("mount_opts").and_then(|v| v.as_str()),
+        body.get("mount_path").and_then(|v| v.as_str()),
+    ).map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
 #[derive(Deserialize)]
 pub struct BrowseQuery {
     pub ext: Option<String>,

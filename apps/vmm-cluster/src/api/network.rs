@@ -34,7 +34,8 @@ pub async fn get_network(
     let net = NetworkService::get_network(&db, id).map_err(|e| AppError(StatusCode::NOT_FOUND, e))?;
     let leases = NetworkService::list_leases(&db, id).unwrap_or_default();
     let dns = NetworkService::list_dns_records(&db, id).unwrap_or_default();
-    Ok(Json(serde_json::json!({ "network": net, "leases": leases, "dns_records": dns })))
+    let pxe = NetworkService::list_pxe_entries(&db, id).unwrap_or_default();
+    Ok(Json(serde_json::json!({ "network": net, "leases": leases, "dns_records": dns, "pxe_entries": pxe })))
 }
 
 #[derive(Deserialize)]
@@ -185,6 +186,49 @@ pub async fn delete_dns_record(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
     NetworkService::delete_dns_record(&db, record_id).map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+// ── PXE Boot Entries CRUD ────────────────────────────────────────────────
+
+pub async fn list_pxe_entries(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Path(network_id): Path<i64>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
+    let entries = NetworkService::list_pxe_entries(&db, network_id)
+        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::to_value(entries).unwrap()))
+}
+
+#[derive(Deserialize)]
+pub struct CreatePxeEntryRequest {
+    pub name: String,
+    pub iso_path: String,
+    #[serde(default)]
+    pub boot_args: String,
+}
+
+pub async fn create_pxe_entry(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Path(network_id): Path<i64>,
+    Json(body): Json<CreatePxeEntryRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
+    let id = NetworkService::create_pxe_entry(&db, network_id, &body.name, &body.iso_path, &body.boot_args)
+        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(serde_json::json!({"id": id})))
+}
+
+pub async fn delete_pxe_entry(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Path((_network_id, entry_id)): Path<(i64, i64)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
+    NetworkService::delete_pxe_entry(&db, entry_id).map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
