@@ -690,17 +690,17 @@ pub extern "C" fn corevm_cmos_advance(handle: u64, ticks_32768: u64) -> u32 {
 /// The in-kernel PIC/IOAPIC/LAPIC handles vector injection automatically.
 #[no_mangle]
 pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
-    // No io_lock: called only from BSP thread. MMIO exits now take the
-    // lock, but poll_irqs doesn't need it since the BSP serializes its
-    // own calls naturally (sequential within bsp_loop).
     let result = match get_vm(handle) {
         Some(vm) => {
             let mut injected = 0u32;
 
+            // IO_LOCK: PS/2 and Serial device state is shared with AP threads
+            // via I/O port exits (port 0x60/0x64 for PS/2, 0x3F8 for Serial).
+            // Hold io_lock while accessing these devices to prevent data races.
+            io_lock();
+
             // Drain pending mouse events from the thread-safe queue into
-            // the PS/2 controller (single-threaded context — no races).
-            // We drain into a local vec first to avoid borrow conflicts
-            // between pending_mouse (immutable borrow of vm) and ps2() (mutable).
+            // the PS/2 controller.
             #[cfg(feature = "std")]
             {
                 let events: alloc::vec::Vec<(i16, i16, u8, i8)> = {
@@ -787,14 +787,18 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                 }
             }
 
+            io_unlock();
+
             // AHCI IRQ → MSI (preferred) or legacy IRQ 11 (level-triggered)
-            // Use try_lock: if an AP holds AHCI_LOCK (doing disk I/O), skip
-            // the AHCI IRQ check — the AP will deliver the IRQ itself via
-            // corevm_ahci_poll_irq() after the MMIO exit. This prevents the
-            // BSP from blocking on disk I/O and stalling timer/device polling.
-            if !vm.ahci_ptr.is_null() && ahci_try_lock() {
+            // Use blocking lock so fix_stuck_irq() is always checked.
+            // The lock is brief — only state reads and IRQ line updates.
+            if !vm.ahci_ptr.is_null() {
+                ahci_lock();
                 let ahci = unsafe { &mut *vm.ahci_ptr };
+                // Auto-recover stuck IRQ: is!=0 but irq_pending=false
+                ahci.fix_stuck_irq();
                 let want_asserted = ahci.irq_raised();
+
                 #[cfg(feature = "linux")]
                 {
                     if ahci.msi_enabled {
@@ -805,11 +809,9 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         }
                     } else {
                         // Legacy level-triggered IRQ 11.
-                        // Keep the line asserted as long as irq_pending is true.
-                        // The guest ACKs by writing HBA_IS which clears is and
-                        // sets irq_pending=false. We then de-assert the line.
-                        // Do NOT call clear_irq() here — the guest needs to see
-                        // the asserted line to know there's a pending interrupt.
+                        // Assert once; de-assert when guest ACKs (irq_pending=false).
+                        // fix_stuck_irq() above handles the case where irq_pending
+                        // was prematurely cleared while is!=0.
                         if want_asserted && !vm.ahci_irq_asserted.load(Ordering::Relaxed) {
                             let _ = vm.backend.set_irq_line(11, true);
                             vm.ahci_irq_asserted.store(true, Ordering::Relaxed);
@@ -1277,6 +1279,8 @@ pub extern "C" fn corevm_ahci_poll_irq(handle: u64) {
     }
 
     let ahci = unsafe { &mut *vm.ahci_ptr };
+    // Auto-recover stuck IRQ: is!=0 but irq_pending=false
+    ahci.fix_stuck_irq();
     let want_asserted = ahci.irq_raised();
 
     #[cfg(feature = "linux")]
@@ -1313,9 +1317,8 @@ pub extern "C" fn corevm_ahci_poll_irq(handle: u64) {
             }
         } else {
             // Legacy level-triggered mode (MSI not enabled by guest).
-            // Assert the line when pending; do NOT clear irq_pending — the
-            // guest must ACK by writing HBA_IS. The de-assert happens when
-            // irq_pending becomes false after the guest clears port IS.
+            // Assert once; de-assert when guest ACKs. fix_stuck_irq()
+            // above recovers from is!=0 && irq_pending==false.
             if want_asserted && !vm.ahci_irq_asserted.load(Ordering::Relaxed) {
                 ahci.diag_irqs_delivered += 1;
                 let _ = vm.backend.set_irq_line(11, true);
@@ -2643,9 +2646,10 @@ pub extern "C" fn corevm_ahci_attach_cdrom(handle: u64, port: u32, fd: i32, size
 /// Send input bytes to the serial port (COM1).
 #[no_mangle]
 pub extern "C" fn corevm_serial_send_input(handle: u64, data: *const u8, len: u32) -> i32 {
-    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
-    if data.is_null() && len > 0 { return -1; }
-    match vm.serial() {
+    io_lock();
+    let vm = match get_vm(handle) { Some(v) => v, None => { io_unlock(); return -1 } };
+    if data.is_null() && len > 0 { io_unlock(); return -1; }
+    let result = match vm.serial() {
         Some(serial) => {
             let slice = if len > 0 {
                 unsafe { core::slice::from_raw_parts(data, len as usize) }
@@ -2656,16 +2660,19 @@ pub extern "C" fn corevm_serial_send_input(handle: u64, data: *const u8, len: u3
             0
         }
         None => -1,
-    }
+    };
+    io_unlock();
+    result
 }
 
 /// Take output bytes from the serial port. Returns number of bytes written to `buf`,
 /// or -1 on error.
 #[no_mangle]
 pub extern "C" fn corevm_serial_take_output(handle: u64, buf: *mut u8, max_len: u32) -> i32 {
-    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
-    if buf.is_null() { return -1; }
-    match vm.serial() {
+    io_lock();
+    let vm = match get_vm(handle) { Some(v) => v, None => { io_unlock(); return -1 } };
+    if buf.is_null() { io_unlock(); return -1; }
+    let result = match vm.serial() {
         Some(serial) => {
             let output = serial.take_output();
             let copy_len = output.len().min(max_len as usize);
@@ -2677,7 +2684,9 @@ pub extern "C" fn corevm_serial_take_output(handle: u64, buf: *mut u8, max_len: 
             copy_len as i32
         }
         None => -1,
-    }
+    };
+    io_unlock();
+    result
 }
 
 /// Drain buffered debug port (0x402) output. Returns number of bytes copied,
@@ -2703,21 +2712,27 @@ pub extern "C" fn corevm_debug_port_take_output(handle: u64, buf: *mut u8, max_l
 /// Send a PS/2 key press scancode.
 #[no_mangle]
 pub extern "C" fn corevm_ps2_key_press(handle: u64, scancode: u8) -> i32 {
-    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
-    match vm.ps2() {
+    io_lock();
+    let vm = match get_vm(handle) { Some(v) => v, None => { io_unlock(); return -1 } };
+    let result = match vm.ps2() {
         Some(ps2) => { ps2.key_press(scancode); 0 }
         None => -1,
-    }
+    };
+    io_unlock();
+    result
 }
 
 /// Send a PS/2 key release scancode.
 #[no_mangle]
 pub extern "C" fn corevm_ps2_key_release(handle: u64, scancode: u8) -> i32 {
-    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
-    match vm.ps2() {
+    io_lock();
+    let vm = match get_vm(handle) { Some(v) => v, None => { io_unlock(); return -1 } };
+    let result = match vm.ps2() {
         Some(ps2) => { ps2.key_release(scancode); 0 }
         None => -1,
-    }
+    };
+    io_unlock();
+    result
 }
 
 /// Send a PS/2 mouse movement.
@@ -3157,15 +3172,16 @@ pub extern "C" fn corevm_net_poll(handle: u64) -> i32 {
                 }
             }
 
-            // Log activity when packets flow
-            if total_tx > 0 || total_rx > 0 {
-                static mut NET_POLL_DIAG: u32 = 0;
-                unsafe { NET_POLL_DIAG += 1; }
-                if unsafe { NET_POLL_DIAG } % 200 == 0 {
-                    eprintln!("[net-poll] round={} tx={} rx={} total_tx={} total_rx={}",
-                        round, tx_packets.len(), rx_count, total_tx, total_rx);
-                }
-            }
+            // Net-poll diagnostic logging disabled — too noisy.
+            // Uncomment for debugging:
+            // if total_tx > 0 || total_rx > 0 {
+            //     static mut NET_POLL_DIAG: u32 = 0;
+            //     unsafe { NET_POLL_DIAG += 1; }
+            //     if unsafe { NET_POLL_DIAG } % 200 == 0 {
+            //         eprintln!("[net-poll] round={} tx={} rx={} total_tx={} total_rx={}",
+            //             round, tx_packets.len(), rx_count, total_tx, total_rx);
+            //     }
+            // }
         }
 
         total_rx

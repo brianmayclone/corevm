@@ -28,6 +28,10 @@ pub struct FrameBufferData {
     pub text_mode: bool,
     pub text_buffer: Vec<u16>, // 80x25 = 2000 cells
     pub dirty: bool,
+    /// Incremented by the VM thread each time the framebuffer is updated.
+    /// The UI thread compares this to its last-rendered sequence to decide
+    /// whether a texture re-upload is needed.
+    pub seq: u64,
 }
 
 impl Default for FrameBufferData {
@@ -39,6 +43,7 @@ impl Default for FrameBufferData {
             text_mode: true,
             text_buffer: Vec::new(),
             dirty: false,
+            seq: 0,
         }
     }
 }

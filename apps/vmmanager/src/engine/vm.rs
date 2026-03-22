@@ -505,6 +505,7 @@ fn update_framebuffer(handle: u64, fb: &Arc<Mutex<FrameBufferData>>, diag: &Diag
                         fb_data.pixels.resize(fb_size, 0);
                         fb_data.pixels.copy_from_slice(raw);
                         fb_data.dirty = true;
+            fb_data.seq += 1;
                     }
                     return;
                 }
@@ -541,6 +542,7 @@ fn update_framebuffer(handle: u64, fb: &Arc<Mutex<FrameBufferData>>, diag: &Diag
                 fb_data.width = tw;
                 fb_data.height = th;
                 fb_data.dirty = true;
+                fb_data.seq += 1;
             }
         }
     } else if mode_ret == 0 && vga_w > 0 && vga_h > 0 && vga_bpp > 0 {
@@ -612,6 +614,7 @@ fn update_framebuffer(handle: u64, fb: &Arc<Mutex<FrameBufferData>>, diag: &Diag
             fb_data.height = vga_h;
             display::render_graphics_mode(&raw_pixels, vga_w, vga_h, vga_bpp, &mut fb_data.pixels);
             fb_data.dirty = true;
+            fb_data.seq += 1;
         }
     }
 }
@@ -633,6 +636,7 @@ fn render_text_fallback(handle: u64, fb: &Arc<Mutex<FrameBufferData>>) {
             fb_data.width = tw;
             fb_data.height = th;
             fb_data.dirty = true;
+            fb_data.seq += 1;
         }
     }
 }

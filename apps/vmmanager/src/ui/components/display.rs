@@ -389,6 +389,7 @@ pub struct DisplayWidget {
     texture: Option<egui::TextureHandle>,
     last_width: u32,
     last_height: u32,
+    last_seq: u64,
     last_mouse_pos: Option<egui::Pos2>,
     last_mouse_buttons: u8,
     mouse_debug_counter: u64,
@@ -429,6 +430,7 @@ impl DisplayWidget {
             texture: None,
             last_width: 0,
             last_height: 0,
+            last_seq: 0,
             last_mouse_pos: None,
             last_mouse_buttons: 0,
             mouse_debug_counter: 0,
@@ -451,7 +453,7 @@ impl DisplayWidget {
 
     /// Update the texture from framebuffer data. Returns true if updated.
     pub fn update_texture(&mut self, ctx: &egui::Context, fb: &FrameBufferData) -> bool {
-        if !fb.dirty || fb.width == 0 || fb.height == 0 || fb.pixels.is_empty() {
+        if fb.seq == self.last_seq || fb.width == 0 || fb.height == 0 || fb.pixels.is_empty() {
             return false;
         }
 
@@ -479,6 +481,7 @@ impl DisplayWidget {
 
         self.last_width = fb.width;
         self.last_height = fb.height;
+        self.last_seq = fb.seq;
 
         true
     }

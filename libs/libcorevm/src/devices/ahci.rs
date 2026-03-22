@@ -571,6 +571,46 @@ impl Ahci {
     pub fn irq_raised(&self) -> bool { self.irq_pending }
     pub fn clear_irq(&mut self) { self.irq_pending = false; }
 
+    /// Ensure irq_pending and HBA IS are consistent with port IS state.
+    /// Reconstructs HBA IS from all ports and re-asserts irq_pending if
+    /// any port has pending interrupt bits. This is the authoritative
+    /// recovery mechanism for any IRQ delivery race condition.
+    pub fn fix_stuck_irq(&mut self) -> bool {
+        if self.ghc & GHC_IE == 0 { return false; }
+
+        // Reconstruct HBA IS from port state — the single source of truth
+        let mut computed_is: u32 = 0;
+        for (i, p) in self.ports.iter().enumerate() {
+            if p.is & p.ie != 0 {
+                computed_is |= 1 << i;
+            }
+        }
+
+        // Fix HBA IS if it doesn't match port state
+        if computed_is != 0 && self.is != computed_is {
+            self.is = computed_is;
+        }
+
+        // Fix irq_pending if HBA IS has bits but irq_pending is false
+        if computed_is != 0 && !self.irq_pending {
+            self.irq_pending = true;
+            #[cfg(feature = "std")]
+            {
+                static STUCK_FIX: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                let n = STUCK_FIX.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 50 || n % 1000 == 0 {
+                    let p0_is = self.ports[0].is;
+                    let p0_ie = self.ports[0].ie;
+                    eprintln!("[ahci-irq] FIX STUCK: computed_is=0x{:X} hba_is=0x{:X} p0.is=0x{:X} p0.ie=0x{:X} (fix #{})",
+                        computed_is, self.is, p0_is, p0_ie, n);
+                }
+            }
+            return true;
+        }
+
+        false
+    }
+
     /// Print periodic diagnostic heartbeat (call under AHCI_LOCK)
     #[cfg(feature = "std")]
     pub fn diag_heartbeat(&self) {
@@ -1085,7 +1125,26 @@ impl MmioHandler for Ahci {
                     }
                 }
             }
-            HBA_IS => { self.is &= !v; if self.is == 0 { self.irq_pending = false; } }
+            HBA_IS => {
+                self.is &= !v;
+                // Re-check: if any port still has IS bits that match IE,
+                // keep irq_pending true. This prevents a race where a new
+                // completion sets port.is between the guest reading HBA_IS
+                // and writing it back to clear.
+                if self.is == 0 {
+                    // Verify no port has pending interrupts
+                    let mut any_pending = false;
+                    for (i, p) in self.ports.iter().enumerate() {
+                        if p.is & p.ie != 0 {
+                            self.is |= 1 << i;
+                            any_pending = true;
+                        }
+                    }
+                    if !any_pending {
+                        self.irq_pending = false;
+                    }
+                }
+            }
             HBA_CCC_CTL => self.ccc_ctl = v, HBA_CCC_PORTS => self.ccc_ports = v,
             HBA_EM_CTL => self.em_ctl = v, HBA_BOHC => self.bohc = v,
             0x100..=0x10FF => {
