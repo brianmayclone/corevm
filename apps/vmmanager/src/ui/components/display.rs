@@ -498,7 +498,7 @@ impl DisplayWidget {
         if self.mouse_captured {
             let release = self.check_mouse_release(ui, ctx);
             if release {
-                self.release_mouse(ctx);
+                self.release_mouse_with_handle(ctx, vm_handle);
             }
         }
 
@@ -700,6 +700,10 @@ impl DisplayWidget {
 
     /// Release the mouse: show cursor, ungrab, and stop evdev reader.
     pub fn release_mouse(&mut self, ctx: &egui::Context) {
+        self.release_mouse_with_handle(ctx, None);
+    }
+
+    pub fn release_mouse_with_handle(&mut self, ctx: &egui::Context, vm_handle: Option<u64>) {
         self.mouse_captured = false;
         self.capture_time = None;
         self.last_mouse_pos = None;
@@ -711,6 +715,23 @@ impl DisplayWidget {
         if let Some(ref mut evdev) = self.evdev_input {
             evdev.stop();
             eprintln!("[evdev] input reader stopped");
+        }
+
+        // Release all modifier keys in the guest. When the user presses
+        // Ctrl+Alt+G to release the mouse, the evdev reader thread is stopped
+        // before the key-up events arrive — so the guest still thinks Ctrl and
+        // Alt are held down. Send explicit release scancodes for all modifiers.
+        if let Some(h) = vm_handle {
+            // PS/2 Set 1 break codes (scancode | 0x80)
+            libcorevm::ffi::corevm_ps2_key_release(h, 0x1D); // Left Ctrl
+            libcorevm::ffi::corevm_ps2_key_release(h, 0x38); // Left Alt
+            libcorevm::ffi::corevm_ps2_key_release(h, 0x2A); // Left Shift
+            // Extended keys need E0 prefix
+            libcorevm::ffi::corevm_ps2_key_press(h, 0xE0);
+            libcorevm::ffi::corevm_ps2_key_release(h, 0x1D); // Right Ctrl
+            libcorevm::ffi::corevm_ps2_key_press(h, 0xE0);
+            libcorevm::ffi::corevm_ps2_key_release(h, 0x38); // Right Alt
+            libcorevm::ffi::corevm_ps2_key_release(h, 0x36); // Right Shift
         }
 
         ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));

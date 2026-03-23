@@ -21,6 +21,7 @@ use libcorevm::runtime::VmControlHandle;
 use libcorevm::ffi::{corevm_ps2_key_press, corevm_ps2_key_release};
 
 /// Shared framebuffer data between VM thread and UI
+#[derive(Clone)]
 pub struct FrameBufferData {
     pub pixels: Vec<u8>,      // RGBA32
     pub width: u32,
@@ -1134,7 +1135,10 @@ impl eframe::App for CoreVmApp {
                 ))
             });
             if mod_release || event_release {
-                self.display.release_mouse(ctx);
+                let handle = self.selected_vm.as_ref()
+                    .and_then(|uuid| self.find_vm(uuid))
+                    .and_then(|vm| vm.vm_handle);
+                self.display.release_mouse_with_handle(ctx, handle);
                 ctx.input_mut(|i| {
                     i.events.retain(|e| !matches!(e,
                         egui::Event::Key { key: egui::Key::G | egui::Key::F | egui::Key::Escape, pressed: true, modifiers, .. }
@@ -1465,10 +1469,21 @@ impl eframe::App for CoreVmApp {
                 if let Some((state, fb, vm_handle)) = vm_info {
                     if state == VmState::Running || state == VmState::Paused {
                         let use_evdev = self.preferences.evdev_capture;
-                        let (display_focused, _display_rect) = if let Ok(mut fb_data) = fb.lock() {
-                            let result = self.display.show(ui, ctx, &fb_data, vm_handle, use_evdev);
+                        // Take a snapshot of the framebuffer under the lock,
+                        // then release the lock BEFORE calling display.show().
+                        // show() does texture upload + input injection which can
+                        // take milliseconds — holding fb lock during that blocks
+                        // the VM thread's on_tick framebuffer updates, causing
+                        // visible display freezes while typing.
+                        let fb_snapshot = if let Ok(mut fb_data) = fb.lock() {
+                            let snap = fb_data.clone();
                             fb_data.dirty = false;
-                            result
+                            Some(snap)
+                        } else {
+                            None
+                        };
+                        let (display_focused, _display_rect) = if let Some(ref snap) = fb_snapshot {
+                            self.display.show(ui, ctx, snap, vm_handle, use_evdev)
                         } else {
                             (false, None)
                         };
