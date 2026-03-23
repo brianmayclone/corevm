@@ -309,43 +309,40 @@ pub(crate) fn bsp_loop(
     loop {
         bsp_iterations += 1;
         if last_diag.elapsed().as_secs() >= 2 {
-            // Detect UEFI spin-wait stuck on a memory variable and unstick it.
+            // Early-boot spin-wait unstick (first 15 seconds only).
             // OVMF's MpInitLib waits for AP wakeup by polling a RAM variable
             // (pattern: mov rax,[rip+disp32]; cmp rdx,rax; jne done; pause; jmp).
-            // If the vCPU is stuck at the same RIP for 2+ seconds, break the
-            // spin-wait by writing to the polled variable.
-            let mut regs = crate::backend::types::VcpuRegs::default();
-            corevm_get_vcpu_regs(handle, 0, &mut regs);
-            if regs.rip == last_stuck_rip && bsp_iterations > 50 {
-                stuck_count += 1;
-                // Try to unstick by patching the polled variable.
-                // Scan backwards from RIP for: REX.W MOV RAX,[RIP+disp32] (48 8B 05)
-                let mut patched = false;
-                for back in &[14u64, 12, 16, 18, 20, 10, 22, 8] {
-                    let insn_addr = regs.rip.wrapping_sub(*back);
-                    let mut insn = [0u8; 7];
-                    corevm_read_phys(handle, insn_addr, insn.as_mut_ptr(), 7);
-                    if insn[0] == 0x48 && insn[1] == 0x8B && insn[2] == 0x05 {
-                        let disp = i32::from_le_bytes([insn[3], insn[4], insn[5], insn[6]]);
-                        let next_rip = insn_addr.wrapping_add(7);
-                        let poll_addr = (next_rip as i64).wrapping_add(disp as i64) as u64;
-                        let val: u64 = stuck_count as u64;
-                        corevm_write_phys(handle, poll_addr, &val as *const u64 as *const u8, 8);
-                        eprintln!("[bsp] UNSTUCK: wrote {} to 0x{:X} (RIP=0x{:X} back={})", val, poll_addr, regs.rip, back);
-                        patched = true;
-                        break;
+            // This has no timeout and hangs forever if CPUID topology reports
+            // more logical CPUs than vCPUs created. We detect the stuck RIP and
+            // patch the polled variable to break the spin-wait.
+            // After 15s the OS is running and same-RIP is normal (idle loop).
+            if start.elapsed().as_secs() <= 15 {
+                let mut regs = crate::backend::types::VcpuRegs::default();
+                corevm_get_vcpu_regs(handle, 0, &mut regs);
+                if regs.rip == last_stuck_rip && bsp_iterations > 50 {
+                    stuck_count += 1;
+                    // Scan backwards from RIP for: REX.W MOV RAX,[RIP+disp32] (48 8B 05)
+                    for back in &[14u64, 12, 16, 18, 20, 10, 22, 8] {
+                        let insn_addr = regs.rip.wrapping_sub(*back);
+                        let mut insn = [0u8; 7];
+                        corevm_read_phys(handle, insn_addr, insn.as_mut_ptr(), 7);
+                        if insn[0] == 0x48 && insn[1] == 0x8B && insn[2] == 0x05 {
+                            let disp = i32::from_le_bytes([insn[3], insn[4], insn[5], insn[6]]);
+                            let next_rip = insn_addr.wrapping_add(7);
+                            let poll_addr = (next_rip as i64).wrapping_add(disp as i64) as u64;
+                            let val: u64 = stuck_count as u64;
+                            corevm_write_phys(handle, poll_addr, &val as *const u64 as *const u8, 8);
+                            eprintln!("[bsp] UNSTUCK: wrote {} to 0x{:X} (RIP=0x{:X})", val, poll_addr, regs.rip);
+                            break;
+                        }
                     }
+                } else if regs.rip != last_stuck_rip {
+                    stuck_count = 0;
                 }
-                if !patched {
-                    eprintln!("[bsp] STUCK at RIP=0x{:X} but no known spin pattern found", regs.rip);
-                }
-            } else if regs.rip != last_stuck_rip {
-                stuck_count = 0;
+                last_stuck_rip = regs.rip;
             }
-            last_stuck_rip = regs.rip;
-            if last_diag.elapsed().as_secs() >= 5 || stuck_count > 0 {
-                eprintln!("[bsp] alive: {}s iters={} halts={} RIP=0x{:X} RFLAGS=0x{:X}",
-                    start.elapsed().as_secs(), bsp_iterations, bsp_halts, regs.rip, regs.rflags);
+            if last_diag.elapsed().as_secs() >= 5 {
+                eprintln!("[bsp] alive: {}s iters={} halts={}", start.elapsed().as_secs(), bsp_iterations, bsp_halts);
             }
             last_diag = Instant::now();
         }
