@@ -85,24 +85,40 @@ pub enum NicModel {
 
 /// Guest OS type.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum GuestOs {
+    #[serde(rename = "other")]
     Other,
+    #[serde(rename = "win7", alias = "windows7")]
     Windows7,
+    #[serde(rename = "win8", alias = "windows8")]
     Windows8,
+    #[serde(rename = "win10", alias = "windows10")]
     Windows10,
+    #[serde(rename = "win11", alias = "windows11")]
     Windows11,
+    #[serde(rename = "winserver2016", alias = "windowsserver2016")]
     WindowsServer2016,
+    #[serde(rename = "winserver2019", alias = "windowsserver2019")]
     WindowsServer2019,
+    #[serde(rename = "winserver2022", alias = "windowsserver2022")]
     WindowsServer2022,
+    #[serde(rename = "ubuntu")]
     Ubuntu,
+    #[serde(rename = "debian")]
     Debian,
+    #[serde(rename = "fedora")]
     Fedora,
+    #[serde(rename = "opensuse")]
     OpenSuse,
+    #[serde(rename = "redhat")]
     RedHat,
+    #[serde(rename = "arch")]
     Arch,
+    #[serde(rename = "linux", alias = "linuxother")]
     LinuxOther,
+    #[serde(rename = "freebsd")]
     FreeBsd,
+    #[serde(rename = "dos", alias = "dosfreedos")]
     DosFreeDos,
 }
 
