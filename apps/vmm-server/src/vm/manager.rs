@@ -48,6 +48,12 @@ pub fn start_vm(config: &VmConfig, bios_paths: &[std::path::PathBuf]) -> Result<
     }
     setup::set_vram_mb(handle, config.vram_mb);
 
+    // Set UEFI boot flag BEFORE device setup so setup_vga_lfb_mapping() skips
+    // the VGA LFB KVM slot at 0xE0000000 — OVMF relocates PCIEXBAR there.
+    if config.bios_type == BiosType::Uefi {
+        libcorevm::ffi::corevm_set_uefi_boot(handle);
+    }
+
     // Standard devices (PCI bus, PIC, IOAPIC, LAPIC, serial, PS/2, PIT, CMOS)
     corevm_setup_standard_devices(handle);
 

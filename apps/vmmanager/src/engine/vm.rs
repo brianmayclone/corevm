@@ -142,6 +142,12 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
     }
     setup::set_vram_mb(handle, config.vram_mb);
 
+    // Set UEFI boot flag BEFORE device setup so setup_vga_lfb_mapping() skips
+    // the VGA LFB KVM slot at 0xE0000000 — OVMF relocates PCIEXBAR there.
+    if config.bios_type == BiosType::Uefi {
+        libcorevm::ffi::corevm_set_uefi_boot(handle);
+    }
+
     // Setup devices (includes PCI bus)
     corevm_setup_standard_devices(handle);
 
@@ -150,10 +156,6 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
         corevm_setup_hpet(handle);
         entry.diag_log.log(DiagCategory::Info, "HPET enabled (Windows guest)".into());
     }
-
-    // VGA LFB is already mapped by setup_standard_devices → setup_vga_lfb_mapping
-    // at slot 2 (0xE0000000, 8MB) pointing to the SVGA device's internal framebuffer.
-    // No additional mapping needed here.
 
     // Setup AHCI controller (replaces IDE)
     corevm_setup_ahci(handle, 6);

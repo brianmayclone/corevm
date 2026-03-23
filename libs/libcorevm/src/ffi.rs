@@ -1894,6 +1894,18 @@ pub extern "C" fn corevm_set_vram_mb(handle: u64, vram_mb: u32) -> i32 {
     }
 }
 
+/// Mark this VM as UEFI boot mode. Must be called BEFORE
+/// corevm_setup_standard_devices() so that the VGA LFB at 0xE0000000 is NOT
+/// mapped as a KVM memory region — OVMF relocates PCIEXBAR there and needs
+/// MMIO traps, not RAM.
+#[unsafe(no_mangle)]
+pub extern "C" fn corevm_set_uefi_boot(handle: u64) -> i32 {
+    match get_vm(handle) {
+        Some(vm) => { vm.uefi_boot = true; 0 }
+        None => -1,
+    }
+}
+
 /// Configure disk cache for an AHCI port.
 /// `port`: AHCI port number (0-based).
 /// `cache_mb`: Cache size in MiB (0 = disable cache).

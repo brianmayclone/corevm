@@ -325,8 +325,10 @@ impl Vm {
         let acpi_pm = Box::new(AcpiPm::new());
         self.acpi_pm_ptr = &*acpi_pm as *const AcpiPm as *mut AcpiPm;
         self.io.register(0xB000, 0x40, acpi_pm);
-        // ACPI PM also at 0x600 — OVMF/UEFI sets ICH9 LPC PMBASE to 0x600
-        self.io.register(0x600, 0x40, Box::new(AcpiPm::new()));
+        // ACPI PM also at 0x600 — OVMF/UEFI sets ICH9 LPC PMBASE to 0x600.
+        // Uses a proxy to the SAME AcpiPm instance so shutdown detection and
+        // timer state are shared between SeaBIOS (0xB000) and UEFI (0x600).
+        self.io.register(0x600, 0x40, Box::new(AcpiPmProxy(self.acpi_pm_ptr)));
 
         // APM (0xB2-0xB3)
         self.io.register(0xB2, 2, Box::new(ApmControl::new()));
@@ -1377,6 +1379,24 @@ fn setup_virtio_pci_caps(pci_dev: &mut crate::devices::bus::PciDevice) {
     pci_dev.config_space[c4] = 0x09; pci_dev.config_space[c4+1] = 0x00; pci_dev.config_space[c4+3] = 4; pci_dev.config_space[c4+4] = 0;
     pci_dev.config_space[c4+8] = 0x00; pci_dev.config_space[c4+9] = 0x30; // offset 0x3000
     pci_dev.config_space[c4+12] = 0x00; pci_dev.config_space[c4+13] = 0x01; // length 256
+}
+
+// ── ACPI PM proxy ──
+// The canonical AcpiPm instance is registered at 0xB000 (SeaBIOS PMBASE).
+// OVMF uses PMBASE=0x600. This proxy delegates to the same instance so
+// shutdown detection, PM timer, and all register state is shared.
+
+/// Port I/O proxy that delegates to the canonical AcpiPm instance.
+struct AcpiPmProxy(*mut crate::devices::acpi::AcpiPm);
+unsafe impl Send for AcpiPmProxy {}
+
+impl crate::io::IoHandler for AcpiPmProxy {
+    fn read(&mut self, port: u16, size: u8) -> crate::error::Result<u32> {
+        unsafe { &mut *self.0 }.read(port, size)
+    }
+    fn write(&mut self, port: u16, size: u8, val: u32) -> crate::error::Result<()> {
+        unsafe { &mut *self.0 }.write(port, size, val)
+    }
 }
 
 // ── Proxy wrappers for VGA device ──

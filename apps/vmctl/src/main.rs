@@ -192,6 +192,12 @@ fn main() {
     if args.vram_mb > 0 {
         setup::set_vram_mb(handle, args.vram_mb);
     }
+    // Set UEFI boot flag BEFORE device setup so setup_vga_lfb_mapping() skips
+    // the VGA LFB KVM slot at 0xE0000000 — OVMF relocates PCIEXBAR there.
+    let is_uefi = args.bios == "uefi";
+    if is_uefi {
+        corevm_set_uefi_boot(handle);
+    }
     corevm_setup_standard_devices(handle);
     if args.hpet {
         corevm_setup_hpet(handle);
@@ -281,7 +287,6 @@ fn main() {
     // Load firmware — use vmmanager asset paths as extra search dirs
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let extra_paths = vec![manifest_dir.join("../vmmanager/assets/bios")];
-    let is_uefi = args.bios == "uefi";
     if is_uefi {
         let vars_path = std::path::PathBuf::from("/tmp/corevm_ovmf_debug.fd");
         if let Err(e) = setup::load_ovmf(handle, &extra_paths, &vars_path) {
