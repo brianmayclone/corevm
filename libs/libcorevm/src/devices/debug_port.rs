@@ -53,9 +53,17 @@ impl IoHandler for DebugPort {
     /// Write a byte to the debug port.
     ///
     /// Appends the low byte of `val` to the output buffer for later
-    /// retrieval by the host.
+    /// retrieval by the host. Also writes to stderr for immediate visibility.
     fn write(&mut self, _port: u16, _size: u8, val: u32) -> Result<()> {
-        self.output.push(val as u8);
+        let ch = val as u8;
+        self.output.push(ch);
+        // Immediate debug output for UEFI/BIOS debugging
+        #[cfg(feature = "std")]
+        {
+            use std::io::Write;
+            let _ = std::io::stderr().write_all(&[ch]);
+            if ch == b'\n' { let _ = std::io::stderr().flush(); }
+        }
         Ok(())
     }
 }

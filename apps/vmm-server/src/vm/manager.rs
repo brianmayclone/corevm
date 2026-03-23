@@ -129,14 +129,8 @@ pub fn start_vm(config: &VmConfig, bios_paths: &[std::path::PathBuf]) -> Result<
         corevm_setup_virtio_input(handle);
     }
 
-    // ACPI tables (AFTER all PCI devices)
-    if is_windows {
-        corevm_setup_acpi_tables_with_hpet(handle);
-    } else {
-        corevm_setup_acpi_tables(handle);
-    }
-
-    // Load firmware
+    // Load firmware BEFORE ACPI tables — load_ovmf() sets vm.uefi_boot which
+    // controls PM base address (0x600 vs 0xB000) and MCFG table generation.
     let bios_paths_str: Vec<&std::path::Path> = bios_paths.iter().map(|p| p.as_path()).collect();
     match config.bios_type {
         BiosType::SeaBios => setup::load_seabios(handle, bios_paths)?,
@@ -145,6 +139,13 @@ pub fn start_vm(config: &VmConfig, bios_paths: &[std::path::PathBuf]) -> Result<
             let vars_path = std::env::temp_dir().join(format!("{}_ovmf.fd", config.uuid));
             setup::load_ovmf(handle, bios_paths, &vars_path)?;
         }
+    }
+
+    // ACPI tables (AFTER all PCI devices AND firmware load)
+    if is_windows {
+        corevm_setup_acpi_tables_with_hpet(handle);
+    } else {
+        corevm_setup_acpi_tables(handle);
     }
 
     // Attach ISO (port 1 = CDROM)

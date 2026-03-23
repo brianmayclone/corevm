@@ -225,16 +225,8 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
         // entry.diag_log.log(DiagCategory::Info, "VirtIO Input (keyboard + tablet) enabled".into());
     }
 
-    // ACPI tables — MUST be generated AFTER all PCI devices are set up,
-    // because libcorevm auto-detects which devices are present for _PRT generation.
-    let acpi_rc = if config.guest_os.is_windows() {
-        corevm_setup_acpi_tables_with_hpet(handle)
-    } else {
-        corevm_setup_acpi_tables(handle)
-    };
-    entry.diag_log.log(DiagCategory::Info, format!("ACPI tables setup: rc={} (hpet={})", acpi_rc, config.guest_os.is_windows()));
-
-    // Load firmware (BIOS or UEFI)
+    // Load firmware BEFORE ACPI tables — load_ovmf() sets vm.uefi_boot which
+    // controls PM base address (0x600 vs 0xB000) and MCFG table generation.
     let extra_bios_paths = platform::bios_search_paths();
     match config.bios_type {
         BiosType::SeaBios => setup::load_seabios(handle, &extra_bios_paths)?,
@@ -255,6 +247,16 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
             setup::load_ovmf(handle, &extra_bios_paths, &ovmf_path)?;
         }
     }
+
+    // ACPI tables — MUST be generated AFTER all PCI devices AND firmware load,
+    // because libcorevm auto-detects which devices are present for _PRT generation,
+    // and vm.uefi_boot must be set for correct PM base and MCFG table.
+    let acpi_rc = if config.guest_os.is_windows() {
+        corevm_setup_acpi_tables_with_hpet(handle)
+    } else {
+        corevm_setup_acpi_tables(handle)
+    };
+    entry.diag_log.log(DiagCategory::Info, format!("ACPI tables setup: rc={} (hpet={})", acpi_rc, config.guest_os.is_windows()));
 
     // Attach ISO — always on AHCI (port 1) for SeaBIOS boot.
     // For Windows guests, also attach on IDE so Windows Setup can use its

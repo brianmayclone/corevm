@@ -41,6 +41,8 @@ pub mod ac97;
 pub mod uhci;
 pub mod chipset;
 pub mod q35_mch;
+pub mod dma;
+pub mod smbus;
 pub mod gpu;
 pub mod nic;
 pub mod virtio_gpu;

@@ -84,7 +84,8 @@ fn write_gas_io(buf: &mut Vec<u8>, offset: usize, addr: u64, bit_width: u8) {
 }
 
 /// Build FADT revision 3 (ACPI 2.0), 244 bytes.
-fn build_fadt() -> Vec<u8> {
+/// `pm_base` is the ACPI PM I/O base: 0xB000 for SeaBIOS, 0x600 for OVMF/ICH9.
+fn build_fadt(pm_base: u32) -> Vec<u8> {
     let mut t = vec![0u8; 244];
     write_acpi_header(&mut t, 0, b"FACP", 244, 3);
     // [36] FIRMWARE_CTRL (u32), patched by loader
@@ -93,13 +94,13 @@ fn build_fadt() -> Vec<u8> {
     // SCI_INT = 9
     write_u16(&mut t, 46, 9);
     // PM1a_EVT_BLK
-    write_u32(&mut t, 56, 0xB000);
+    write_u32(&mut t, 56, pm_base);
     // PM1a_CNT_BLK
-    write_u32(&mut t, 64, 0xB004);
+    write_u32(&mut t, 64, pm_base + 4);
     // PM_TMR_BLK
-    write_u32(&mut t, 76, 0xB008);
+    write_u32(&mut t, 76, pm_base + 8);
     // GPE0_BLK
-    write_u32(&mut t, 80, 0xB020);
+    write_u32(&mut t, 80, pm_base + 0x20);
     // PM1_EVT_LEN
     t[88] = 4;
     // PM1_CNT_LEN
@@ -128,13 +129,13 @@ fn build_fadt() -> Vec<u8> {
 
     // Extended GAS fields for PM registers
     // X_PM1a_EVT_BLK (offset 148, 12 bytes)
-    write_gas_io(&mut t, 148, 0xB000, 32);
+    write_gas_io(&mut t, 148, pm_base as u64, 32);
     // X_PM1a_CNT_BLK (offset 172, 12 bytes)
-    write_gas_io(&mut t, 172, 0xB004, 16);
+    write_gas_io(&mut t, 172, (pm_base + 4) as u64, 16);
     // X_PM_TMR_BLK (offset 208, 12 bytes)
-    write_gas_io(&mut t, 208, 0xB008, 32);
+    write_gas_io(&mut t, 208, (pm_base + 8) as u64, 32);
     // X_GPE0_BLK (offset 220, 12 bytes)
-    write_gas_io(&mut t, 220, 0xB020, 32);
+    write_gas_io(&mut t, 220, (pm_base + 0x20) as u64, 32);
 
     t
 }
@@ -143,6 +144,28 @@ fn build_facs() -> Vec<u8> {
     let mut t = vec![0u8; 64];
     t[0..4].copy_from_slice(b"FACS");
     write_u32(&mut t, 4, 64);
+    t
+}
+
+/// Build MCFG table for PCI MMCONFIG (PCIEXBAR) discovery.
+///
+/// OVMF uses the MCFG table to find the PCI MMCONFIG base address.
+/// Without it, OVMF falls back to probing the MCH PCIEXBAR register,
+/// but an explicit MCFG is more reliable and matches QEMU behavior.
+fn build_mcfg(mmconfig_base: u64) -> Vec<u8> {
+    // MCFG: 36-byte header + 8-byte reserved + 16-byte allocation entry = 60 bytes
+    let len: u32 = 60;
+    let mut t = vec![0u8; len as usize];
+    write_acpi_header(&mut t, 0, b"MCFG", len, 1);
+    // [36..44] reserved (8 bytes, already zero)
+    // Allocation structure (16 bytes at offset 44):
+    // [44..52] Base Address of enhanced configuration mechanism (u64)
+    write_u64(&mut t, 44, mmconfig_base);
+    // [52..54] PCI Segment Group Number (u16) = 0
+    // [54] Start Bus Number = 0
+    // [55] End Bus Number = 255
+    t[55] = 0xFF;
+    // [56..60] reserved (already zero)
     t
 }
 
@@ -803,6 +826,11 @@ pub struct AcpiDeviceConfig {
     pub slots: crate::devices::chipset::PciSlotMap,
     /// IRQ assignments (from ChipsetConfig).
     pub irqs: crate::devices::chipset::IrqMap,
+    /// ACPI PM I/O base address. SeaBIOS uses 0xB000, OVMF/ICH9 uses 0x600.
+    pub pm_base: u32,
+    /// PCI MMCONFIG (PCIEXBAR) base address for MCFG table generation.
+    /// Set to non-zero to include an MCFG table (needed for UEFI).
+    pub pci_mmconfig_base: u64,
 }
 
 impl Default for AcpiDeviceConfig {
@@ -819,6 +847,8 @@ impl Default for AcpiDeviceConfig {
             pci_mmio_end: cs.mmio.pci_mmio_end,
             slots: cs.slots,
             irqs: cs.irqs,
+            pm_base: 0xB000,       // SeaBIOS default
+            pci_mmconfig_base: 0,   // no MCFG by default
         }
     }
 }
@@ -853,15 +883,21 @@ fn generate_acpi_tables_full(enable_hpet: bool, num_cpus: u32, devices: &AcpiDev
 
     let mut rsdp = build_rsdp();
 
-    let num_tables: u32 = if enable_hpet { 3 } else { 2 };
+    let enable_mcfg = devices.pci_mmconfig_base != 0;
+
+    // Count: FADT + MADT = 2, optionally +HPET, +MCFG
+    let num_tables: u32 = 2
+        + if enable_hpet { 1 } else { 0 }
+        + if enable_mcfg { 1 } else { 0 };
+
     let rsdt = build_rsdt(num_tables);
     let xsdt = build_xsdt(num_tables);
-    let fadt = build_fadt();
+    let fadt = build_fadt(devices.pm_base);
     let facs = build_facs();
     let dsdt = build_dsdt_with_cpus(num_cpus, devices, devices.pci_mmio_start, devices.pci_mmio_end);
     let madt = build_madt_with_cpus(num_cpus);
 
-    // Layout: RSDT | XSDT | FADT | FACS | DSDT | MADT [| HPET]
+    // Layout: RSDT | XSDT | FADT | FACS | DSDT | MADT [| HPET] [| MCFG]
     let rsdt_off: u32 = 0;
     let rsdt_len = rsdt.len() as u32;
     let xsdt_off = rsdt_len;
@@ -891,21 +927,50 @@ fn generate_acpi_tables_full(enable_hpet: bool, num_cpus: u32, devices: &AcpiDev
     write_u64(&mut tables, (xsdt_off + 36) as usize, fadt_off as u64);
     write_u64(&mut tables, (xsdt_off + 44) as usize, madt_off as u64);
 
+    // Track the next free RSDT/XSDT slot index (0=FADT, 1=MADT, 2+...)
+    let mut rsdt_slot: u32 = 2;
+    let mut xsdt_slot: u32 = 2;
+    let mut tail_off = madt_off + madt_len;
+
     let hpet_off;
     let hpet_len;
     if enable_hpet {
         let hpet = build_hpet_table();
-        hpet_off = madt_off + madt_len;
+        hpet_off = tail_off;
         hpet_len = hpet.len() as u32;
         tables.extend_from_slice(&hpet);
-        // RSDT -> HPET (u32 at offset 44)
-        write_u32(&mut tables, (rsdt_off + 44) as usize, hpet_off);
-        // XSDT -> HPET (u64 at offset 52)
-        write_u64(&mut tables, (xsdt_off + 52) as usize, hpet_off as u64);
+        // RSDT slot
+        write_u32(&mut tables, (rsdt_off + 36 + rsdt_slot * 4) as usize, hpet_off);
+        // XSDT slot
+        write_u64(&mut tables, (xsdt_off + 36 + xsdt_slot * 8) as usize, hpet_off as u64);
+        rsdt_slot += 1;
+        xsdt_slot += 1;
+        tail_off += hpet_len;
     } else {
         hpet_off = 0;
         hpet_len = 0;
     }
+
+    let mcfg_off;
+    let mcfg_len;
+    if enable_mcfg {
+        let mcfg = build_mcfg(devices.pci_mmconfig_base);
+        mcfg_off = tail_off;
+        mcfg_len = mcfg.len() as u32;
+        tables.extend_from_slice(&mcfg);
+        // RSDT slot
+        write_u32(&mut tables, (rsdt_off + 36 + rsdt_slot * 4) as usize, mcfg_off);
+        // XSDT slot
+        write_u64(&mut tables, (xsdt_off + 36 + xsdt_slot * 8) as usize, mcfg_off as u64);
+        rsdt_slot += 1;
+        xsdt_slot += 1;
+        tail_off += mcfg_len;
+    } else {
+        mcfg_off = 0;
+        mcfg_len = 0;
+    }
+    // Suppress unused-variable warnings
+    let _ = (rsdt_slot, xsdt_slot, tail_off);
 
     // FADT -> FACS (u32 at offset 36)
     write_u32(&mut tables, (fadt_off + 36) as usize, facs_off);
@@ -937,18 +1002,44 @@ fn generate_acpi_tables_full(enable_hpet: bool, num_cpus: u32, devices: &AcpiDev
     emit(loader_add_checksum(&tables_file, fadt_off + 9, fadt_off, 244));
 
     // 4. RSDT pointers + checksum
-    emit(loader_add_pointer(&tables_file, &tables_file, rsdt_off + 36, 4));
-    emit(loader_add_pointer(&tables_file, &tables_file, rsdt_off + 40, 4));
-    if enable_hpet {
-        emit(loader_add_pointer(&tables_file, &tables_file, rsdt_off + 44, 4));
+    {
+        let mut slot: u32 = 0;
+        // FADT pointer (slot 0)
+        emit(loader_add_pointer(&tables_file, &tables_file, rsdt_off + 36 + slot * 4, 4));
+        slot += 1;
+        // MADT pointer (slot 1)
+        emit(loader_add_pointer(&tables_file, &tables_file, rsdt_off + 36 + slot * 4, 4));
+        slot += 1;
+        if enable_hpet {
+            emit(loader_add_pointer(&tables_file, &tables_file, rsdt_off + 36 + slot * 4, 4));
+            slot += 1;
+        }
+        if enable_mcfg {
+            emit(loader_add_pointer(&tables_file, &tables_file, rsdt_off + 36 + slot * 4, 4));
+            slot += 1;
+        }
+        let _ = slot;
     }
     emit(loader_add_checksum(&tables_file, rsdt_off + 9, rsdt_off, rsdt_len));
 
     // 5. XSDT pointers + checksum
-    emit(loader_add_pointer(&tables_file, &tables_file, xsdt_off + 36, 8));
-    emit(loader_add_pointer(&tables_file, &tables_file, xsdt_off + 44, 8));
-    if enable_hpet {
-        emit(loader_add_pointer(&tables_file, &tables_file, xsdt_off + 52, 8));
+    {
+        let mut slot: u32 = 0;
+        // FADT pointer (slot 0)
+        emit(loader_add_pointer(&tables_file, &tables_file, xsdt_off + 36 + slot * 8, 8));
+        slot += 1;
+        // MADT pointer (slot 1)
+        emit(loader_add_pointer(&tables_file, &tables_file, xsdt_off + 36 + slot * 8, 8));
+        slot += 1;
+        if enable_hpet {
+            emit(loader_add_pointer(&tables_file, &tables_file, xsdt_off + 36 + slot * 8, 8));
+            slot += 1;
+        }
+        if enable_mcfg {
+            emit(loader_add_pointer(&tables_file, &tables_file, xsdt_off + 36 + slot * 8, 8));
+            slot += 1;
+        }
+        let _ = slot;
     }
     emit(loader_add_checksum(&tables_file, xsdt_off + 9, xsdt_off, xsdt_len));
 
@@ -958,6 +1049,9 @@ fn generate_acpi_tables_full(enable_hpet: bool, num_cpus: u32, devices: &AcpiDev
     emit(loader_add_checksum(&tables_file, madt_off + 9, madt_off, madt_len));
     if enable_hpet {
         emit(loader_add_checksum(&tables_file, hpet_off + 9, hpet_off, hpet_len));
+    }
+    if enable_mcfg {
+        emit(loader_add_checksum(&tables_file, mcfg_off + 9, mcfg_off, mcfg_len));
     }
 
     (rsdp, tables, loader)

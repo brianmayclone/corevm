@@ -1032,6 +1032,30 @@ impl KvmBackend {
                     edx = 0; // fixed per-vCPU in create_vcpu
                 }
 
+                // Leaf 0x1F (V2 Extended Topology Enumeration, Intel 12th gen+).
+                // Same structure as leaf 0xB but with additional module/die levels.
+                // Must match VM topology — pass through host values causes OVMF
+                // MpInitLib to expect 32+ APs and spin-wait forever.
+                if e.function == 0x1F {
+                    let subleaf = e.index;
+                    if subleaf == 0 {
+                        eax = 0;
+                        ebx = 1;
+                        ecx = (1 << 8) | 0; // SMT level
+                    } else if subleaf == 1 {
+                        let mut shift = 0u32;
+                        while (1u32 << shift) < max_cpus { shift += 1; }
+                        eax = shift;
+                        ebx = max_cpus;
+                        ecx = (2 << 8) | 1; // Core level
+                    } else {
+                        eax = 0;
+                        ebx = 0;
+                        ecx = subleaf; // Invalid = terminate enumeration
+                    }
+                    edx = 0;
+                }
+
                 // Leaf 0x80000007 (Advanced Power Management):
                 // Keep only Invariant TSC (EDX bit 8). Clear hardware P-state
                 // bits that don't apply to a VM (CPB, EffFreqRO, etc.).

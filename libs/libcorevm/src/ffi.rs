@@ -2031,6 +2031,10 @@ pub extern "C" fn corevm_setup_acpi_tables(handle: u64) -> i32 {
         pci_mmio_end: vm.chipset.mmio.pci_mmio_end,
         slots: vm.chipset.slots,
         irqs: vm.chipset.irqs,
+        // UEFI/OVMF uses ICH9 PMBASE at 0x600; SeaBIOS uses 0xB000
+        pm_base: if vm.uefi_boot { 0x600 } else { 0xB000 },
+        // Include MCFG table for UEFI so OVMF discovers PCI MMCONFIG
+        pci_mmconfig_base: if vm.uefi_boot { vm.chipset.mmio.pci_mmconfig_base } else { 0 },
     };
     let (rsdp, tables, loader) = crate::devices::acpi_tables::generate_acpi_tables_configured(false, num_cpus, &devices);
 
@@ -2082,6 +2086,8 @@ pub extern "C" fn corevm_setup_acpi_tables_with_hpet(handle: u64) -> i32 {
         pci_mmio_end: vm.chipset.mmio.pci_mmio_end,
         slots: vm.chipset.slots,
         irqs: vm.chipset.irqs,
+        pm_base: if vm.uefi_boot { 0x600 } else { 0xB000 },
+        pci_mmconfig_base: if vm.uefi_boot { vm.chipset.mmio.pci_mmconfig_base } else { 0 },
     };
     let (rsdp, tables, loader) = crate::devices::acpi_tables::generate_acpi_tables_configured(true, num_cpus, &devices);
     fw_cfg.add_file("etc/acpi/rsdp", rsdp);

@@ -397,6 +397,21 @@ impl Vm {
             pci_bus.add_device(bridge);
         }
 
+        // ICH9 SMBus controller (00:1F.3) — OVMF's PCI enumeration expects this.
+        // Without it, the SMBus DXE driver may misbehave during platform init.
+        // I/O BAR at 0x0CC0 (32 bytes), matching the SmBus I/O stub registered above.
+        if cs.chipset_type == crate::devices::chipset::ChipsetType::Q35 {
+            let mut smb = PciDevice::new(0x8086, 0x2930, 0x0C, 0x05, 0x00); // SMBus class
+            smb.device = cs.slots.isa_lpc_bridge; // device 31 (same as LPC)
+            smb.function = 3;
+            smb.config_space[0x08] = 0x02; // revision
+            // I/O BAR at offset 0x20: base = 0x0CC0, size = 32
+            smb.set_bar(4, 0x0CC0, 0x20, false); // I/O space BAR
+            // Host Configuration register (0x40): HST_EN bit 0 = enabled
+            smb.config_space[0x40] = 0x01;
+            pci_bus.add_device(smb);
+        }
+
         // VGA (QEMU stdvga) — SeaBIOS needs a PCI VGA for option ROM.
         // If VirtIO GPU is later set up, setup_virtio_gpu() removes this device.
         {
@@ -445,6 +460,23 @@ impl Vm {
         {
             self.memory.add_mmio(0xFEC0_0000, 0x1000, Box::new(IoApic::new()));
             self.memory.add_mmio(0xFEE0_0000, 0x1000, Box::new(Lapic::new()));
+        }
+
+        // ISA DMA controller stubs — OVMF polls port 0x0008 (DMA1 status)
+        // during early init. Without a handler it returns 0xFF (bus float)
+        // which OVMF interprets as "channels busy" and spins forever.
+        {
+            use crate::devices::dma::{Dma1, Dma2, DmaPage};
+            self.io.register(0x00, 0x10, Box::new(Dma1));     // DMA1: 0x00-0x0F
+            self.io.register(0xC0, 0x20, Box::new(Dma2));     // DMA2: 0xC0-0xDF
+            self.io.register(0x80, 0x10, Box::new(DmaPage));   // Page regs: 0x80-0x8F
+        }
+
+        // ICH9 SMBus stub — OVMF probes the SMBus host controller registers
+        // in the 0x0CC0-0x0CFF range during platform init.
+        {
+            use crate::devices::smbus::SmBus;
+            self.io.register(0x0CC0, 64, Box::new(SmBus::new()));
         }
 
         // Register PIC pair covering both master (0x20-0x21) and slave (0xA0-0xA1).

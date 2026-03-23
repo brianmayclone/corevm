@@ -196,9 +196,6 @@ fn main() {
     if args.hpet {
         corevm_setup_hpet(handle);
         eprintln!("[vmctl] HPET enabled");
-        corevm_setup_acpi_tables_with_hpet(handle);
-    } else {
-        corevm_setup_acpi_tables(handle);
     }
     corevm_setup_ahci(handle, 6);
 
@@ -296,6 +293,14 @@ fn main() {
             eprintln!("[vmctl] ERROR: {}", e);
             std::process::exit(1);
         }
+    }
+
+    // ACPI tables — AFTER firmware load (vm.uefi_boot must be set for correct
+    // PM base and MCFG table) and AFTER all PCI devices are set up.
+    if args.hpet {
+        corevm_setup_acpi_tables_with_hpet(handle);
+    } else {
+        corevm_setup_acpi_tables(handle);
     }
 
     // Direct kernel boot via fw_cfg (like QEMU -kernel/-initrd/-append)
