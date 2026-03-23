@@ -305,6 +305,8 @@ pub(crate) fn bsp_loop(
     let mut last_diag = Instant::now();
     let mut last_stuck_rip: u64 = 0;
     let mut stuck_count: u32 = 0;
+    let mut bsp_exit_counts = [0u64; 16];
+    let mut last_bsp_hb = Instant::now();
 
     loop {
         bsp_iterations += 1;
@@ -383,6 +385,30 @@ pub(crate) fn bsp_loop(
         consecutive_errors = 0;
 
         // ── Dispatch exit ───────────────────────────────────────────────
+
+        let reason_idx = exit.reason as usize;
+        if reason_idx < bsp_exit_counts.len() {
+            bsp_exit_counts[reason_idx] += 1;
+        }
+
+        // Track last MMIO address for diagnostics
+        let last_mmio_addr = if exit.reason == 2 || exit.reason == 3 { exit.addr } else { 0 };
+
+        // BSP heartbeat every 5 seconds — exit reason distribution + vCPU state
+        if last_bsp_hb.elapsed().as_secs() >= 5 {
+            let mut regs = crate::backend::types::VcpuRegs::default();
+            corevm_get_vcpu_regs(handle, 0, &mut regs);
+            eprintln!("[bsp-hb] {}s iters={} halts={} exits=[io:{} mmio:{} hlt:{} cancel:{} irqwin:{}] rip=0x{:X} rflags=0x{:X} mmio_addr=0x{:X}",
+                start.elapsed().as_secs(), bsp_iterations, bsp_halts,
+                bsp_exit_counts[0] + bsp_exit_counts[1],
+                bsp_exit_counts[2] + bsp_exit_counts[3],
+                bsp_exit_counts[7],
+                bsp_exit_counts[13],
+                bsp_exit_counts[8],
+                regs.rip, regs.rflags, last_mmio_addr,
+            );
+            last_bsp_hb = Instant::now();
+        }
 
         let action = dispatch_exit(handle, 0, &exit);
 

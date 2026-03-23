@@ -131,8 +131,16 @@ impl Hpet {
             return false;
         }
 
-        let counter = self.counter_value();
-        let cmp = self.timer0_comparator;
+        // When Tn_32MODE_CNF (bit 8) is set, the timer operates in 32-bit
+        // mode: comparisons use only the low 32 bits of both the counter and
+        // comparator. Without this masking, the 64-bit counter exceeds 2^32
+        // after ~300 seconds (at 14.318 MHz) and the comparator match breaks
+        // — causing either a permanent IRQ storm or missed ticks, which
+        // freezes Windows at exactly 5 minutes uptime.
+        let is_32bit = self.timer0_config & (1 << 8) != 0;
+        let counter_full = self.counter_value();
+        let counter = if is_32bit { counter_full & 0xFFFF_FFFF } else { counter_full };
+        let cmp = if is_32bit { self.timer0_comparator & 0xFFFF_FFFF } else { self.timer0_comparator };
 
         // Check if counter has passed comparator
         if cmp == 0 || counter < cmp {
@@ -145,7 +153,8 @@ impl Hpet {
             // Catch up: advance comparator past current counter
             let elapsed = counter - cmp;
             let periods = (elapsed / self.timer0_period) + 1;
-            self.timer0_comparator = cmp.wrapping_add(self.timer0_period * periods);
+            let new_cmp = cmp.wrapping_add(self.timer0_period * periods);
+            self.timer0_comparator = if is_32bit { new_cmp & 0xFFFF_FFFF } else { new_cmp };
         } else {
             // One-shot: clear comparator to prevent re-firing
             self.timer0_comparator = 0;
@@ -323,18 +332,23 @@ impl MmioHandler for Hpet {
             }
             // Timer 0 Comparator Value
             0x108 => {
+                let is_32bit = self.timer0_config & (1 << 8) != 0;
                 let mask = match size {
                     1 => 0xFF_u64,
                     2 => 0xFFFF,
                     4 => 0xFFFF_FFFF,
                     _ => u64::MAX,
                 } << shift;
-                let new_cmp = (self.timer0_comparator & !mask) | ((val << shift) & mask);
+                let mut new_cmp = (self.timer0_comparator & !mask) | ((val << shift) & mask);
+                // In 32-bit mode, only the lower 32 bits of the comparator
+                // are significant. Clear upper bits to prevent stale values
+                // from earlier 64-bit writes causing comparison mismatches.
+                if is_32bit { new_cmp &= 0xFFFF_FFFF; }
                 self.timer0_comparator = new_cmp;
 
                 // If periodic mode, store as period too
                 if self.timer0_config & (1 << 3) != 0 {
-                    self.timer0_period = new_cmp;
+                    self.timer0_period = if is_32bit { new_cmp & 0xFFFF_FFFF } else { new_cmp };
                 }
             }
             _ => {}

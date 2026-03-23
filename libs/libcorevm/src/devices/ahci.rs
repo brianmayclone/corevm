@@ -461,6 +461,17 @@ struct AhciPort {
     /// process_commands skips these to prevent double-processing.
     /// CI stays SET (guest sees command pending); cleared by complete_io.
     deferred_ci: u32,
+    /// Number of DHRS completions not yet acknowledged by the guest.
+    ///
+    /// The PORT_IS.DHRS bit is a single flag shared by all command completions.
+    /// When the guest ISR does a read-modify-write of PORT_IS (two separate
+    /// MMIO exits), a concurrent complete_io can set DHRS between the read
+    /// and write — and the guest's write-to-clear wipes the new completion's
+    /// interrupt. This counter tracks unacknowledged completions: each
+    /// complete_io / inline completion increments it; each PORT_IS write that
+    /// clears DHRS decrements it. If the counter is still > 0 after decrement,
+    /// DHRS is immediately re-asserted so the guest sees the new completion.
+    pending_dhrs: u32,
     drive: AhciDrive,
 }
 
@@ -471,6 +482,7 @@ impl AhciPort {
             tfd: TFD_STS_DRDY | TFD_STS_DSC, sig: 0xFFFF_FFFF,
             ssts: 0, sctl: 0, serr: 0, sact: 0, ci: 0, sntf: 0, fbs: 0,
             deferred_ci: 0,
+            pending_dhrs: 0,
             drive: AhciDrive::new(),
         }
     }
@@ -649,6 +661,7 @@ impl Ahci {
 
         // Post D2H FIS and set IS flag
         port.is |= PORT_IS_DHRS;
+        port.pending_dhrs += 1;
         if port.fb != 0 && port.cmd & PORT_CMD_FRE != 0 {
             let mut d2h = [0u8; 20];
             d2h[0] = FIS_TYPE_REG_D2H;
@@ -956,6 +969,7 @@ impl Ahci {
                 dma.write_bytes(port.fb + 0x40, &d2h);
             }
 
+            port.pending_dhrs += 1;
             port.ci &= !(1 << slot);
             port.sact &= !(1 << slot);
             self.diag_inline_cmds += 1;
@@ -1020,7 +1034,20 @@ impl Ahci {
             PORT_CLBU => { let lo = self.ports[idx].clb & 0xFFFF_FFFF; self.ports[idx].clb = (val as u64) << 32 | lo; }
             PORT_FB => { let hi = self.ports[idx].fb & !0xFFFF_FFFF; self.ports[idx].fb = hi | (val as u64 & !0xFF); }
             PORT_FBU => { let lo = self.ports[idx].fb & 0xFFFF_FFFF; self.ports[idx].fb = (val as u64) << 32 | lo; }
-            PORT_IS => { self.ports[idx].is &= !val; if self.ports[idx].is == 0 { self.is &= !(1 << idx); } }
+            PORT_IS => {
+                self.ports[idx].is &= !val;
+                // If guest clears DHRS, decrement the pending counter.
+                // If completions arrived between the guest's read and write
+                // of PORT_IS, pending_dhrs will still be > 0 — re-assert DHRS
+                // so the guest sees the new completion on next ISR entry.
+                if val & PORT_IS_DHRS != 0 && self.ports[idx].pending_dhrs > 0 {
+                    self.ports[idx].pending_dhrs -= 1;
+                    if self.ports[idx].pending_dhrs > 0 {
+                        self.ports[idx].is |= PORT_IS_DHRS;
+                    }
+                }
+                if self.ports[idx].is == 0 { self.is &= !(1 << idx); }
+            }
             PORT_IE => { self.ports[idx].ie = val; }
             PORT_CMD => {
                 let old = self.ports[idx].cmd;
@@ -1111,6 +1138,7 @@ impl MmioHandler for Ahci {
                 if v & GHC_HR != 0 {
                     for p in self.ports.iter_mut() {
                         p.is = 0; p.ie = 0; p.cmd = 0; p.ci = 0; p.sact = 0; p.serr = 0;
+                        p.pending_dhrs = 0;
                         p.update_presence();
                     }
                     self.is = 0; self.ghc = GHC_AE; self.irq_pending = false;

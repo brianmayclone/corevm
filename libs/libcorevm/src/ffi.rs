@@ -797,7 +797,7 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
             if !vm.ahci_ptr.is_null() && ahci_try_lock() {
                 let ahci = unsafe { &mut *vm.ahci_ptr };
                 // Auto-recover stuck IRQ: is!=0 but irq_pending=false
-                ahci.fix_stuck_irq();
+                let was_stuck = ahci.fix_stuck_irq();
                 let want_asserted = ahci.irq_raised();
 
                 #[cfg(feature = "linux")]
@@ -810,12 +810,14 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         }
                     } else {
                         // Legacy level-triggered IRQ 11.
-                        // Assert once; de-assert when guest ACKs (irq_pending=false).
-                        // fix_stuck_irq() above handles the case where irq_pending
-                        // was prematurely cleared while is!=0.
                         if want_asserted && !vm.ahci_irq_asserted.load(Ordering::Relaxed) {
                             let _ = vm.backend.set_irq_line(11, true);
                             vm.ahci_irq_asserted.store(true, Ordering::Relaxed);
+                            injected += 1;
+                        } else if want_asserted && was_stuck && vm.ahci_irq_asserted.load(Ordering::Relaxed) {
+                            // Toggle low→high to clear IOAPIC Remote IRR
+                            let _ = vm.backend.set_irq_line(11, false);
+                            let _ = vm.backend.set_irq_line(11, true);
                             injected += 1;
                         } else if !want_asserted && vm.ahci_irq_asserted.load(Ordering::Relaxed) {
                             vm.ahci_irq_asserted.store(false, Ordering::Relaxed);
@@ -1288,7 +1290,7 @@ pub extern "C" fn corevm_ahci_poll_irq(handle: u64) {
 
     let ahci = unsafe { &mut *vm.ahci_ptr };
     // Auto-recover stuck IRQ: is!=0 but irq_pending=false
-    ahci.fix_stuck_irq();
+    let was_stuck = ahci.fix_stuck_irq();
     let want_asserted = ahci.irq_raised();
 
     #[cfg(feature = "linux")]
@@ -1325,12 +1327,18 @@ pub extern "C" fn corevm_ahci_poll_irq(handle: u64) {
             }
         } else {
             // Legacy level-triggered mode (MSI not enabled by guest).
-            // Assert once; de-assert when guest ACKs. fix_stuck_irq()
-            // above recovers from is!=0 && irq_pending==false.
             if want_asserted && !vm.ahci_irq_asserted.load(Ordering::Relaxed) {
                 ahci.diag_irqs_delivered += 1;
                 let _ = vm.backend.set_irq_line(11, true);
                 vm.ahci_irq_asserted.store(true, Ordering::Relaxed);
+            } else if want_asserted && was_stuck && vm.ahci_irq_asserted.load(Ordering::Relaxed) {
+                // IRQ line is already high but guest isn't responding.
+                // Toggle low→high to clear IOAPIC Remote IRR and force
+                // re-delivery. Without this, a stuck Remote IRR permanently
+                // prevents the guest from receiving the level-triggered IRQ.
+                ahci.diag_irqs_delivered += 1;
+                let _ = vm.backend.set_irq_line(11, false);
+                let _ = vm.backend.set_irq_line(11, true);
             } else if !want_asserted && vm.ahci_irq_asserted.load(Ordering::Relaxed) {
                 vm.ahci_irq_asserted.store(false, Ordering::Relaxed);
                 if !vm.e1000_irq_asserted.load(Ordering::Relaxed) && !vm.virtio_net_irq_asserted.load(Ordering::Relaxed) {
