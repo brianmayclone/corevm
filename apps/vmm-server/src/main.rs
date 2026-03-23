@@ -25,9 +25,12 @@ use state::AppState;
 #[tokio::main]
 async fn main() {
     // Parse CLI args
-    let config_path = std::env::args()
-        .skip_while(|a| a != "--config")
-        .nth(1)
+    let args: Vec<String> = std::env::args().collect();
+    let force_reset = args.iter().any(|a| a == "--force-reset");
+    let config_path = args.iter()
+        .position(|a| a == "--config")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
         .unwrap_or_else(|| "/etc/vmm/vmm-server.toml".into());
 
     // Load config
@@ -172,9 +175,24 @@ async fn main() {
         }
     }
 
+    // Handle --force-reset: remove cluster registration and start in standalone mode
+    let cluster_json_path = cfg.vms.config_dir.join("cluster.json");
+    if force_reset {
+        if cluster_json_path.exists() {
+            match std::fs::remove_file(&cluster_json_path) {
+                Ok(_) => tracing::warn!("--force-reset: removed cluster.json — node is now standalone"),
+                Err(e) => {
+                    tracing::error!("--force-reset: failed to remove cluster.json: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            tracing::info!("--force-reset: no cluster.json found — already standalone");
+        }
+    }
+
     // Load managed-mode config (if this node was previously registered with a cluster)
     let managed_config = {
-        let cluster_json_path = cfg.vms.config_dir.join("cluster.json");
         if cluster_json_path.exists() {
             match std::fs::read_to_string(&cluster_json_path) {
                 Ok(content) => {
