@@ -129,6 +129,46 @@ Theme=corevm
 ShowDelay=0
 PLYMOUTHCONF
 
+# Branding: os-release, issue, motd, hostname
+cat > "$ROOTFS_DIR/etc/os-release" <<'OSRELEASE'
+PRETTY_NAME="CoreVM Appliance 1.0"
+NAME="CoreVM"
+VERSION_ID="1.0"
+VERSION="1.0"
+ID=corevm
+ID_LIKE=debian
+HOME_URL="https://corevm.io"
+OSRELEASE
+
+cat > "$ROOTFS_DIR/etc/issue" <<'ISSUE'
+
+  ██████╗ ██████╗ ██████╗ ███████╗██╗   ██╗███╗   ███╗
+ ██╔════╝██╔═══██╗██╔══██╗██╔════╝██║   ██║████╗ ████║
+ ██║     ██║   ██║██████╔╝█████╗  ██║   ██║██╔████╔██║
+ ██║     ██║   ██║██╔══██╗██╔══╝  ╚██╗ ██╔╝██║╚██╔╝██║
+ ╚██████╗╚██████╔╝██║  ██║███████╗ ╚████╔╝ ██║ ╚═╝ ██║
+  ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝  ╚═══╝  ╚═╝     ╚═╝
+
+ CoreVM Appliance 1.0 — \n \l
+
+ISSUE
+
+cp "$ROOTFS_DIR/etc/issue" "$ROOTFS_DIR/etc/issue.net"
+
+cat > "$ROOTFS_DIR/etc/motd" <<'MOTD'
+
+  Welcome to CoreVM Appliance 1.0
+  Manage this appliance via the DCUI on tty1 or the web UI.
+
+MOTD
+
+echo "corevm" > "$ROOTFS_DIR/etc/hostname"
+cat > "$ROOTFS_DIR/etc/hosts" <<'HOSTS'
+127.0.0.1	localhost
+127.0.1.1	corevm
+::1		localhost ip6-localhost ip6-loopback
+HOSTS
+
 # Copy systemd service files
 mkdir -p "$ROOTFS_DIR/etc/systemd/system"
 tee "$ROOTFS_DIR/etc/systemd/system/vmm-dcui.service" > /dev/null <<'DCUI_SVC'
@@ -204,6 +244,31 @@ parted,e2fsprogs,dosfstools,tar,grub-pc,grub-efi-amd64-bin \
 
 # Ensure squashfs module is loaded in initramfs
 echo "squashfs" >> "$LIVE_DIR/etc/initramfs-tools/modules"
+
+# Branding for live environment
+cat > "$LIVE_DIR/etc/os-release" <<'OSRELEASE'
+PRETTY_NAME="CoreVM Appliance Installer"
+NAME="CoreVM"
+VERSION_ID="1.0"
+VERSION="1.0"
+ID=corevm
+ID_LIKE=debian
+OSRELEASE
+
+cat > "$LIVE_DIR/etc/issue" <<'ISSUE'
+
+  ██████╗ ██████╗ ██████╗ ███████╗██╗   ██╗███╗   ███╗
+ ██╔════╝██╔═══██╗██╔══██╗██╔════╝██║   ██║████╗ ████║
+ ██║     ██║   ██║██████╔╝█████╗  ██║   ██║██╔████╔██║
+ ██║     ██║   ██║██╔══██╗██╔══╝  ╚██╗ ██╔╝██║╚██╔╝██║
+ ╚██████╗╚██████╔╝██║  ██║███████╗ ╚████╔╝ ██║ ╚═╝ ██║
+  ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝  ╚═══╝  ╚═╝     ╚═╝
+
+ CoreVM Appliance Installer — \n \l
+
+ISSUE
+
+echo "corevm-installer" > "$LIVE_DIR/etc/hostname"
 
 # Set root password for debug access (auto-login on tty2+)
 chroot "$LIVE_DIR" bash -c 'echo "root:corevm" | chpasswd'
@@ -286,6 +351,9 @@ find_and_copy() {
 
 find_and_copy "isolinux.bin" "$ISO_STAGING/isolinux/"
 find_and_copy "ldlinux.c32" "$ISO_STAGING/isolinux/"
+find_and_copy "menu.c32" "$ISO_STAGING/isolinux/"
+find_and_copy "libcom32.c32" "$ISO_STAGING/isolinux/"
+find_and_copy "libutil.c32" "$ISO_STAGING/isolinux/"
 find_and_copy "isohdpfx.bin" "$ISO_STAGING/isolinux/"
 
 # Build EFI boot image
