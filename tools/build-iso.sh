@@ -180,11 +180,11 @@ tee "$ROOTFS_DIR/etc/systemd/system/vmm-boot-splash.service" > /dev/null <<'SPLA
 [Unit]
 Description=CoreVM Boot Splash
 DefaultDependencies=no
-After=systemd-vconsole-setup.service
-Before=vmm-dcui.service
+After=local-fs.target
+Conflicts=vmm-dcui.service
 
 [Service]
-Type=oneshot
+Type=simple
 ExecStart=/opt/vmm/boot-splash.sh vmm-dcui.service
 StandardInput=tty
 StandardOutput=tty
@@ -265,7 +265,8 @@ LIVE_DIR="$BUILD_DIR/live-root"
 debootstrap --variant=minbase --include=\
 linux-image-amd64,live-boot,live-boot-initramfs-tools,\
 initramfs-tools,systemd,systemd-sysv,udev,\
-parted,e2fsprogs,dosfstools,tar,openssl,grub-pc,grub-efi-amd64-bin \
+parted,e2fsprogs,dosfstools,tar,openssl,ncurses-base,\
+grub-pc,grub-efi-amd64-bin \
     bookworm "$LIVE_DIR" http://deb.debian.org/debian
 
 # Ensure squashfs module is loaded in initramfs
@@ -325,11 +326,11 @@ tee "$LIVE_DIR/etc/systemd/system/vmm-boot-splash.service" > /dev/null <<'LIVE_S
 [Unit]
 Description=CoreVM Boot Splash
 DefaultDependencies=no
-After=systemd-vconsole-setup.service
-Before=vmm-installer.service
+After=local-fs.target
+Conflicts=vmm-installer.service
 
 [Service]
-Type=oneshot
+Type=simple
 ExecStart=/opt/vmm/boot-splash.sh vmm-installer.service
 StandardInput=tty
 StandardOutput=tty

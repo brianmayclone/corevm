@@ -91,6 +91,7 @@ pub fn partition_disk(disk: &Path, efi: bool) -> Result<()> {
     let mut offset_mib: u64 = 1;
 
     if efi {
+        // EFI System Partition (256 MiB)
         let end = offset_mib + 256;
         run_cmd("parted", &[
             "-s", disk_str,
@@ -101,6 +102,19 @@ pub fn partition_disk(disk: &Path, efi: bool) -> Result<()> {
         .context("Failed to create EFI partition")?;
         run_cmd("parted", &["-s", disk_str, "set", "1", "esp", "on"])
             .context("Failed to set ESP flag")?;
+        offset_mib = end;
+    } else {
+        // BIOS Boot Partition (1 MiB, required for GPT + BIOS GRUB)
+        let end = offset_mib + 1;
+        run_cmd("parted", &[
+            "-s", disk_str,
+            "mkpart", "bios_boot", "",
+            &format!("{}MiB", offset_mib),
+            &format!("{}MiB", end),
+        ])
+        .context("Failed to create BIOS boot partition")?;
+        run_cmd("parted", &["-s", disk_str, "set", "1", "bios_grub", "on"])
+            .context("Failed to set bios_grub flag")?;
         offset_mib = end;
     }
 
@@ -153,48 +167,30 @@ pub fn partition_disk(disk: &Path, efi: bool) -> Result<()> {
 }
 
 pub fn format_partitions(disk: &Path, efi: bool) -> Result<()> {
+    // Layout: 1=EFI/bios_boot, 2=boot, 3=swap, 4=root, 5=data
     if efi {
-        // 1=EFI, 2=boot, 3=swap, 4=root, 5=data
         run_cmd("mkfs.vfat", &["-F32", &part_path(disk, 1)])
             .context("Failed to format EFI partition")?;
-        run_cmd("mkfs.ext4", &["-F", &part_path(disk, 2)])
-            .context("Failed to format boot partition")?;
-        run_cmd("mkswap", &[&part_path(disk, 3)]).context("Failed to create swap")?;
-        run_cmd("mkfs.ext4", &["-F", &part_path(disk, 4)])
-            .context("Failed to format root partition")?;
-        run_cmd("mkfs.ext4", &["-F", &part_path(disk, 5)])
-            .context("Failed to format data partition")?;
-    } else {
-        // 1=boot, 2=swap, 3=root, 4=data
-        run_cmd("mkfs.ext4", &["-F", &part_path(disk, 1)])
-            .context("Failed to format boot partition")?;
-        run_cmd("mkswap", &[&part_path(disk, 2)]).context("Failed to create swap")?;
-        run_cmd("mkfs.ext4", &["-F", &part_path(disk, 3)])
-            .context("Failed to format root partition")?;
-        run_cmd("mkfs.ext4", &["-F", &part_path(disk, 4)])
-            .context("Failed to format data partition")?;
     }
+    // Partition 1 (bios_boot) is not formatted when BIOS — it's raw
+    run_cmd("mkfs.ext4", &["-F", &part_path(disk, 2)])
+        .context("Failed to format boot partition")?;
+    run_cmd("mkswap", &[&part_path(disk, 3)]).context("Failed to create swap")?;
+    run_cmd("mkfs.ext4", &["-F", &part_path(disk, 4)])
+        .context("Failed to format root partition")?;
+    run_cmd("mkfs.ext4", &["-F", &part_path(disk, 5)])
+        .context("Failed to format data partition")?;
     Ok(())
 }
 
 pub fn mount_target(disk: &Path, target: &Path, efi: bool) -> Result<()> {
     fs::create_dir_all(target).context("Failed to create target directory")?;
 
-    let (root_part, boot_part, efi_part, data_part) = if efi {
-        (
-            part_path(disk, 4),
-            part_path(disk, 2),
-            Some(part_path(disk, 1)),
-            part_path(disk, 5),
-        )
-    } else {
-        (
-            part_path(disk, 3),
-            part_path(disk, 1),
-            None,
-            part_path(disk, 4),
-        )
-    };
+    // Layout: 1=EFI/bios_boot, 2=boot, 3=swap, 4=root, 5=data
+    let root_part = part_path(disk, 4);
+    let boot_part = part_path(disk, 2);
+    let efi_part = if efi { Some(part_path(disk, 1)) } else { None };
+    let data_part = part_path(disk, 5);
 
     let target_str = target.to_str().context("Invalid target path")?;
     run_cmd("mount", &[&root_part, target_str]).context("Failed to mount root partition")?;
@@ -313,23 +309,12 @@ pub fn configure_fstab(target: &Path, disk: &Path, efi: bool) -> Result<()> {
         Ok(out.trim().to_string())
     };
 
-    let (root_part, boot_part, efi_opt, swap_part, data_part) = if efi {
-        (
-            part_path(disk, 4),
-            part_path(disk, 2),
-            Some(part_path(disk, 1)),
-            part_path(disk, 3),
-            part_path(disk, 5),
-        )
-    } else {
-        (
-            part_path(disk, 3),
-            part_path(disk, 1),
-            None,
-            part_path(disk, 2),
-            part_path(disk, 4),
-        )
-    };
+    // Layout: 1=EFI/bios_boot, 2=boot, 3=swap, 4=root, 5=data
+    let root_part = part_path(disk, 4);
+    let boot_part = part_path(disk, 2);
+    let efi_opt = if efi { Some(part_path(disk, 1)) } else { None };
+    let swap_part = part_path(disk, 3);
+    let data_part = part_path(disk, 5);
 
     let root_uuid = get_uuid(&root_part)?;
     let boot_uuid = get_uuid(&boot_part)?;
