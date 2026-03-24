@@ -6,6 +6,12 @@ ROOT="$SCRIPT_DIR/.."
 BUILD_DIR="$ROOT/dist/iso-build"
 ISO_OUTPUT="$ROOT/dist/corevm-appliance.iso"
 
+# Must run as root (debootstrap, chroot, mount all require it)
+if [ "$(id -u)" -ne 0 ]; then
+    echo "ERROR: This script must be run as root (./tools/build-iso.sh)"
+    exit 1
+fi
+
 # Check prerequisites
 for cmd in debootstrap xorriso mksquashfs grub-mkimage mtools cargo node npm; do
     command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR: Missing required command: $cmd"; exit 1; }
@@ -24,7 +30,7 @@ cargo build --release -p vmm-appliance -p vmm-server -p vmm-cluster
 # Step 1: Build installable root-FS tarball
 echo "[2/8] Building root filesystem..."
 ROOTFS_DIR="$BUILD_DIR/rootfs"
-sudo debootstrap --variant=minbase --include=\
+debootstrap --variant=minbase --include=\
 linux-image-amd64,grub-pc,grub-efi-amd64-bin,systemd,\
 openssh-server,openssl,chrony,parted,\
 e2fsprogs,dosfstools,iproute2,sudo,ca-certificates,\
@@ -35,18 +41,18 @@ ceph-common,ceph-fuse \
     bookworm "$ROOTFS_DIR" http://deb.debian.org/debian
 
 # Copy CoreVM binaries
-sudo mkdir -p "$ROOTFS_DIR/opt/vmm"
-sudo cp "$ROOT/target/release/vmm-appliance" "$ROOTFS_DIR/opt/vmm/"
-sudo cp "$ROOT/target/release/vmm-server" "$ROOTFS_DIR/opt/vmm/"
-sudo cp "$ROOT/target/release/vmm-cluster" "$ROOTFS_DIR/opt/vmm/"
-sudo cp -r "$ROOT/apps/vmm-ui/dist" "$ROOTFS_DIR/opt/vmm/ui"
+mkdir -p "$ROOTFS_DIR/opt/vmm"
+cp "$ROOT/target/release/vmm-appliance" "$ROOTFS_DIR/opt/vmm/"
+cp "$ROOT/target/release/vmm-server" "$ROOTFS_DIR/opt/vmm/"
+cp "$ROOT/target/release/vmm-cluster" "$ROOTFS_DIR/opt/vmm/"
+cp -r "$ROOT/apps/vmm-ui/dist" "$ROOTFS_DIR/opt/vmm/ui"
 if [ -d "$ROOT/apps/vmm-server/assets/bios" ]; then
-    sudo cp -r "$ROOT/apps/vmm-server/assets/bios" "$ROOTFS_DIR/opt/vmm/bios"
+    cp -r "$ROOT/apps/vmm-server/assets/bios" "$ROOTFS_DIR/opt/vmm/bios"
 fi
 
 # Copy systemd service files
-sudo mkdir -p "$ROOTFS_DIR/etc/systemd/system"
-sudo tee "$ROOTFS_DIR/etc/systemd/system/vmm-dcui.service" > /dev/null <<'DCUI_SVC'
+mkdir -p "$ROOTFS_DIR/etc/systemd/system"
+tee "$ROOTFS_DIR/etc/systemd/system/vmm-dcui.service" > /dev/null <<'DCUI_SVC'
 [Unit]
 Description=CoreVM DCUI
 After=multi-user.target
@@ -67,47 +73,47 @@ WantedBy=multi-user.target
 DCUI_SVC
 
 # Copy GRUB defaults and nftables config
-sudo cp "$SCRIPT_DIR/iso/grub-installed.cfg" "$ROOTFS_DIR/etc/default/grub"
-sudo cp "$SCRIPT_DIR/iso/nftables.conf" "$ROOTFS_DIR/etc/nftables.conf"
+cp "$SCRIPT_DIR/iso/grub-installed.cfg" "$ROOTFS_DIR/etc/default/grub"
+cp "$SCRIPT_DIR/iso/nftables.conf" "$ROOTFS_DIR/etc/nftables.conf"
 
 # Enable services (use --root= since systemd is not PID 1 in the chroot)
-sudo systemctl --root="$ROOTFS_DIR" enable vmm-dcui.service
-sudo systemctl --root="$ROOTFS_DIR" enable nftables.service
-sudo systemctl --root="$ROOTFS_DIR" enable systemd-networkd.service
-sudo systemctl --root="$ROOTFS_DIR" enable systemd-resolved.service
-sudo systemctl --root="$ROOTFS_DIR" enable ssh.service
+systemctl --root="$ROOTFS_DIR" enable vmm-dcui.service
+systemctl --root="$ROOTFS_DIR" enable nftables.service
+systemctl --root="$ROOTFS_DIR" enable systemd-networkd.service
+systemctl --root="$ROOTFS_DIR" enable systemd-resolved.service
+systemctl --root="$ROOTFS_DIR" enable ssh.service
 
 # Disable getty on tty1 (DCUI takes over)
-sudo systemctl --root="$ROOTFS_DIR" mask getty@tty1.service
+systemctl --root="$ROOTFS_DIR" mask getty@tty1.service
 
 # Symlink resolv.conf for systemd-resolved
-sudo ln -sf /run/systemd/resolve/stub-resolv.conf "$ROOTFS_DIR/etc/resolv.conf"
+ln -sf /run/systemd/resolve/stub-resolv.conf "$ROOTFS_DIR/etc/resolv.conf"
 
 # Build initramfs in chroot
-sudo mount --bind /proc "$ROOTFS_DIR/proc"
-sudo mount --bind /sys "$ROOTFS_DIR/sys"
-sudo mount --bind /dev "$ROOTFS_DIR/dev"
-sudo chroot "$ROOTFS_DIR" update-initramfs -u
-sudo umount "$ROOTFS_DIR/dev" "$ROOTFS_DIR/sys" "$ROOTFS_DIR/proc"
+mount --bind /proc "$ROOTFS_DIR/proc"
+mount --bind /sys "$ROOTFS_DIR/sys"
+mount --bind /dev "$ROOTFS_DIR/dev"
+chroot "$ROOTFS_DIR" update-initramfs -u
+umount "$ROOTFS_DIR/dev" "$ROOTFS_DIR/sys" "$ROOTFS_DIR/proc"
 
 # Pack rootfs tarball
 echo "[3/8] Packing rootfs tarball..."
-sudo tar czf "$BUILD_DIR/rootfs.tar.gz" -C "$ROOTFS_DIR" .
+tar czf "$BUILD_DIR/rootfs.tar.gz" -C "$ROOTFS_DIR" .
 
 # Step 2: Build live environment
 echo "[4/8] Building live environment..."
 LIVE_DIR="$BUILD_DIR/live-root"
-sudo debootstrap --variant=minbase --include=\
+debootstrap --variant=minbase --include=\
 linux-image-amd64,live-boot,systemd \
     bookworm "$LIVE_DIR" http://deb.debian.org/debian
 
 # Copy installer binary + rootfs tarball into live env
-sudo mkdir -p "$LIVE_DIR/opt/vmm"
-sudo cp "$ROOT/target/release/vmm-appliance" "$LIVE_DIR/opt/vmm/"
-sudo cp "$BUILD_DIR/rootfs.tar.gz" "$LIVE_DIR/opt/vmm/"
+mkdir -p "$LIVE_DIR/opt/vmm"
+cp "$ROOT/target/release/vmm-appliance" "$LIVE_DIR/opt/vmm/"
+cp "$BUILD_DIR/rootfs.tar.gz" "$LIVE_DIR/opt/vmm/"
 
 # Auto-start installer in live env
-sudo tee "$LIVE_DIR/etc/systemd/system/vmm-installer.service" > /dev/null <<'INSTALLER_SVC'
+tee "$LIVE_DIR/etc/systemd/system/vmm-installer.service" > /dev/null <<'INSTALLER_SVC'
 [Unit]
 Description=CoreVM Installer
 After=multi-user.target
@@ -126,8 +132,8 @@ TTYVTDisallocate=yes
 WantedBy=multi-user.target
 INSTALLER_SVC
 
-sudo systemctl --root="$LIVE_DIR" enable vmm-installer.service
-sudo systemctl --root="$LIVE_DIR" mask getty@tty1.service
+systemctl --root="$LIVE_DIR" enable vmm-installer.service
+systemctl --root="$LIVE_DIR" mask getty@tty1.service
 
 # Step 3: Assemble ISO
 echo "[5/8] Creating squashfs..."
@@ -135,13 +141,13 @@ ISO_STAGING="$BUILD_DIR/iso-staging"
 mkdir -p "$ISO_STAGING/live" "$ISO_STAGING/boot/grub" "$ISO_STAGING/isolinux"
 
 # Copy kernel + initramfs from live env
-sudo cp "$LIVE_DIR/vmlinuz" "$ISO_STAGING/live/" 2>/dev/null || \
-    sudo cp "$LIVE_DIR/boot/vmlinuz-"* "$ISO_STAGING/live/vmlinuz"
-sudo cp "$LIVE_DIR/initrd.img" "$ISO_STAGING/live/" 2>/dev/null || \
-    sudo cp "$LIVE_DIR/boot/initrd.img-"* "$ISO_STAGING/live/initrd.img"
+cp "$LIVE_DIR/vmlinuz" "$ISO_STAGING/live/" 2>/dev/null || \
+    cp "$LIVE_DIR/boot/vmlinuz-"* "$ISO_STAGING/live/vmlinuz"
+cp "$LIVE_DIR/initrd.img" "$ISO_STAGING/live/" 2>/dev/null || \
+    cp "$LIVE_DIR/boot/initrd.img-"* "$ISO_STAGING/live/initrd.img"
 
 # Create squashfs
-sudo mksquashfs "$LIVE_DIR" "$ISO_STAGING/live/filesystem.squashfs" -comp xz -noappend
+mksquashfs "$LIVE_DIR" "$ISO_STAGING/live/filesystem.squashfs" -comp xz -noappend
 
 # Copy boot configs
 cp "$SCRIPT_DIR/iso/grub.cfg" "$ISO_STAGING/boot/grub/"
@@ -189,4 +195,4 @@ ls -lh "$ISO_OUTPUT"
 
 # Cleanup
 echo "Cleaning up build directory..."
-sudo rm -rf "$BUILD_DIR"
+rm -rf "$BUILD_DIR"
