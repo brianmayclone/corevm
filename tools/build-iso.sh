@@ -125,8 +125,19 @@ tar czf "$BUILD_DIR/rootfs.tar.gz" -C "$ROOTFS_DIR" .
 echo "[4/8] Building live environment..."
 LIVE_DIR="$BUILD_DIR/live-root"
 debootstrap --variant=minbase --include=\
-linux-image-amd64,live-boot,systemd \
+linux-image-amd64,live-boot,live-boot-initramfs-tools,\
+initramfs-tools,systemd,udev \
     bookworm "$LIVE_DIR" http://deb.debian.org/debian
+
+# Ensure squashfs module is loaded in initramfs
+echo "squashfs" >> "$LIVE_DIR/etc/initramfs-tools/modules"
+
+# Rebuild initramfs with live-boot and squashfs support
+mount --bind /proc "$LIVE_DIR/proc"
+mount --bind /sys "$LIVE_DIR/sys"
+mount --bind /dev "$LIVE_DIR/dev"
+chroot "$LIVE_DIR" update-initramfs -u
+umount "$LIVE_DIR/dev" "$LIVE_DIR/sys" "$LIVE_DIR/proc"
 
 # Copy installer binary + rootfs tarball into live env
 mkdir -p "$LIVE_DIR/opt/vmm"
