@@ -93,18 +93,22 @@ cp "$SCRIPT_DIR/iso/grub-installed.cfg" "$ROOTFS_DIR/etc/default/grub"
 cp "$SCRIPT_DIR/iso/nftables.conf" "$ROOTFS_DIR/etc/nftables.conf"
 
 # Enable services (use --root= since systemd is not PID 1 in the chroot)
-# Some dependent units may not exist in minbase — ignore those errors
 systemctl --root="$ROOTFS_DIR" enable vmm-dcui.service
 systemctl --root="$ROOTFS_DIR" enable nftables.service
-systemctl --root="$ROOTFS_DIR" enable systemd-networkd.service || true
-systemctl --root="$ROOTFS_DIR" enable systemd-resolved.service || true
 systemctl --root="$ROOTFS_DIR" enable ssh.service
+
+# systemd-networkd: enable only the core unit, skip wait-online (not in minbase)
+ln -sf /usr/lib/systemd/system/systemd-networkd.service \
+    "$ROOTFS_DIR/etc/systemd/system/multi-user.target.wants/systemd-networkd.service"
+ln -sf /usr/lib/systemd/system/systemd-networkd.socket \
+    "$ROOTFS_DIR/etc/systemd/system/sockets.target.wants/systemd-networkd.socket"
 
 # Disable getty on tty1 (DCUI takes over)
 systemctl --root="$ROOTFS_DIR" mask getty@tty1.service
 
-# Symlink resolv.conf for systemd-resolved
-ln -sf /run/systemd/resolve/stub-resolv.conf "$ROOTFS_DIR/etc/resolv.conf"
+# DNS: use static resolv.conf (systemd-resolved not available in Debian 12 minbase)
+echo "nameserver 8.8.8.8" > "$ROOTFS_DIR/etc/resolv.conf"
+echo "nameserver 1.1.1.1" >> "$ROOTFS_DIR/etc/resolv.conf"
 
 # Build initramfs in chroot
 mount --bind /proc "$ROOTFS_DIR/proc"
