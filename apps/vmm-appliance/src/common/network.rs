@@ -77,6 +77,66 @@ pub fn write_networkd_config(target: &Path, config: &NetworkConfig) -> Result<()
         .context("Failed to write systemd network config")
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use std::fs;
+
+    fn temp_dir(suffix: &str) -> std::path::PathBuf {
+        let dir = env::temp_dir().join(format!("vmm_network_test_{}", suffix));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_networkd_config_dhcp() {
+        let dir = temp_dir("dhcp");
+        let config = NetworkConfig {
+            interface: "eth0".to_string(),
+            dhcp: true,
+            address: None,
+            gateway: None,
+            dns: vec![],
+            hostname: "corevm-node".to_string(),
+        };
+        write_networkd_config(&dir, &config).unwrap();
+
+        let content = fs::read_to_string(
+            dir.join("etc/systemd/network/10-management.network"),
+        ).unwrap();
+        assert!(content.contains("Name=eth0"), "missing interface name");
+        assert!(content.contains("Hostname=corevm-node"), "missing hostname");
+        assert!(content.contains("DHCP=yes"), "missing DHCP=yes");
+        assert!(!content.contains("Address="), "unexpected Address line");
+    }
+
+    #[test]
+    fn test_networkd_config_static() {
+        let dir = temp_dir("static");
+        let config = NetworkConfig {
+            interface: "ens3".to_string(),
+            dhcp: false,
+            address: Some("10.0.0.5/24".to_string()),
+            gateway: Some("10.0.0.1".to_string()),
+            dns: vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()],
+            hostname: "corevm-static".to_string(),
+        };
+        write_networkd_config(&dir, &config).unwrap();
+
+        let content = fs::read_to_string(
+            dir.join("etc/systemd/network/10-management.network"),
+        ).unwrap();
+        assert!(content.contains("Name=ens3"), "missing interface name");
+        assert!(content.contains("Hostname=corevm-static"), "missing hostname");
+        assert!(!content.contains("DHCP=yes"), "unexpected DHCP=yes");
+        assert!(content.contains("Address=10.0.0.5/24"), "missing Address");
+        assert!(content.contains("Gateway=10.0.0.1"), "missing Gateway");
+        assert!(content.contains("DNS=8.8.8.8"), "missing first DNS");
+        assert!(content.contains("DNS=1.1.1.1"), "missing second DNS");
+    }
+}
+
 pub fn apply_networkd_config() -> Result<()> {
     let status = Command::new("networkctl")
         .arg("reload")

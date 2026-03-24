@@ -162,6 +162,52 @@ impl ScreenState {
 // run()
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
+mod tests {
+    use super::Screen;
+
+    #[test]
+    fn test_screen_next_transitions() {
+        assert_eq!(Screen::Welcome.next(),  Some(Screen::Disk));
+        assert_eq!(Screen::Disk.next(),     Some(Screen::Network));
+        assert_eq!(Screen::Network.next(),  Some(Screen::Timezone));
+        assert_eq!(Screen::Timezone.next(), Some(Screen::Users));
+        assert_eq!(Screen::Users.next(),    Some(Screen::Ports));
+        assert_eq!(Screen::Ports.next(),    Some(Screen::Certs));
+        assert_eq!(Screen::Certs.next(),    Some(Screen::Summary));
+        assert_eq!(Screen::Summary.next(),  Some(Screen::Progress));
+        assert_eq!(Screen::Progress.next(), None);
+    }
+
+    #[test]
+    fn test_screen_prev_transitions() {
+        assert_eq!(Screen::Welcome.prev(),  None);
+        assert_eq!(Screen::Disk.prev(),     Some(Screen::Welcome));
+        assert_eq!(Screen::Network.prev(),  Some(Screen::Disk));
+        assert_eq!(Screen::Timezone.prev(), Some(Screen::Network));
+        assert_eq!(Screen::Users.prev(),    Some(Screen::Timezone));
+        assert_eq!(Screen::Ports.prev(),    Some(Screen::Users));
+        assert_eq!(Screen::Certs.prev(),    Some(Screen::Ports));
+        assert_eq!(Screen::Summary.prev(),  Some(Screen::Certs));
+        assert_eq!(Screen::Progress.prev(), Some(Screen::Summary));
+    }
+
+    #[test]
+    fn test_screen_full_forward_traversal() {
+        let mut screen = Some(Screen::Welcome);
+        let expected = vec![
+            Screen::Welcome, Screen::Disk, Screen::Network, Screen::Timezone,
+            Screen::Users, Screen::Ports, Screen::Certs, Screen::Summary, Screen::Progress,
+        ];
+        let mut visited = Vec::new();
+        while let Some(s) = screen {
+            screen = s.next();
+            visited.push(s);
+        }
+        assert_eq!(visited, expected);
+    }
+}
+
 pub fn run() -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
     let result = run_inner(&mut terminal);

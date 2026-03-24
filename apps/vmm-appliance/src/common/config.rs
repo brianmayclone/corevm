@@ -127,6 +127,85 @@ pub fn write_default_config(target: &Path, role: &ApplianceRole) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use std::fs;
+
+    fn temp_dir(suffix: &str) -> std::path::PathBuf {
+        let dir = env::temp_dir().join(format!("vmm_config_test_{}", suffix));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_appliance_config_roundtrip() {
+        let dir = temp_dir("roundtrip");
+        let path = dir.join("appliance.toml");
+
+        let config = ApplianceConfig {
+            role: ApplianceRole::Cluster,
+            language: "de_DE".to_string(),
+            version: "1.2.3".to_string(),
+        };
+        config.save(&path).unwrap();
+
+        let loaded = ApplianceConfig::load(&path).unwrap();
+        assert_eq!(loaded.role, ApplianceRole::Cluster);
+        assert_eq!(loaded.language, "de_DE");
+        assert_eq!(loaded.version, "1.2.3");
+    }
+
+    #[test]
+    fn test_write_vmm_server_config_keys() {
+        let dir = temp_dir("server_cfg");
+        write_vmm_server_config(&dir, 9000, "/data", "/log/vmm.log").unwrap();
+
+        let content = fs::read_to_string(dir.join("etc/vmm/vmm-server.toml")).unwrap();
+        assert!(content.contains("[server]"), "missing [server] section");
+        assert!(content.contains("port = 9000"), "missing port");
+        assert!(content.contains("[auth]"), "missing [auth] section");
+        assert!(content.contains("jwt_secret"), "missing jwt_secret");
+        assert!(content.contains("[storage]"), "missing [storage] section");
+        assert!(content.contains("data_dir = \"/data\""), "missing data_dir");
+        assert!(content.contains("[logging]"), "missing [logging] section");
+    }
+
+    #[test]
+    fn test_write_vmm_cluster_config_keys() {
+        let dir = temp_dir("cluster_cfg");
+        write_vmm_cluster_config(&dir, 9001, "/data", "/log/vmm.log").unwrap();
+
+        let content = fs::read_to_string(dir.join("etc/vmm/vmm-cluster.toml")).unwrap();
+        assert!(content.contains("[cluster]"), "missing [cluster] section");
+        assert!(content.contains("port = 9001"), "missing port");
+        assert!(content.contains("[auth]"), "missing [auth] section");
+        assert!(content.contains("jwt_secret"), "missing jwt_secret");
+        assert!(content.contains("[storage]"), "missing [storage] section");
+    }
+
+    #[test]
+    fn test_write_default_config_server() {
+        let dir = temp_dir("default_server");
+        write_default_config(&dir, &ApplianceRole::Server).unwrap();
+
+        let appliance = fs::read_to_string(dir.join("etc/vmm/appliance.toml")).unwrap();
+        assert!(appliance.contains("Server"), "appliance.toml missing Server role");
+        assert!(dir.join("etc/vmm/vmm-server.toml").exists(), "vmm-server.toml not created");
+    }
+
+    #[test]
+    fn test_write_default_config_cluster() {
+        let dir = temp_dir("default_cluster");
+        write_default_config(&dir, &ApplianceRole::Cluster).unwrap();
+
+        let appliance = fs::read_to_string(dir.join("etc/vmm/appliance.toml")).unwrap();
+        assert!(appliance.contains("Cluster"), "appliance.toml missing Cluster role");
+        assert!(dir.join("etc/vmm/vmm-cluster.toml").exists(), "vmm-cluster.toml not created");
+    }
+}
+
 fn generate_jwt_secret() -> String {
     use std::io::Read;
 
