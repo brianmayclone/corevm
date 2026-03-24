@@ -49,6 +49,7 @@ ROOTFS_DIR="$BUILD_DIR/rootfs"
 debootstrap --variant=minbase --include=\
 linux-image-amd64,grub-pc,grub-efi-amd64-bin,systemd,\
 openssh-server,openssl,chrony,parted,\
+plymouth,plymouth-themes,\
 e2fsprogs,dosfstools,iproute2,sudo,ca-certificates,\
 util-linux,pciutils,nftables,locales,\
 nfs-common,nfs-kernel-server,\
@@ -65,6 +66,19 @@ cp -r "$ROOT/apps/vmm-ui/dist" "$ROOTFS_DIR/opt/vmm/ui"
 if [ -d "$ROOT/apps/vmm-server/assets/bios" ]; then
     cp -r "$ROOT/apps/vmm-server/assets/bios" "$ROOTFS_DIR/opt/vmm/bios"
 fi
+
+# Install Plymouth theme
+PLYMOUTH_DIR="$ROOTFS_DIR/usr/share/plymouth/themes/corevm"
+mkdir -p "$PLYMOUTH_DIR"
+cp "$SCRIPT_DIR/iso/plymouth-theme/logo.png" "$PLYMOUTH_DIR/"
+cp "$SCRIPT_DIR/iso/plymouth-theme/corevm.plymouth" "$PLYMOUTH_DIR/"
+cp "$SCRIPT_DIR/iso/plymouth-theme/corevm.script" "$PLYMOUTH_DIR/"
+mkdir -p "$ROOTFS_DIR/etc/plymouth"
+cat > "$ROOTFS_DIR/etc/plymouth/plymouthd.conf" <<'PLYMOUTHCONF'
+[Daemon]
+Theme=corevm
+ShowDelay=0
+PLYMOUTHCONF
 
 # Copy systemd service files
 mkdir -p "$ROOTFS_DIR/etc/systemd/system"
@@ -126,16 +140,30 @@ echo "[4/8] Building live environment..."
 LIVE_DIR="$BUILD_DIR/live-root"
 debootstrap --variant=minbase --include=\
 linux-image-amd64,live-boot,live-boot-initramfs-tools,\
-initramfs-tools,systemd,udev \
+initramfs-tools,systemd,udev,plymouth,plymouth-themes \
     bookworm "$LIVE_DIR" http://deb.debian.org/debian
 
 # Ensure squashfs module is loaded in initramfs
 echo "squashfs" >> "$LIVE_DIR/etc/initramfs-tools/modules"
 
-# Rebuild initramfs with live-boot and squashfs support
+# Install Plymouth theme in live environment
+LIVE_PLYMOUTH_DIR="$LIVE_DIR/usr/share/plymouth/themes/corevm"
+mkdir -p "$LIVE_PLYMOUTH_DIR"
+cp "$SCRIPT_DIR/iso/plymouth-theme/logo.png" "$LIVE_PLYMOUTH_DIR/"
+cp "$SCRIPT_DIR/iso/plymouth-theme/corevm.plymouth" "$LIVE_PLYMOUTH_DIR/"
+cp "$SCRIPT_DIR/iso/plymouth-theme/corevm.script" "$LIVE_PLYMOUTH_DIR/"
+mkdir -p "$LIVE_DIR/etc/plymouth"
+cat > "$LIVE_DIR/etc/plymouth/plymouthd.conf" <<'PLYMOUTHCONF'
+[Daemon]
+Theme=corevm
+ShowDelay=0
+PLYMOUTHCONF
+
+# Rebuild initramfs with live-boot, squashfs, and plymouth support
 mount --bind /proc "$LIVE_DIR/proc"
 mount --bind /sys "$LIVE_DIR/sys"
 mount --bind /dev "$LIVE_DIR/dev"
+chroot "$LIVE_DIR" plymouth-set-default-theme corevm
 chroot "$LIVE_DIR" update-initramfs -u
 umount "$LIVE_DIR/dev" "$LIVE_DIR/sys" "$LIVE_DIR/proc"
 

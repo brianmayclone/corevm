@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=CoreVM
+Description=CoreVM Appliance Boot Splash
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/corevm
+ScriptFile=/usr/share/plymouth/themes/corevm/corevm.script
