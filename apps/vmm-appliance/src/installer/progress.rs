@@ -2,10 +2,11 @@ use std::fs;
 use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
+use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Gauge, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::common::{
@@ -18,10 +19,74 @@ use crate::common::{
         install_grub, is_efi_booted, mount_target, partition_disk, reboot, set_hostname,
         set_locale, set_root_password, set_timezone, unmount_target,
     },
-    widgets::ProgressDisplay,
 };
 
 use super::{InstallConfig, ScreenResult};
+
+// ---------------------------------------------------------------------------
+// Info slides shown during installation
+// ---------------------------------------------------------------------------
+
+const INFO_SLIDES: &[(&str, &str)] = &[
+    (
+        "Welcome to CoreVM",
+        "CoreVM is a lightweight virtualization platform\n\
+         built for performance, simplicity, and security.\n\
+         \n\
+         Your appliance is being configured now.",
+    ),
+    (
+        "Hardware Virtualization",
+        "CoreVM leverages KVM for near-native performance.\n\
+         Virtual machines run directly on the CPU with\n\
+         minimal overhead, giving you the best possible\n\
+         speed for your workloads.",
+    ),
+    (
+        "Web Management",
+        "Once installation completes, you can manage your\n\
+         appliance through the built-in web interface.\n\
+         Create and manage virtual machines, configure\n\
+         networking, and monitor system health.",
+    ),
+    (
+        "Storage Options",
+        "CoreVM supports local storage, NFS shared storage,\n\
+         GlusterFS distributed volumes, and Ceph for\n\
+         highly available block storage. Scale your\n\
+         infrastructure as your needs grow.",
+    ),
+    (
+        "Clustering",
+        "Deploy multiple CoreVM nodes as a cluster for\n\
+         high availability and live migration. The cluster\n\
+         controller coordinates workloads automatically\n\
+         across all nodes.",
+    ),
+    (
+        "Security First",
+        "CoreVM comes hardened out of the box with nftables\n\
+         firewall, SSH key authentication, TLS encryption,\n\
+         and minimal attack surface. Your infrastructure\n\
+         stays protected by default.",
+    ),
+    (
+        "Direct Console UI",
+        "After installation, the DCUI on tty1 provides\n\
+         direct access to appliance management without\n\
+         needing a browser. Configure network, passwords,\n\
+         certificates, and more from the console.",
+    ),
+    (
+        "Offline Updates",
+        "Keep your appliance up to date with offline update\n\
+         packages. No internet connection required for\n\
+         updates — just upload the package through the\n\
+         DCUI or web interface.",
+    ),
+];
+
+const SLIDE_INTERVAL_SECS: u64 = 8;
 
 // ---------------------------------------------------------------------------
 // ProgressMsg
@@ -38,9 +103,11 @@ enum ProgressMsg {
 // ---------------------------------------------------------------------------
 
 pub struct ProgressState {
-    display: ProgressDisplay,
+    progress: f64,
+    status_text: String,
     rx: Option<mpsc::Receiver<ProgressMsg>>,
     started: bool,
+    start_time: Instant,
     done: bool,
     done_url: String,
     error: Option<String>,
@@ -49,22 +116,29 @@ pub struct ProgressState {
 impl ProgressState {
     pub fn new() -> Self {
         Self {
-            display: ProgressDisplay::new("Installing CoreVM Appliance"),
+            progress: 0.0,
+            status_text: String::new(),
             rx: None,
             started: false,
+            start_time: Instant::now(),
             done: false,
             done_url: String::new(),
             error: None,
         }
     }
 
+    fn current_slide(&self) -> usize {
+        let elapsed = self.start_time.elapsed().as_secs();
+        ((elapsed / SLIDE_INTERVAL_SECS) as usize) % INFO_SLIDES.len()
+    }
+
     fn start(&mut self, config: &InstallConfig) {
         self.started = true;
+        self.start_time = Instant::now();
 
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
 
-        // Clone everything the thread needs
         let disk = config.disk.clone().unwrap_or_default();
         let network = config.network.clone();
         let timezone = config.timezone.clone();
@@ -111,7 +185,7 @@ impl ProgressState {
             }
 
             // 4. Extract rootfs
-            send(ProgressMsg::Update(0.20, "Extracting Debian rootfs...".into()));
+            send(ProgressMsg::Update(0.20, "Extracting system files...".into()));
             if let Err(e) = extract_rootfs(Path::new("/opt/vmm/rootfs.tar.gz"), target) {
                 send(ProgressMsg::Error(format!("Rootfs extraction failed: {}", e)));
                 return;
@@ -153,7 +227,7 @@ impl ProgressState {
             }
 
             // 7. Configure NTP
-            send(ProgressMsg::Update(0.60, "Configuring NTP...".into()));
+            send(ProgressMsg::Update(0.60, "Configuring time synchronization...".into()));
             let ntp_srv = if ntp_server.is_empty() { "pool.ntp.org".to_string() } else { ntp_server };
             if let Err(e) = configure_chrony(target, ntp_enabled, &ntp_srv) {
                 send(ProgressMsg::Error(format!("configure_chrony failed: {}", e)));
@@ -161,7 +235,7 @@ impl ProgressState {
             }
 
             // 8. Create users
-            send(ProgressMsg::Update(0.65, "Creating users...".into()));
+            send(ProgressMsg::Update(0.65, "Creating user accounts...".into()));
             if let Err(e) = set_root_password(target, &root_password) {
                 send(ProgressMsg::Error(format!("set_root_password failed: {}", e)));
                 return;
@@ -174,7 +248,7 @@ impl ProgressState {
             }
 
             // 9. Certificates
-            send(ProgressMsg::Update(0.70, "Configuring certificates...".into()));
+            send(ProgressMsg::Update(0.70, "Generating TLS certificates...".into()));
             if self_signed_cert {
                 if let Err(e) = generate_self_signed(target, &hostname) {
                     send(ProgressMsg::Error(format!("generate_self_signed failed: {}", e)));
@@ -232,7 +306,7 @@ impl ProgressState {
             }
 
             // 12. SSH hardening
-            send(ProgressMsg::Update(0.85, "Configuring SSH...".into()));
+            send(ProgressMsg::Update(0.85, "Hardening SSH configuration...".into()));
             let sshd_drop_dir = target.join("etc/ssh/sshd_config.d");
             if let Err(e) = fs::create_dir_all(&sshd_drop_dir) {
                 send(ProgressMsg::Error(format!("Failed to create sshd_config.d: {}", e)));
@@ -245,7 +319,7 @@ impl ProgressState {
             }
 
             // 13. Install GRUB
-            send(ProgressMsg::Update(0.90, "Installing GRUB bootloader...".into()));
+            send(ProgressMsg::Update(0.90, "Installing bootloader...".into()));
             if let Err(e) = install_grub(target, &disk, efi) {
                 send(ProgressMsg::Error(format!("install_grub failed: {}", e)));
                 return;
@@ -273,10 +347,12 @@ impl ProgressState {
         for msg in msgs {
             match msg {
                 ProgressMsg::Update(progress, status) => {
-                    self.display.set_progress(progress, &status);
+                    self.progress = progress.clamp(0.0, 1.0);
+                    self.status_text = status;
                 }
                 ProgressMsg::Done(url) => {
-                    self.display.set_progress(1.0, "Installation complete.");
+                    self.progress = 1.0;
+                    self.status_text = "Installation complete.".into();
                     self.done_url = url;
                     self.done = true;
                 }
@@ -304,70 +380,172 @@ impl ProgressState {
         self.tick();
 
         let area = frame.area();
+        let buf = frame.buffer_mut();
 
-        let outer = Block::default()
-            .title(" CoreVM Appliance Installer — Installing ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
-            .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+        // Clear screen
+        Block::default()
+            .style(Style::default().bg(Color::Black))
+            .render(area, buf);
 
-        let inner = outer.inner(area);
-        frame.render_widget(outer, area);
-
+        // Error state
         if let Some(ref err) = self.error {
-            let msg = format!("Installation failed:\n\n{}", err);
-            let para = Paragraph::new(msg.as_str())
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .margin(2)
+                .constraints([
+                    Constraint::Length(1), // title
+                    Constraint::Length(1), // gap
+                    Constraint::Min(0),   // error
+                ])
+                .split(area);
+
+            Paragraph::new("Installation Failed")
+                .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+                .alignment(Alignment::Center)
+                .render(chunks[0], buf);
+
+            Paragraph::new(err.as_str())
                 .style(Style::default().fg(Color::Red))
-                .wrap(ratatui::widgets::Wrap { trim: true });
-            frame.render_widget(para, inner);
+                .wrap(Wrap { trim: true })
+                .render(chunks[2], buf);
             return;
         }
 
+        // Completion state
         if self.done {
-            // Split inner area for progress widget + completion message
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
+                .margin(2)
                 .constraints([
-                    Constraint::Length(4),
-                    Constraint::Min(0),
+                    Constraint::Length(1),  // title
+                    Constraint::Length(1),  // gap
+                    Constraint::Min(0),    // message area
+                    Constraint::Length(1),  // gap
+                    Constraint::Length(3),  // progress bar area
+                    Constraint::Length(1),  // help
                 ])
-                .split(inner);
+                .split(area);
 
-            // Progress bar (completed)
-            frame.render_widget(ProgressDisplayWidget(&self.display), chunks[0]);
+            Paragraph::new("Installation Complete")
+                .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+                .alignment(Alignment::Center)
+                .render(chunks[0], buf);
 
-            // Completion message
             let msg = format!(
-                "Installation complete!\n\nWeb UI: {}\n\nPress Enter to reboot.",
+                "CoreVM has been successfully installed.\n\n\
+                 Web UI:  {}\n\n\
+                 The system will reboot into the CoreVM Appliance.\n\
+                 After reboot, the DCUI will be available on tty1.",
                 self.done_url
             );
-            let para = Paragraph::new(msg.as_str())
-                .style(Style::default().fg(Color::Green))
-                .wrap(ratatui::widgets::Wrap { trim: true });
-            frame.render_widget(para, chunks[1]);
-        } else {
-            // During install: just progress widget centered
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(4),
-                    Constraint::Min(0),
-                ])
-                .split(inner);
+            let content_area = centered_horizontal(chunks[2], 60);
+            Paragraph::new(msg)
+                .style(Style::default().fg(Color::White))
+                .wrap(Wrap { trim: true })
+                .render(content_area, buf);
 
-            frame.render_widget(ProgressDisplayWidget(&self.display), chunks[0]);
+            let bar_area = centered_horizontal(chunks[4], 60);
+            Gauge::default()
+                .gauge_style(Style::default().fg(Color::Green).bg(Color::DarkGray))
+                .percent(100)
+                .label("100%")
+                .render(bar_area, buf);
+
+            Paragraph::new("[Enter] Reboot")
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Center)
+                .render(chunks[5], buf);
+            return;
         }
+
+        // Installing state — info slides + progress bar
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .margin(2)
+            .constraints([
+                Constraint::Length(1),  // 0: title bar
+                Constraint::Length(2),  // 1: gap
+                Constraint::Min(0),    // 2: slide content area
+                Constraint::Length(2),  // 3: gap
+                Constraint::Length(1),  // 4: status text
+                Constraint::Length(1),  // 5: progress bar
+                Constraint::Length(1),  // 6: percentage
+            ])
+            .split(area);
+
+        // Title
+        Paragraph::new("Installing CoreVM Appliance")
+            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+            .alignment(Alignment::Center)
+            .render(chunks[0], buf);
+
+        // Info slide
+        let slide_idx = self.current_slide();
+        let (slide_title, slide_body) = INFO_SLIDES[slide_idx];
+
+        let slide_area = centered_horizontal(chunks[2], 56);
+        let slide_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // slide title
+                Constraint::Length(1), // gap
+                Constraint::Min(0),   // slide body
+            ])
+            .split(slide_area);
+
+        Paragraph::new(slide_title)
+            .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
+            .alignment(Alignment::Center)
+            .render(slide_chunks[0], buf);
+
+        Paragraph::new(slide_body)
+            .style(Style::default().fg(Color::Gray))
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true })
+            .render(slide_chunks[2], buf);
+
+        // Slide indicator dots
+        let dots: String = (0..INFO_SLIDES.len())
+            .map(|i| if i == slide_idx { "o" } else { "." })
+            .collect::<Vec<_>>()
+            .join(" ");
+        // Render dots below slide body if space allows
+        if slide_chunks[2].height > 6 {
+            let dot_area = Rect {
+                y: slide_chunks[2].y + slide_chunks[2].height - 1,
+                height: 1,
+                ..slide_chunks[2]
+            };
+            Paragraph::new(dots)
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Center)
+                .render(dot_area, buf);
+        }
+
+        // Status text
+        Paragraph::new(self.status_text.as_str())
+            .style(Style::default().fg(Color::Gray))
+            .alignment(Alignment::Center)
+            .render(chunks[4], buf);
+
+        // Progress bar
+        let bar_area = centered_horizontal(chunks[5], 60);
+        let pct = (self.progress * 100.0) as u16;
+        Gauge::default()
+            .gauge_style(Style::default().fg(Color::Cyan).bg(Color::DarkGray))
+            .percent(pct)
+            .render(bar_area, buf);
+
+        // Percentage text
+        Paragraph::new(format!("{}%", pct))
+            .style(Style::default().fg(Color::Cyan))
+            .alignment(Alignment::Center)
+            .render(chunks[6], buf);
     }
 }
 
-// ---------------------------------------------------------------------------
-// Adapter to render ProgressDisplay as a Widget
-// ---------------------------------------------------------------------------
-
-struct ProgressDisplayWidget<'a>(&'a ProgressDisplay);
-
-impl<'a> Widget for ProgressDisplayWidget<'a> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        self.0.render(area, buf);
-    }
+fn centered_horizontal(area: Rect, width: u16) -> Rect {
+    let w = width.min(area.width);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    Rect { x, width: w, ..area }
 }

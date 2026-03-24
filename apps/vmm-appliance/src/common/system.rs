@@ -266,6 +266,10 @@ pub fn install_grub(target: &Path, disk: &Path, efi: bool) -> Result<()> {
         );
     }
 
+    // Ensure /boot/grub exists (grub-install needs it to find the device)
+    let grub_dir = target.join("boot/grub");
+    fs::create_dir_all(&grub_dir).ok();
+
     let grub_result = if efi {
         run_cmd("chroot", &[
             target_str,

@@ -142,14 +142,13 @@ OSRELEASE
 
 cat > "$ROOTFS_DIR/etc/issue" <<'ISSUE'
 
-  ██████╗ ██████╗ ██████╗ ███████╗██╗   ██╗███╗   ███╗
- ██╔════╝██╔═══██╗██╔══██╗██╔════╝██║   ██║████╗ ████║
- ██║     ██║   ██║██████╔╝█████╗  ██║   ██║██╔████╔██║
- ██║     ██║   ██║██╔══██╗██╔══╝  ╚██╗ ██╔╝██║╚██╔╝██║
- ╚██████╗╚██████╔╝██║  ██║███████╗ ╚████╔╝ ██║ ╚═╝ ██║
-  ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝  ╚═══╝  ╚═╝     ╚═╝
+   ____               __     __ __  __
+  / ___|___  _ __ ___ \ \   / /|  \/  |
+ | |   / _ \| '__/ _ \ \ \ / / | |\/| |
+ | |__| (_) | | |  __/  \ V /  | |  | |
+  \____\___/|_|  \___|   \_/   |_|  |_|
 
- CoreVM Appliance 1.0 — \n \l
+  CoreVM Appliance 1.0 -- \n \l
 
 ISSUE
 
@@ -169,12 +168,38 @@ cat > "$ROOTFS_DIR/etc/hosts" <<'HOSTS'
 ::1		localhost ip6-localhost ip6-loopback
 HOSTS
 
+# Install boot splash script
+cp "$SCRIPT_DIR/iso/boot-splash.sh" "$ROOTFS_DIR/opt/vmm/boot-splash.sh"
+chmod +x "$ROOTFS_DIR/opt/vmm/boot-splash.sh"
+
 # Copy systemd service files
 mkdir -p "$ROOTFS_DIR/etc/systemd/system"
+
+# Boot splash service (installed system — waits for DCUI)
+tee "$ROOTFS_DIR/etc/systemd/system/vmm-boot-splash.service" > /dev/null <<'SPLASH_SVC'
+[Unit]
+Description=CoreVM Boot Splash
+DefaultDependencies=no
+After=systemd-vconsole-setup.service
+Before=vmm-dcui.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/vmm/boot-splash.sh vmm-dcui.service
+StandardInput=tty
+StandardOutput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+
+[Install]
+WantedBy=sysinit.target
+SPLASH_SVC
+
 tee "$ROOTFS_DIR/etc/systemd/system/vmm-dcui.service" > /dev/null <<'DCUI_SVC'
 [Unit]
 Description=CoreVM DCUI
-After=multi-user.target
+After=multi-user.target vmm-boot-splash.service
 
 [Service]
 Type=simple
@@ -196,6 +221,7 @@ cp "$SCRIPT_DIR/iso/grub-installed.cfg" "$ROOTFS_DIR/etc/default/grub"
 cp "$SCRIPT_DIR/iso/nftables.conf" "$ROOTFS_DIR/etc/nftables.conf"
 
 # Enable services (use --root= since systemd is not PID 1 in the chroot)
+systemctl --root="$ROOTFS_DIR" enable vmm-boot-splash.service
 systemctl --root="$ROOTFS_DIR" enable vmm-dcui.service
 systemctl --root="$ROOTFS_DIR" enable nftables.service
 systemctl --root="$ROOTFS_DIR" enable ssh.service
@@ -257,14 +283,13 @@ OSRELEASE
 
 cat > "$LIVE_DIR/etc/issue" <<'ISSUE'
 
-  ██████╗ ██████╗ ██████╗ ███████╗██╗   ██╗███╗   ███╗
- ██╔════╝██╔═══██╗██╔══██╗██╔════╝██║   ██║████╗ ████║
- ██║     ██║   ██║██████╔╝█████╗  ██║   ██║██╔████╔██║
- ██║     ██║   ██║██╔══██╗██╔══╝  ╚██╗ ██╔╝██║╚██╔╝██║
- ╚██████╗╚██████╔╝██║  ██║███████╗ ╚████╔╝ ██║ ╚═╝ ██║
-  ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝  ╚═══╝  ╚═╝     ╚═╝
+   ____               __     __ __  __
+  / ___|___  _ __ ___ \ \   / /|  \/  |
+ | |   / _ \| '__/ _ \ \ \ / / | |\/| |
+ | |__| (_) | | |  __/  \ V /  | |  | |
+  \____\___/|_|  \___|   \_/   |_|  |_|
 
- CoreVM Appliance Installer — \n \l
+  CoreVM Appliance Installer -- \n \l
 
 ISSUE
 
@@ -288,16 +313,39 @@ mount --bind /dev "$LIVE_DIR/dev"
 chroot "$LIVE_DIR" update-initramfs -u
 umount "$LIVE_DIR/dev" "$LIVE_DIR/sys" "$LIVE_DIR/proc"
 
-# Copy installer binary + rootfs tarball into live env
+# Copy installer binary + rootfs tarball + boot splash into live env
 mkdir -p "$LIVE_DIR/opt/vmm"
 cp "$ROOT/target/release/vmm-appliance" "$LIVE_DIR/opt/vmm/"
 cp "$BUILD_DIR/rootfs.tar.gz" "$LIVE_DIR/opt/vmm/"
+cp "$SCRIPT_DIR/iso/boot-splash.sh" "$LIVE_DIR/opt/vmm/boot-splash.sh"
+chmod +x "$LIVE_DIR/opt/vmm/boot-splash.sh"
+
+# Boot splash service (live — waits for installer)
+tee "$LIVE_DIR/etc/systemd/system/vmm-boot-splash.service" > /dev/null <<'LIVE_SPLASH'
+[Unit]
+Description=CoreVM Boot Splash
+DefaultDependencies=no
+After=systemd-vconsole-setup.service
+Before=vmm-installer.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/vmm/boot-splash.sh vmm-installer.service
+StandardInput=tty
+StandardOutput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+
+[Install]
+WantedBy=sysinit.target
+LIVE_SPLASH
 
 # Auto-start installer in live env
 tee "$LIVE_DIR/etc/systemd/system/vmm-installer.service" > /dev/null <<'INSTALLER_SVC'
 [Unit]
 Description=CoreVM Installer
-After=multi-user.target
+After=multi-user.target vmm-boot-splash.service
 
 [Service]
 Type=simple
@@ -313,6 +361,7 @@ TTYVTDisallocate=yes
 WantedBy=multi-user.target
 INSTALLER_SVC
 
+systemctl --root="$LIVE_DIR" enable vmm-boot-splash.service
 systemctl --root="$LIVE_DIR" enable vmm-installer.service
 systemctl --root="$LIVE_DIR" mask getty@tty1.service
 

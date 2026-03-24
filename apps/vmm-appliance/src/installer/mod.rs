@@ -209,6 +209,8 @@ mod tests {
 }
 
 pub fn run() -> anyhow::Result<()> {
+    // Suppress kernel messages on console so they don't corrupt the TUI
+    let _ = std::process::Command::new("dmesg").arg("-n").arg("1").status();
     let mut terminal = ratatui::init();
     let result = run_inner(&mut terminal);
     ratatui::restore();
