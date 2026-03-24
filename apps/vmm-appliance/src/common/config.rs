@@ -128,47 +128,23 @@ pub fn write_default_config(target: &Path, role: &ApplianceRole) -> Result<()> {
 }
 
 fn generate_jwt_secret() -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::io::Read;
 
-    // Use system time and process ID as entropy sources
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let pid = std::process::id();
+    // Read 32 bytes from /dev/urandom for cryptographically secure randomness
+    let mut bytes = [0u8; 32];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        let _ = f.read_exact(&mut bytes);
+    } else {
+        // Fallback: use system time + pid (not ideal, but better than nothing)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = ((now >> (i % 16 * 8)) ^ (std::process::id() as u128)) as u8;
+        }
+    }
 
-    let mut hasher = DefaultHasher::new();
-    now.hash(&mut hasher);
-    pid.hash(&mut hasher);
-    let h1 = hasher.finish();
-
-    // Hash again with different seed for more bits
-    let mut hasher2 = DefaultHasher::new();
-    h1.hash(&mut hasher2);
-    now.wrapping_add(1).hash(&mut hasher2);
-    let h2 = hasher2.finish();
-
-    let mut hasher3 = DefaultHasher::new();
-    h2.hash(&mut hasher3);
-    pid.wrapping_add(1).hash(&mut hasher3);
-    let h3 = hasher3.finish();
-
-    let mut hasher4 = DefaultHasher::new();
-    h3.hash(&mut hasher4);
-    h1.hash(&mut hasher4);
-    let h4 = hasher4.finish();
-
-    // Encode to base64-like alphanumeric string (32 chars)
-    let raw = format!("{:016x}{:016x}", h1 ^ h2, h3 ^ h4);
-    // Map hex to a broader character set for base64-like output
-    raw.chars()
-        .map(|c| match c {
-            '0'..='9' => c,
-            'a'..='f' => (b'A' + (c as u8 - b'a') * 4) as char,
-            _ => c,
-        })
-        .take(32)
-        .collect()
+    // Encode as hex (64 chars, take 32)
+    bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()[..32].to_string()
 }
