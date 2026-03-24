@@ -13,6 +13,9 @@ libs/libcorevm/bios/listing.txt
 *.swp
 *.swo
 
+# Worktrees
+.worktrees/
+
 # OS
 .DS_Store
 Thumbs.db
