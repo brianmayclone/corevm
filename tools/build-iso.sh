@@ -269,7 +269,7 @@ LIVE_DIR="$BUILD_DIR/live-root"
 debootstrap --variant=minbase --include=\
 linux-image-amd64,live-boot,live-boot-initramfs-tools,\
 initramfs-tools,systemd,systemd-sysv,udev,\
-parted,e2fsprogs,dosfstools,tar,openssl,ncurses-base,\
+parted,e2fsprogs,dosfstools,tar,openssl,ncurses-base,iproute2,\
 grub-pc,grub-efi-amd64-bin \
     bookworm "$LIVE_DIR" http://deb.debian.org/debian
 

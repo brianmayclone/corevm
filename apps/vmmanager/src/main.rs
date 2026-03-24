@@ -173,21 +173,10 @@ fn main() -> eframe::Result {
         }));
     }
 
-    // Under WSL2, Mesa's Zink (OpenGL-over-Vulkan) often fails because the
-    // virtual GPU doesn't expose a usable Vulkan physical device.  Force the
-    // software rasteriser so eframe/glow can still start.
-    #[cfg(target_os = "linux")]
-    {
-        if std::fs::read_to_string("/proc/version")
-            .map(|v| { let l = v.to_lowercase(); l.contains("microsoft") || l.contains("wsl") })
-            .unwrap_or(false)
-        {
-            if std::env::var_os("LIBGL_ALWAYS_SOFTWARE").is_none() {
-                std::env::set_var("LIBGL_ALWAYS_SOFTWARE", "1");
-                eprintln!("[wsl] Forcing software OpenGL renderer (LIBGL_ALWAYS_SOFTWARE=1)");
-            }
-        }
-    }
+    // Under WSL2, Mesa's Zink (OpenGL-over-Vulkan) may fail if the virtual
+    // GPU doesn't expose a usable Vulkan physical device.  Let WSLg handle
+    // GPU passthrough natively — users can still set LIBGL_ALWAYS_SOFTWARE=1
+    // manually if hardware GL causes issues.
 
     // Check hardware support before launching UI
     if let Err(diag) = check_hardware_support() {
