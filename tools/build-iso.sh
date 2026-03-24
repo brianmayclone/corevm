@@ -7,9 +7,25 @@ BUILD_DIR="$ROOT/dist/iso-build"
 ISO_OUTPUT="$ROOT/dist/corevm-appliance.iso"
 
 # Must run as root (debootstrap, chroot, mount all require it)
+# Use: sudo -E env "PATH=$PATH" ./tools/build-iso.sh
 if [ "$(id -u)" -ne 0 ]; then
-    echo "ERROR: This script must be run as root (./tools/build-iso.sh)"
+    echo "ERROR: This script must be run as root."
+    echo "Usage: sudo -E env \"PATH=\$PATH\" ./tools/build-iso.sh"
     exit 1
+fi
+
+# Ensure cargo/node are in PATH (may come from user's home dir)
+for p in "$HOME/.cargo/bin" "/usr/local/bin"; do
+    [ -d "$p" ] && export PATH="$p:$PATH"
+done
+# Also check SUDO_USER's home for cargo
+if [ -n "${SUDO_USER:-}" ]; then
+    SUDO_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    [ -d "$SUDO_HOME/.cargo/bin" ] && export PATH="$SUDO_HOME/.cargo/bin:$PATH"
+    [ -d "$SUDO_HOME/.nvm/versions" ] && {
+        NODE_DIR=$(ls -d "$SUDO_HOME/.nvm/versions/node/"*/bin 2>/dev/null | tail -1)
+        [ -n "$NODE_DIR" ] && export PATH="$NODE_DIR:$PATH"
+    }
 fi
 
 # Check prerequisites
