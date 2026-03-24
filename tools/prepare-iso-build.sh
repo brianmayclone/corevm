@@ -30,6 +30,7 @@ case "$DISTRO" in
             debootstrap \
             xorriso \
             isolinux \
+            syslinux-common \
             syslinux-utils \
             grub-efi-amd64-bin \
             grub-pc-bin \

@@ -170,13 +170,24 @@ mksquashfs "$LIVE_DIR" "$ISO_STAGING/live/filesystem.squashfs" -comp xz -noappen
 cp "$SCRIPT_DIR/iso/grub.cfg" "$ISO_STAGING/boot/grub/"
 cp "$SCRIPT_DIR/iso/isolinux.cfg" "$ISO_STAGING/isolinux/"
 
-# Copy isolinux files
-if [ -f /usr/lib/ISOLINUX/isolinux.bin ]; then
-    cp /usr/lib/ISOLINUX/isolinux.bin "$ISO_STAGING/isolinux/"
-fi
-if [ -f /usr/lib/syslinux/modules/bios/ldlinux.c32 ]; then
-    cp /usr/lib/syslinux/modules/bios/ldlinux.c32 "$ISO_STAGING/isolinux/"
-fi
+# Copy isolinux/syslinux boot files (search common paths)
+find_and_copy() {
+    local filename="$1"
+    local dest="$2"
+    local found
+    found=$(find /usr/lib /usr/share -name "$filename" 2>/dev/null | head -1)
+    if [ -n "$found" ]; then
+        cp "$found" "$dest"
+        echo "  Found $filename at $found"
+    else
+        echo "ERROR: Cannot find $filename — install isolinux and syslinux-common packages"
+        exit 1
+    fi
+}
+
+find_and_copy "isolinux.bin" "$ISO_STAGING/isolinux/"
+find_and_copy "ldlinux.c32" "$ISO_STAGING/isolinux/"
+find_and_copy "isohdpfx.bin" "$ISO_STAGING/isolinux/"
 
 # Build EFI boot image
 echo "[6/8] Building EFI boot image..."
@@ -197,7 +208,7 @@ mcopy -i "$ISO_STAGING/boot/grub/efi.img" "$ISO_STAGING/boot/grub/bootx64.efi" :
 echo "[7/8] Building ISO image..."
 xorriso -as mkisofs \
     -o "$ISO_OUTPUT" \
-    -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
+    -isohybrid-mbr "$ISO_STAGING/isolinux/isohdpfx.bin" \
     -c isolinux/boot.cat \
     -b isolinux/isolinux.bin \
     -no-emul-boot -boot-load-size 4 -boot-info-table \
