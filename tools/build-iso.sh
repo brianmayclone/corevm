@@ -26,7 +26,7 @@ echo "[2/8] Building root filesystem..."
 ROOTFS_DIR="$BUILD_DIR/rootfs"
 sudo debootstrap --variant=minbase --include=\
 linux-image-amd64,grub-pc,grub-efi-amd64-bin,systemd,\
-systemd-resolved,openssh-server,openssl,chrony,parted,\
+openssh-server,openssl,chrony,parted,\
 e2fsprogs,dosfstools,iproute2,sudo,ca-certificates,\
 util-linux,pciutils,nftables,locales,\
 nfs-common,nfs-kernel-server,\
