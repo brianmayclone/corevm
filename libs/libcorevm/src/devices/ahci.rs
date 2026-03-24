@@ -47,13 +47,30 @@ impl DeferredIo {
         if self.is_flush {
             let _ = file.sync_all();
         } else if self.is_write {
-            use std::os::unix::fs::FileExt;
-            let _ = file.write_all_at(&self.buf, self.disk_offset);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::FileExt;
+                let _ = file.write_all_at(&self.buf, self.disk_offset);
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::FileExt;
+                let _ = file.seek_write(&self.buf, self.disk_offset);
+            }
         } else {
-            use std::os::unix::fs::FileExt;
             let mut done = 0usize;
             while done < self.buf.len() {
-                match file.read_at(&mut self.buf[done..], self.disk_offset + done as u64) {
+                #[cfg(unix)]
+                let res = {
+                    use std::os::unix::fs::FileExt;
+                    file.read_at(&mut self.buf[done..], self.disk_offset + done as u64)
+                };
+                #[cfg(windows)]
+                let res = {
+                    use std::os::windows::fs::FileExt;
+                    file.seek_read(&mut self.buf[done..], self.disk_offset + done as u64)
+                };
+                match res {
                     Ok(0) | Err(_) => break,
                     Ok(n) => done += n,
                 }
@@ -308,12 +325,21 @@ impl AhciDrive {
         if self.disk_fd >= 0 {
             #[cfg(feature = "std")]
             {
-                // Use pread (FileExt::read_at) for thread safety — no seek/read race.
-                use std::os::unix::fs::FileExt;
+                // Use pread/seek_read for thread safety — no seek/read race.
                 let file = unsafe { Self::borrow_file(self.disk_fd) };
                 let mut total = 0usize;
                 while total < buf.len() {
-                    match file.read_at(&mut buf[total..], offset + total as u64) {
+                    #[cfg(unix)]
+                    let res = {
+                        use std::os::unix::fs::FileExt;
+                        file.read_at(&mut buf[total..], offset + total as u64)
+                    };
+                    #[cfg(windows)]
+                    let res = {
+                        use std::os::windows::fs::FileExt;
+                        file.seek_read(&mut buf[total..], offset + total as u64)
+                    };
+                    match res {
                         Ok(0) => break,
                         Ok(n) => total += n,
                         Err(_) => break,
@@ -359,10 +385,19 @@ impl AhciDrive {
         if self.disk_fd >= 0 {
             #[cfg(feature = "std")]
             {
-                // Use pwrite (FileExt::write_all_at) for thread safety.
-                use std::os::unix::fs::FileExt;
+                // Use pwrite/seek_write for thread safety.
                 let file = unsafe { Self::borrow_file(self.disk_fd) };
-                if let Err(_e) = file.write_all_at(buf, offset) {
+                #[cfg(unix)]
+                let result = {
+                    use std::os::unix::fs::FileExt;
+                    file.write_all_at(buf, offset)
+                };
+                #[cfg(windows)]
+                let result = {
+                    use std::os::windows::fs::FileExt;
+                    file.seek_write(buf, offset).map(|_| ())
+                };
+                if let Err(_e) = result {
                     eprintln!("[ahci] WRITE ERROR at offset=0x{:X} len={}: {}", offset, buf.len(), _e);
                 }
                 core::mem::forget(file);

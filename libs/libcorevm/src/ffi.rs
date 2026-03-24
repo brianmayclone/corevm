@@ -596,12 +596,16 @@ pub extern "C" fn corevm_pit_advance(handle: u64, ticks: u32) -> u32 {
                 {
                     let redir2 = vm.backend.ioapic.redir_entry(2);
                     let ioapic_active = (redir2 & (1 << 16)) == 0; // pin 2 unmasked
-                    if ioapic_active {
-                        // APIC mode: deliver through IOAPIC only
+                    let lapic_enabled = vm.backend.lapic.is_enabled();
+                    if ioapic_active && lapic_enabled {
+                        // APIC mode: deliver through IOAPIC only while the guest
+                        // keeps the LAPIC software-enabled. If the guest clears
+                        // SVR.bit8, routing PIT through IOAPIC wedges early boot
+                        // on WHP because the interrupt is no longer LAPIC-deliverable.
                         vm.backend.ioapic_set_irq(2, true);
                         vm.backend.ioapic_set_irq(2, false);
                     } else {
-                        // Pre-APIC / PIC mode: deliver through PIC only
+                        // Pre-APIC / LAPIC-disabled mode: deliver through PIC only.
                         if !vm.pic_ptr.is_null() {
                             let pic = unsafe { &mut *vm.pic_ptr };
                             pic.raise_irq(0);
@@ -1886,6 +1890,10 @@ pub extern "C" fn corevm_set_cpu_count(handle: u64, count: u32) -> i32 {
                 // 0x80000008) are filtered with the correct cpu_count.
                 let _ = vm.backend.load_host_cpuid();
             }
+            #[cfg(feature = "windows")]
+            {
+                vm.backend.cpu_count = c;
+            }
             0
         }
         None => -1,
@@ -3077,37 +3085,35 @@ pub extern "C" fn corevm_setup_net(handle: u64, mode: i32) -> i32 {
 /// Setup user-mode networking with custom SDN configuration.
 /// The config pointer must point to a valid SlirpConfig struct.
 /// Returns 0 on success.
+#[cfg(feature = "linux")]
 #[no_mangle]
 pub extern "C" fn corevm_setup_net_sdn(handle: u64, config_ptr: *const crate::devices::slirp::SlirpConfig) -> i32 {
-    #[cfg(feature = "std")]
-    {
-        let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
-        if config_ptr.is_null() { return -1; }
-        let config = unsafe { &*config_ptr };
-        #[cfg(feature = "linux")]
-        {
-            // Clone the config data into a new SlirpConfig
-            let sdn_config = crate::devices::slirp::SlirpConfig {
-                net_prefix: config.net_prefix,
-                gateway_ip: config.gateway_ip,
-                dns_ip: config.dns_ip,
-                guest_ip: config.guest_ip,
-                netmask: config.netmask,
-                gw_mac: config.gw_mac,
-                custom_dns: config.custom_dns,
-                pxe_boot_file: config.pxe_boot_file.clone(),
-                pxe_next_server: config.pxe_next_server,
-            };
-            vm.net_backend = Some(alloc::boxed::Box::new(
-                crate::devices::slirp::SlirpNet::with_config(sdn_config)
-            ));
-            return 0;
-        }
-        #[cfg(not(feature = "linux"))]
-        { -1 }
-    }
-    #[cfg(not(feature = "std"))]
-    { let _ = (handle, config_ptr); -1 }
+    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
+    if config_ptr.is_null() { return -1; }
+    let config = unsafe { &*config_ptr };
+    let sdn_config = crate::devices::slirp::SlirpConfig {
+        net_prefix: config.net_prefix,
+        gateway_ip: config.gateway_ip,
+        dns_ip: config.dns_ip,
+        guest_ip: config.guest_ip,
+        netmask: config.netmask,
+        gw_mac: config.gw_mac,
+        custom_dns: config.custom_dns,
+        pxe_boot_file: config.pxe_boot_file.clone(),
+        pxe_next_server: config.pxe_next_server,
+    };
+    vm.net_backend = Some(alloc::boxed::Box::new(
+        crate::devices::slirp::SlirpNet::with_config(sdn_config)
+    ));
+    0
+}
+
+/// Stub for non-Linux platforms (SLIRP not available).
+#[cfg(not(feature = "linux"))]
+#[no_mangle]
+pub extern "C" fn corevm_setup_net_sdn(handle: u64, config_ptr: *const core::ffi::c_void) -> i32 {
+    let _ = (handle, config_ptr);
+    -1
 }
 
 /// Poll the network backend: move TX packets from E1000 to backend,

@@ -171,8 +171,10 @@ const WHV_EXIT_REASON_APIC_EOI: u32 = 0x00000009;
 /// WHV_INTERRUPT_CONTROL for WHvRequestInterrupt (XApic mode).
 /// Layout: [0..8] u64 bitfield (Type[0:7], DestMode[8:11], TriggerMode[12:15], Reserved[16:63]),
 ///         [8..12] Destination (APIC ID), [12..16] Vector.
+/// Currently unused (APIC emulation disabled), kept for reference.
 #[repr(C)]
 #[derive(Copy, Clone)]
+#[allow(dead_code)]
 struct WhvInterruptControl {
     type_and_flags: u64, // bits 0-7: Type (0=Fixed,1=LowestPri), bits 8-11: DestMode, bits 12-15: TriggerMode
     destination: u32,    // target APIC ID
@@ -241,6 +243,9 @@ const REG_LSTAR: u32 = 0x00002009;
 const REG_CSTAR: u32 = 0x0000200A;
 const REG_SFMASK: u32 = 0x0000200B;
 
+const REG_TSC_AUX: u32 = 0x0000200C;
+
+const REG_CR8: u32 = 0x00000020;
 const REG_PENDING_INTERRUPTION: u32 = 0x80000000;
 const REG_PENDING_EVENT: u32 = 0x80000002; // WHvRegisterPendingEvent — 128-bit, for ExtInt injection in XApic mode
 const REG_DELIVERABILITY_NOTIFICATIONS: u32 = 0x80000004;
@@ -320,11 +325,19 @@ fn host_tsc() -> u64 {
     { 0 }
 }
 
-/// Minimal Local APIC state for handling MMIO at 0xFEE00000.
-/// Timer uses host TSC so current_count reads always reflect real elapsed time,
-/// even inside the inner MMIO loop of run_vcpu.
+/// Software Local APIC — full ISR/IRR/TPR priority emulation.
+/// With LocalApicEmulationMode=None, WHP does NOT manage the LAPIC.
+/// All LAPIC logic is handled here: interrupt acceptance, priority,
+/// ISR tracking, EOI, and timer. LAPIC MMIO at 0xFEE00000 exits
+/// as memory accesses which are dispatched to this struct.
 pub struct SoftLapic {
     pub regs: [u32; 64],
+    // 256-bit IRR (Interrupt Request Register) — 8 x u32
+    pub irr: [u32; 8],
+    // 256-bit ISR (In-Service Register) — 8 x u32
+    pub isr: [u32; 8],
+    // 256-bit TMR (Trigger Mode Register) — tracks level-triggered vectors
+    pub tmr: [u32; 8],
     // Timer state — TSC-based
     pub timer_initial: u32,       // guest-written initial count
     pub timer_divide: u32,        // divisor (1,2,4,8,16,32,64,128)
@@ -365,6 +378,9 @@ impl SoftLapic {
         // this and adapt.
         SoftLapic {
             regs,
+            irr: [0; 8],
+            isr: [0; 8],
+            tmr: [0; 8],
             timer_initial: 0,
             timer_divide: 1,
             timer_armed: false,
@@ -423,25 +439,48 @@ impl SoftLapic {
         let idx = ((offset & 0xFFF) >> 4) as usize;
         match idx {
             LAPIC_IDX_CURRENT_COUNT => self.current_count(),
+            // IRR: 0x200-0x270 (indices 0x20-0x27)
+            0x20..=0x27 => self.irr[idx - 0x20],
+            // ISR: 0x100-0x170 (indices 0x10-0x17)
+            0x10..=0x17 => self.isr[idx - 0x10],
+            // TMR: 0x180-0x1F0 (indices 0x18-0x1F)
+            0x18..=0x1F => self.tmr[idx - 0x18],
+            // TPR at index 0x08
+            0x08 => self.regs[0x08],
+            // PPR (Processor Priority Register) at index 0x0A — computed
+            0x0A => self.ppr(),
             _ => {
                 if idx < 64 { self.regs[idx] } else { 0 }
             }
         }
     }
 
+    /// Process EOI — clear highest ISR bit and return the vector that was EOI'd.
+    /// Caller must broadcast this to IOAPIC for level-triggered Remote IRR clearing.
+    fn write_eoi(&mut self) -> Option<u8> {
+        for i in (0..8u32).rev() {
+            if self.isr[i as usize] != 0 {
+                let bit = 31 - self.isr[i as usize].leading_zeros();
+                let vector = i * 32 + bit;
+                self.isr[i as usize] &= !(1 << bit);
+                // If this was level-triggered (TMR bit set), clear TMR too
+                let tmr_set = (self.tmr[i as usize] & (1 << bit)) != 0;
+                if tmr_set {
+                    self.tmr[i as usize] &= !(1 << bit);
+                }
+                return Some(vector as u8);
+            }
+        }
+        None
+    }
+
     fn write(&mut self, offset: u64, val: u32) {
         let idx = ((offset & 0xFFF) >> 4) as usize;
         match idx {
             LAPIC_IDX_EOI => {
-                // EOI: clear highest-priority ISR bit
-                for i in (0..8).rev() {
-                    let isr_idx = LAPIC_IDX_ISR0 + i;
-                    if isr_idx < 64 && self.regs[isr_idx] != 0 {
-                        let bit = 31 - self.regs[isr_idx].leading_zeros();
-                        self.regs[isr_idx] &= !(1 << bit);
-                        break;
-                    }
-                }
+                // EOI handled by write_eoi() — called from run_vcpu MMIO handler
+                // which also broadcasts to IOAPIC. Don't handle here to avoid
+                // double-processing; the MMIO handler calls write_eoi() directly.
             }
             LAPIC_IDX_ICR_LO => {} // IPI - ignore for single CPU
             LAPIC_IDX_INITIAL_COUNT => {
@@ -471,6 +510,18 @@ impl SoftLapic {
                 // APIC ID (0x020) and Version (0x030) are read-only.
                 // Linux verify_local_APIC() writes a test pattern and expects
                 // the value to NOT change. If it does, APIC is deemed broken.
+            }
+            LAPIC_IDX_SVR => {
+                let was_enabled = (self.regs[LAPIC_IDX_SVR] & (1 << 8)) != 0;
+                self.regs[LAPIC_IDX_SVR] = val;
+                let now_enabled = (val & (1 << 8)) != 0;
+                // Log SVR changes — critical for debugging APIC enable/disable
+                whp_debug(format_args!("LAPIC SVR: {:#x} (was_en={} now_en={})",
+                    val, was_enabled, now_enabled));
+                // NOTE: With kernel-irqchip=off, we do NOT clear IRR/ISR/TMR on
+                // APIC disable. The CPU's interrupt delivery is independent of the
+                // software LAPIC enable bit — only RFLAGS.IF matters for injection
+                // via REG_PENDING_INTERRUPTION.
             }
             _ => {
                 if idx < 64 { self.regs[idx] = val; }
@@ -527,6 +578,94 @@ impl SoftLapic {
             None
         }
     }
+
+    /// Accept an interrupt into the IRR (Interrupt Request Register).
+    /// If level-triggered, also set the TMR bit for EOI broadcast tracking.
+    pub fn accept_irq(&mut self, vector: u8, level_triggered: bool) {
+        let word = (vector >> 5) as usize; // vector / 32
+        let bit = (vector & 31) as u32;
+        self.irr[word] |= 1 << bit;
+        if level_triggered {
+            self.tmr[word] |= 1 << bit;
+        } else {
+            self.tmr[word] &= !(1 << bit);
+        }
+    }
+
+    /// Compute PPR (Processor Priority Register).
+    /// PPR = max(TPR, highest ISR priority class) — determines minimum
+    /// interrupt priority the processor will accept.
+    fn ppr(&self) -> u32 {
+        let tpr = self.regs[0x08];
+        let isrv = self.highest_isr_vector();
+        let isr_class = (isrv >> 4) as u32;
+        let tpr_class = tpr >> 4;
+        if tpr_class >= isr_class { tpr } else { (isr_class << 4) & 0xF0 }
+    }
+
+    /// Find highest-priority vector in ISR.
+    fn highest_isr_vector(&self) -> u8 {
+        for i in (0..8u32).rev() {
+            if self.isr[i as usize] != 0 {
+                let bit = 31 - self.isr[i as usize].leading_zeros();
+                return (i * 32 + bit) as u8;
+            }
+        }
+        0
+    }
+
+    /// Returns true if the APIC is software-enabled (SVR bit 8).
+    pub fn is_enabled(&self) -> bool {
+        (self.regs[LAPIC_IDX_SVR] & (1 << 8)) != 0
+    }
+
+    /// Find highest-priority vector in IRR that the emulated LAPIC would
+    /// currently deliver to the CPU.
+    pub fn highest_pending_vector(&self) -> Option<u8> {
+        if !self.is_enabled() {
+            return None;
+        }
+        let ppr_class = (self.ppr() >> 4) as u8;
+        for i in (0..8u32).rev() {
+            if self.irr[i as usize] != 0 {
+                let bit = 31 - self.irr[i as usize].leading_zeros();
+                let vector = i * 32 + bit;
+                if vector < 16 { continue; }
+                if ((vector as u8) >> 4) <= ppr_class {
+                    continue;
+                }
+                return Some(vector as u8);
+            }
+        }
+        None
+    }
+
+    /// Remove a vector from IRR without marking it in-service yet.
+    pub fn consume_pending(&mut self, vector: u8) {
+        let word = (vector >> 5) as usize;
+        let bit = (vector & 31) as u32;
+        self.irr[word] &= !(1 << bit);
+    }
+
+    /// Clear software bookkeeping for a completed interrupt.
+    pub fn complete_interrupt(&mut self, vector: u8) {
+        let word = (vector >> 5) as usize;
+        let bit = (vector & 31) as u32;
+        self.isr[word] &= !(1 << bit);
+        self.tmr[word] &= !(1 << bit);
+    }
+
+    /// Consume an interrupt from IRR for injection.
+    /// Sets ISR for EOI tracking only (IOAPIC Remote IRR clearing).
+    /// The ISR is NOT used for delivery priority decisions — see
+    /// highest_pending_vector() which ignores ISR entirely.
+    pub fn begin_interrupt(&mut self, vector: u8) {
+        let word = (vector >> 5) as usize;
+        let bit = (vector & 31) as u32;
+        self.irr[word] &= !(1 << bit);
+        self.isr[word] |= 1 << bit;
+    }
+
 }
 
 /// Minimal IOAPIC state for indirect register access at 0xFEC00000.
@@ -744,6 +883,10 @@ pub struct WhpBackend {
     /// Set by poll_irqs when a PIC vector is ready. Applied in run_vcpu's
     /// inner loop before WHvRunVirtualProcessor when the guest is interruptible.
     pub pending_pic_inject: Option<u8>,
+    /// Soft-LAPIC vector already handed to WHP and awaiting guest EOI.
+    /// Keep this outside ISR so a not-yet-serviced pending interruption
+    /// cannot poison the emulated LAPIC state.
+    lapic_inflight: Option<u8>,
     /// Set when InterruptWindow exit fires — guest is ready for interrupt.
     /// Like QEMU's `ready_for_pic_interrupt`.
     pub ready_for_pic_interrupt: bool,
@@ -751,6 +894,12 @@ pub struct WhpBackend {
     /// PendingEvent at IF=0 is unsafe (causes INVALID_VP_STATE during BIOS).
     /// After kernel start, PendingEvent at IF=0 is safe — WHP pends it.
     kernel_started: bool,
+    /// Number of vCPUs configured for this VM (set via set_cpuid or externally).
+    pub cpu_count: u32,
+    /// Software-emulated MSR store for MSRs that WHP doesn't track natively.
+    /// Covers MTRR, MCG/MCA, DEBUGCTL, SPEC_CTRL, IA32_MISC_ENABLE, etc.
+    /// Keyed by MSR index, stores the last written value.
+    sw_msr: alloc::collections::BTreeMap<u32, u64>,
 }
 
 unsafe impl Send for WhpBackend {}
@@ -881,9 +1030,15 @@ impl WhpBackend {
                 whp_debug(format_args!("ExceptionExitBitmap set OK: {:#x}", exc_bitmap));
             }
 
-            // XApic emulation — WHP handles LAPIC internally (timer, ISR/IRR, EOI).
+            // APIC emulation — DISABLED (kernel-irqchip=off approach).
             // WHvPartitionPropertyCodeLocalApicEmulationMode = 0x00001005
-            let apic_mode: u32 = 1;
+            // Mode 0 = None: WHP does NOT emulate the LAPIC internally.
+            // All LAPIC state (ISR/IRR/TPR/EOI) is managed by our SoftLapic.
+            // LAPIC MMIO at 0xFEE00000 exits as memory access for software handling.
+            // All interrupt injection goes through REG_PENDING_INTERRUPTION.
+            // This matches QEMU's kernel-irqchip=off approach and avoids the
+            // WHvRequestInterrupt delivery problem entirely.
+            let apic_mode: u32 = 0; // WHvX64LocalApicEmulationModeNone
             let hr = (api.set_property)(
                 partition,
                 0x00001005,
@@ -891,9 +1046,9 @@ impl WhpBackend {
                 core::mem::size_of::<u32>() as u32,
             );
             if hr < 0 {
-                whp_debug(format_args!("LocalApicEmulationMode(xApic=1) FAILED hr={:#x}", hr));
+                whp_debug(format_args!("LocalApicEmulationMode(None=0) FAILED hr={:#x}", hr));
             } else {
-                whp_debug(format_args!("LocalApicEmulationMode set to xApic(1)"));
+                whp_debug(format_args!("LocalApicEmulationMode set to None(0) — software LAPIC"));
             }
 
             let hr = (api.setup_partition)(partition);
@@ -915,9 +1070,78 @@ impl WhpBackend {
                 pending_mmio_read: [None; 16],
                 exit_ctx_interrupt_ok: false,
                 pending_pic_inject: None,
+                lapic_inflight: None,
                 ready_for_pic_interrupt: false,
                 kernel_started: false,
+                cpu_count: 1,
+                sw_msr: {
+                    let mut m = alloc::collections::BTreeMap::new();
+                    // IA32_MISC_ENABLE: Fast-String(0) + BTS unavailable(11) = 0x801
+                    m.insert(0x1A0, (1u64 << 0) | (1u64 << 11));
+                    // IA32_MTRRCAP: 8 variable ranges, WC supported, fixed supported
+                    m.insert(0xFE, 0x508);
+                    // IA32_MTRR_DEF_TYPE: default UC, MTRRs disabled at reset
+                    m.insert(0x2FF, 0);
+                    // IA32_MCG_CAP: 0 MC banks (no machine-check emulation)
+                    m.insert(0x179, 0);
+                    // IA32_MCG_STATUS: no error
+                    m.insert(0x17A, 0);
+                    // IA32_FEATURE_CONTROL: Lock bit set (VMX locked off)
+                    m.insert(0x3A, 1);
+                    // IA32_PLATFORM_INFO: non-zero so TSC frequency ratio works
+                    // Bits [15:8] = max non-turbo ratio; report 20 (= 2.0 GHz at 100 MHz bus)
+                    m.insert(0xCE, 20u64 << 8);
+                    m
+                },
             })
+        }
+    }
+
+    /// Returns true if `msr_num` is a software-emulated MSR stored in `sw_msr`.
+    /// These MSRs are not backed by WHP virtual registers but are commonly
+    /// accessed by BIOS, Linux, and Windows during boot. Reads return the
+    /// last written value (or the default); writes are absorbed.
+    fn is_sw_emulated_msr(msr_num: u32) -> bool {
+        match msr_num {
+            // IA32_PLATFORM_ID, IA32_FEATURE_CONTROL, IA32_BIOS_SIGN_ID
+            0x17 | 0x3A | 0x8B => true,
+            // IA32_TSC_ADJUST
+            0x3B => true,
+            // IA32_SPEC_CTRL, IA32_PRED_CMD
+            0x48 | 0x49 => true,
+            // IA32_MTRRCAP
+            0xFE => true,
+            // IA32_PLATFORM_INFO
+            0xCE => true,
+            // IA32_DEBUGCTL
+            0x1D9 => true,
+            // IA32_MISC_ENABLE
+            0x1A0 => true,
+            // IA32_MCG_CAP, IA32_MCG_STATUS, IA32_MCG_CTL
+            0x179 | 0x17A | 0x17B => true,
+            // IA32_PERF_STATUS, IA32_PERF_CTL (P-state, safe to ignore)
+            0x198 | 0x199 => true,
+            // IA32_THERM_STATUS, IA32_CLOCK_MODULATION
+            0x19C | 0x19A => true,
+            // Variable-range MTRRs: PHYSBASE0-7 and PHYSMASK0-7 (0x200..0x20F)
+            0x200..=0x20F => true,
+            // Fixed-range MTRRs
+            0x250 | 0x258 | 0x259 | 0x268..=0x26F => true,
+            // IA32_MTRR_DEF_TYPE
+            0x2FF => true,
+            // MCA banks (MC0_CTL..MC8_STATUS) — 0x400..0x47F
+            0x400..=0x47F => true,
+            // AMD performance counters and event selects (0xC001_0000..0xC001_0007)
+            // and AMD perf event select (0xC001_0200..0xC001_020B)
+            0xC001_0000..=0xC001_0007 => true,
+            0xC001_0200..=0xC001_020B => true,
+            // AMD SYSCFG, TOP_MEM, TOP_MEM2, NB_CFG, etc.
+            0xC001_0010 | 0xC001_001A | 0xC001_001D | 0xC001_001F => true,
+            // AMD HWCR
+            0xC001_0015 => true,
+            // AMD BU_CFG / BU_CFG2
+            0xC001_1023 | 0xC001_102A => true,
+            _ => false,
         }
     }
 
@@ -1217,143 +1441,71 @@ impl WhpBackend {
 }
 
 impl WhpBackend {
-    /// Try to deliver a level-triggered IOAPIC interrupt via WHvRequestInterrupt.
-    /// WHvRequestInterrupt properly sets TMR in WHP's internal LAPIC so that APIC
-    /// EOI exits fire for level-triggered interrupts (needed to clear Remote IRR).
-    /// Returns true if WHvRequestInterrupt succeeded (interrupt queued in LAPIC).
-    fn try_request_interrupt(&mut self, intr: &IoapicInterrupt) -> bool {
-        if let Some(request_fn) = self.api.request_interrupt {
-            let ctrl = WhvInterruptControl {
-                type_and_flags: (intr.delivery as u64)
-                    | ((intr.dest_mode as u64) << 8)
-                    | ((intr.trigger as u64) << 12),
-                destination: intr.dest as u32,
-                vector: intr.vector as u32,
-            };
-            let hr = request_fn(
-                self.partition,
-                &ctrl as *const WhvInterruptControl as *const u8,
-                core::mem::size_of::<WhvInterruptControl>() as u32,
-            );
-            if hr >= 0 {
-                return true;
-            }
-            static REQ_FAIL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-            let cnt = REQ_FAIL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            if cnt < 20 {
-                whp_debug(format_args!("WHvRequestInterrupt failed hr={:#x} vec={} trig={}",
-                    hr, intr.vector, intr.trigger));
-            }
-        }
-        false
+    fn drop_lapic_external_state(&mut self) {
+        self.lapic_inflight = None;
+        self.lapic.irr = [0; 8];
+        self.lapic.isr = [0; 8];
+        self.lapic.tmr = [0; 8];
+        self.ioapic.pending.clear();
     }
 
-    /// Deliver pending IOAPIC interrupts via PendingEvent ExtInt injection.
+    /// Deliver pending IOAPIC interrupts into SoftLapic's IRR.
     ///
-    /// Strategy:
-    /// - **Edge-triggered**: Always use PendingEvent ExtInt (proven to work).
-    /// - **Level-triggered**: Try WHvRequestInterrupt first (sets TMR bit in
-    ///   WHP's internal LAPIC → APIC EOI exits fire → Remote IRR gets cleared).
-    ///   Fall back to PendingEvent ExtInt + manual EOI tracking if unavailable.
-    ///
-    /// PendingEvent can only hold one event at a time, so we inject the first
-    /// and re-queue the rest for the next interrupt window.
+    /// With APIC emulation disabled (mode=0), WHvRequestInterrupt is not used.
+    /// Instead, IOAPIC interrupts are queued into the software LAPIC's IRR.
+    /// The pre-run block then injects the highest-priority IRR vector via
+    /// REG_PENDING_INTERRUPTION when the guest is interruptible (IF=1).
     fn deliver_ioapic_pending(&mut self) {
-        self.deliver_ioapic_pending_inner(false);
-    }
-
-    /// Deliver pending IOAPIC interrupts. When `force` is true, skip the
-    /// RFLAGS.IF check — used from the InterruptWindow handler where WHP
-    /// reports IF=0 despite the guest being interruptible (WHP quirk).
-    fn deliver_ioapic_pending_inner(&mut self, _force: bool) {
         let pending = self.ioapic.take_pending();
         if pending.is_empty() { return; }
-
-        // WHvRequestInterrupt goes through the virtual LAPIC and handles
-        // IF checks internally, so we no longer need to gate on exit_ctx_interrupt_ok.
-        // The interrupt is buffered in the LAPIC's IRR until the guest enables IF.
-
-        // For level-triggered interrupts, try WHvRequestInterrupt first.
-        // WHvRequestInterrupt properly sets TMR in the LAPIC so EOI exits work,
-        // but it may not actually deliver in all cases (WHP quirk).
-        // For edge-triggered, always use PendingEvent ExtInt which reliably delivers.
-        let mut ext_int_injected = false;
-        let mut need_window = false;
+        if !self.lapic.is_enabled() {
+            static IOAPIC_DROP_CTR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            let n = IOAPIC_DROP_CTR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 20 || n % 1000 == 0 {
+                whp_debug(format_args!(
+                    "dropping {} IOAPIC IRQ(s) while LAPIC disabled",
+                    pending.len()
+                ));
+            }
+            return;
+        }
 
         for intr in &pending {
             {
                 static IOAPIC_INTR_CTR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
                 let cnt = IOAPIC_INTR_CTR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                if cnt < 50 {
-                    whp_debug(format_args!("IOAPIC deliver: vec={} dest={} dm={} trig={} del={}",
+                if cnt < 50 || cnt % 1000 == 0 {
+                    whp_debug(format_args!("IOAPIC->LAPIC IRR vec={} dest={} dm={} trig={} del={}",
                         intr.vector, intr.dest, intr.dest_mode, intr.trigger, intr.delivery));
                 }
             }
-
-            // Use WHvRequestInterrupt for ALL IOAPIC interrupts (edge and level).
-            // WHvRequestInterrupt goes through WHP's virtual LAPIC which handles
-            // IF checks internally — the interrupt is buffered in the LAPIC's IRR
-            // until the guest becomes interruptible.  This avoids the INVALID_VP_STATE
-            // crash that PendingEvent ExtInt causes when IF=0.
-            if self.try_request_interrupt(intr) {
-                continue; // Successfully queued in LAPIC
-            }
-
-            // Fallback: PendingEvent ExtInt (only if WHvRequestInterrupt unavailable).
-            // PendingEvent can only hold one, so inject the first and re-queue rest.
-            if !ext_int_injected {
-                let _ = self.inject_interrupt(0, intr.vector);
-                ext_int_injected = true;
-            } else {
-                self.ioapic.pending.push(*intr);
-                need_window = true;
-            }
-        }
-
-        if need_window {
-            let _ = self.request_interrupt_window(0, true);
+            let level_triggered = intr.trigger != 0;
+            self.lapic.accept_irq(intr.vector, level_triggered);
         }
     }
 
-    /// Inject an MSI (Message Signaled Interrupt) via WHvRequestInterrupt.
-    /// Decodes the MSI address/data into vector, destination, trigger mode.
-    /// Returns Ok(()) on success, Err if WHvRequestInterrupt is unavailable.
-    pub fn signal_msi(&mut self, address: u64, data: u32) -> Result<(), VmError> {
-        let request_fn = self.api.request_interrupt.ok_or(VmError::NoHardwareSupport)?;
-
+    /// Inject an MSI (Message Signaled Interrupt) into SoftLapic IRR.
+    /// Decodes the MSI address/data into vector and trigger mode.
+    pub fn signal_msi(&mut self, _address: u64, data: u32) -> Result<(), VmError> {
         // MSI address format (Intel SDM Vol 3, 10.11.1):
         //   bits 31:20 = 0xFEE (fixed prefix)
         //   bits 19:12 = Destination ID
-        //   bit 3      = Redirection Hint (RH)
         //   bit 2      = Destination Mode (DM): 0=Physical, 1=Logical
         // MSI data format:
         //   bits 7:0   = Vector
-        //   bits 10:8  = Delivery Mode (0=Fixed, 1=LowestPri)
-        //   bit 14     = Level (for level-triggered)
         //   bit 15     = Trigger Mode (0=Edge, 1=Level)
-        let dest = ((address >> 12) & 0xFF) as u8;
-        let dest_mode = if (address & (1 << 2)) != 0 { 1u64 } else { 0u64 };
-        let vector = (data & 0xFF) as u32;
-        let delivery = ((data >> 8) & 0x7) as u64;
-        let trigger = if (data & (1 << 15)) != 0 { 1u64 } else { 0u64 };
+        let vector = (data & 0xFF) as u8;
+        let level_triggered = (data & (1 << 15)) != 0;
 
-        let ctrl = WhvInterruptControl {
-            type_and_flags: delivery | (dest_mode << 8) | (trigger << 12),
-            destination: dest as u32,
-            vector,
-        };
-
-        let hr = request_fn(
-            self.partition,
-            &ctrl as *const WhvInterruptControl as *const u8,
-            core::mem::size_of::<WhvInterruptControl>() as u32,
-        );
-        if hr >= 0 {
-            Ok(())
-        } else {
-            whp_debug(format_args!("signal_msi failed hr={:#x} addr={:#x} data={:#x}", hr, address, data));
-            Err(VmError::BackendError(hr))
+        if vector < 16 {
+            return Ok(()); // invalid vector
         }
+        if !self.lapic.is_enabled() {
+            return Ok(());
+        }
+
+        self.lapic.accept_irq(vector, level_triggered);
+        Ok(())
     }
 
     /// Emulate KVM's set_irq_line: route an IRQ through both PIC and IOAPIC.
@@ -1435,6 +1587,7 @@ impl VmBackend for WhpBackend {
         self.lapic = SoftLapic::new();
         self.ioapic = SoftIoapic::new();
         self.pending_mmio_read = [None; 16];
+        self.lapic_inflight = None;
         Ok(())
     }
 
@@ -1498,18 +1651,12 @@ impl VmBackend for WhpBackend {
             return Err(VmError::BackendErrorCtx(hr, "WHvGetVirtualProcessorRegisters(RIP) after create"));
         }
 
-        // Set IA32_APIC_BASE to standard xAPIC mode: base=0xFEE00000, BSP=1, Enable=1.
-        // Without this, WHP may inherit the host's x2APIC-enabled value (bit 10 set),
-        // causing the guest kernel to try x2APIC MSR access which our soft LAPIC can't handle.
-        // bit 8 = BSP, bit 11 = APIC Global Enable, bit 10 must be CLEAR (no x2APIC)
-        let apic_base_val = 0xFEE0_0000u64 | (1 << 8) | (1 << 11); // 0xFEE00900
+        // With APIC emulation disabled (mode=0), set APIC_BASE explicitly.
+        // 0xFEE00000 = base address, bit 8 = BSP, bit 11 = APIC enabled (xAPIC)
+        // bit 10 = x2APIC mode (NOT set — we use xAPIC MMIO only)
+        let apic_base_val: u64 = 0xFEE0_0000 | (1 << 11) | (1 << 8); // 0xFEE00900
         let _ = self.set_regs_raw(id, &[REG_APIC_BASE], &[WHV_REGISTER_VALUE::from_u64(apic_base_val)]);
-
-        // Also log what APIC_BASE was before we set it, for debugging
-        let mut apic_val = [WHV_REGISTER_VALUE::default()];
-        if self.get_regs_raw(id, &[REG_APIC_BASE], &mut apic_val).is_ok() {
-            whp_debug(format_args!("APIC_BASE after set: {:#x}", unsafe { apic_val[0].reg64 }));
-        }
+        whp_debug(format_args!("APIC_BASE set to {:#x} (enabled, BSP, xAPIC)", apic_base_val));
 
         Ok(())
     }
@@ -1534,69 +1681,114 @@ impl VmBackend for WhpBackend {
                 return Ok(VmExitReason::InterruptWindow);
             }
 
-            // === PRE-RUN: Inject pending interrupts when guest is interruptible ===
-            // WHvRegisterDeliverabilityNotifications (InterruptWindow) is NOT
-            // supported on this WHP version (returns WHV_E_UNKNOWN_REGISTER).
-            // Instead, we check exit_ctx_interrupt_ok on every pre-run iteration
-            // PRE-RUN: Inject pending interrupts (QEMU whpx_vcpu_pre_run approach).
-            // Two injection paths + interrupt window request for deferred delivery.
-            {
-                let has_pending = !self.ioapic.pending.is_empty() || self.pending_pic_inject.is_some();
-                let can_inject = self.exit_ctx_interrupt_ok || self.ready_for_pic_interrupt;
+            // === PRE-RUN: Unified interrupt injection ===
+            // With APIC emulation disabled (kernel-irqchip=off), ALL interrupts
+            // go through REG_PENDING_INTERRUPTION. Priority order:
+            //   1. Flush IOAPIC pending → SoftLapic IRR
+            //   2. Check LAPIC timer → SoftLapic IRR
+            //   3. PIC interrupt → direct inject (bypasses LAPIC)
+            //   4. Highest-priority SoftLapic IRR → inject via PendingInterruption
+            //
+            // Only one interrupt can be injected per VM entry.
 
-                if has_pending && can_inject {
-                    // When ready_for_pic_interrupt is set, the InterruptWindow exit
-                    // just fired — the guest IS interruptible by definition.  Do NOT
-                    // re-read RFLAGS: WHvGetVirtualProcessorRegisters returns stale
-                    // IF=0 on WHP (same quirk as the exit context), which would
-                    // cause an infinite InterruptWindow → re-request loop.
-                    // Only verify RFLAGS when relying on exit_ctx_interrupt_ok alone.
-                    let interruptible = if self.ready_for_pic_interrupt {
-                        true // InterruptWindow guarantees interruptibility
+            // 1. Flush IOAPIC pending into SoftLapic IRR
+            if !self.ioapic.pending.is_empty() {
+                self.deliver_ioapic_pending();
+            }
+
+            // 2. LAPIC timer: poll and queue into IRR
+            if let Some(timer_vec) = self.lapic.poll_timer() {
+                self.lapic.accept_irq(timer_vec, false);
+            }
+
+            // Determine if guest is interruptible.
+            // With APIC emulation disabled, we must check the actual RFLAGS.IF
+            // because exit_ctx_interrupt_ok may be stale from a LAPIC MMIO
+            // continue (where IF=0 inside the interrupt handler).
+            // Always do a fresh check if we have something to deliver.
+            let has_pending = self.pending_pic_inject.is_some()
+                || self.lapic_inflight.is_some()
+                || self.lapic.highest_pending_vector().is_some();
+            let can_inject = if has_pending && !self.exit_ctx_interrupt_ok && !self.ready_for_pic_interrupt {
+                // Fresh RFLAGS check + activity state check
+                let mut vals = [WHV_REGISTER_VALUE::default(); 2];
+                if self.get_regs_raw(id, &[REG_RFLAGS, REG_INTERNAL_ACTIVITY_STATE], &mut vals).is_ok() {
+                    let if_set = (unsafe { vals[0].reg64 } & 0x200) != 0;
+                    let activity = unsafe { vals[1].reg64 };
+                    let no_shadow = (activity & 1) == 0; // bit 0 = interrupt shadow
+                    if_set && no_shadow
+                } else {
+                    false
+                }
+            } else {
+                self.exit_ctx_interrupt_ok || self.ready_for_pic_interrupt
+            };
+
+            // 3. PIC interrupt — highest priority (ExtINT), bypasses LAPIC priority
+            if let Some(pic_vec) = self.pending_pic_inject {
+                if can_inject {
+                    self.ready_for_pic_interrupt = false;
+                    if self.inject_pic_interrupt(id, pic_vec).is_ok() {
+                        self.pending_pic_inject = None;
                     } else {
-                        // exit_ctx_interrupt_ok from last exit — double-check via register read
-                        let mut rfl = [WHV_REGISTER_VALUE::default()];
-                        if self.get_regs_raw(id, &[REG_RFLAGS], &mut rfl).is_ok() {
-                            (unsafe { rfl[0].reg64 } & 0x200) != 0
-                        } else {
-                            true
-                        }
-                    };
-
-                    if interruptible {
-                        // Guest is interruptible — inject now.
-                        // Clear the one-shot flag BEFORE injection so it doesn't
-                        // persist across subsequent iterations where IF may be 0.
+                        let _ = self.request_interrupt_window(id, true);
+                    }
+                } else {
+                    let _ = self.request_interrupt_window(id, true);
+                }
+            } else if self.lapic_inflight.is_none() {
+                if let Some(lapic_vec) = self.lapic.highest_pending_vector() {
+                    // 4. LAPIC IRR: inject highest-priority pending vector
+                    if can_inject {
                         self.ready_for_pic_interrupt = false;
-
-                        if !self.ioapic.pending.is_empty() {
-                            self.deliver_ioapic_pending_inner(true);
-                        }
-                        if let Some(vector) = self.pending_pic_inject {
-                            if !self.has_pending_event(id) {
-                                let lo: u64 = 1 | (5u64 << 1) | ((vector as u64) << 8);
-                                let val = WHV_REGISTER_VALUE { reg128: [lo, 0] };
-                                let _ = self.set_regs_raw(id, &[REG_PENDING_EVENT], &[val]);
-                                // Clear HaltSuspend if vCPU is in HLT
-                                let mut activity = [WHV_REGISTER_VALUE::default()];
-                                if self.get_regs_raw(id, &[REG_INTERNAL_ACTIVITY_STATE], &mut activity).is_ok() {
-                                    let state = unsafe { activity[0].reg64 };
-                                    if state & 2 != 0 {
-                                        let _ = self.set_regs_raw(id, &[REG_INTERNAL_ACTIVITY_STATE],
-                                            &[WHV_REGISTER_VALUE::from_u64(state & !2)]);
-                                    }
+                        match self.inject_pic_interrupt(id, lapic_vec) {
+                            Ok(()) => {
+                                self.lapic.consume_pending(lapic_vec);
+                                self.lapic_inflight = Some(lapic_vec);
+                                static LAPIC_INJ_CTR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                                let n = LAPIC_INJ_CTR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                if n < 50 || n % 1000 == 0 {
+                                    whp_debug(format_args!("LAPIC inject vec={} (#{}) irr={:08x}_{:08x}",
+                                        lapic_vec, n, self.lapic.irr[7], self.lapic.irr[0]));
                                 }
-                                self.pending_pic_inject = None;
+                            }
+                            Err(e) => {
+                                whp_debug(format_args!("LAPIC inject failed vec={} err={:?}", lapic_vec, e));
+                                let _ = self.request_interrupt_window(id, true);
                             }
                         }
                     } else {
-                        // IF is actually 0 — request interrupt window
+                        static CANT_INJ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                        let n = CANT_INJ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 50 || n % 2000 == 0 {
+                            // Read fresh RFLAGS + RIP for diagnostics
+                            let (diag_rip, diag_rflags) = {
+                                let mut dv = [WHV_REGISTER_VALUE::default(); 2];
+                                if self.get_regs_raw(id, &[REG_RIP, REG_RFLAGS], &mut dv).is_ok() {
+                                    (unsafe { dv[0].reg64 }, unsafe { dv[1].reg64 })
+                                } else { (0, 0) }
+                            };
+                            whp_debug(format_args!("LAPIC can't inject vec={} exit_ok={} ready={} inflight={:?} (#{}) isr={:08x}_{:08x} irr={:08x}_{:08x} svr={:#x} rip={:#x} rflags={:#x}",
+                                lapic_vec, self.exit_ctx_interrupt_ok, self.ready_for_pic_interrupt, self.lapic_inflight, n,
+                                self.lapic.isr[1], self.lapic.isr[0],
+                                self.lapic.irr[1], self.lapic.irr[0],
+                                self.lapic.regs[LAPIC_IDX_SVR],
+                                diag_rip, diag_rflags));
+                        }
                         let _ = self.request_interrupt_window(id, true);
                     }
-                } else if has_pending && !can_inject {
-                    // Can't inject now — request InterruptWindow notification
-                    // so WHP exits when the guest becomes interruptible.
-                    let _ = self.request_interrupt_window(id, true);
+                }
+            } else if self.lapic.irr != [0; 8] {
+                // IRR has bits set but the LAPIC would not currently deliver them.
+                static IRR_BLOCK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                let n = IRR_BLOCK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 30 || n % 5000 == 0 {
+                    whp_debug(format_args!("IRR deferred: irr={:08x}_{:08x} isr={:08x}_{:08x} can_inject={} inflight={:?} (#{}) svr={:#x} tpr={:#x}",
+                        self.lapic.irr[1], self.lapic.irr[0],
+                        self.lapic.isr[1], self.lapic.isr[0],
+                        can_inject, self.lapic_inflight, n,
+                        self.lapic.regs[LAPIC_IDX_SVR],
+                        self.lapic.regs[0x08]));
                 }
             }
 
@@ -1699,9 +1891,8 @@ impl VmBackend for WhpBackend {
                                 ctx.exit_data[0x18], ctx.exit_data[0x19], ctx.exit_data[0x1A], ctx.exit_data[0x1B],
                                 ctx.exit_data[0x1C], ctx.exit_data[0x1D], ctx.exit_data[0x1E], ctx.exit_data[0x1F],
                             ]);
-                            // Skip IOAPIC and LAPIC MMIO, VGA framebuffer
+                            // Skip IOAPIC MMIO, VGA framebuffer (LAPIC MMIO NOT skipped — need visibility)
                             (0xFEC0_0000..0xFEC0_1000).contains(&gpa)
-                                || (0xFEE0_0000..0xFEE0_1000).contains(&gpa)
                                 || gpa < 0xC0000 && gpa >= 0xA0000
                         }
                         0x2001 => true, // CANCEL
@@ -1762,6 +1953,29 @@ impl VmBackend for WhpBackend {
 
             match ctx.exit_reason {
                 WHV_EXIT_REASON_HALT => {
+                    // If there's a pending LAPIC interrupt, inject it and wake
+                    // from HLT instead of returning Halted. The outer loop would
+                    // sleep waiting for a cancel, missing the pending IRQ.
+                    if self.lapic_inflight.is_none() {
+                        if let Some(vec) = self.lapic.highest_pending_vector() {
+                            if self.inject_pic_interrupt(id, vec).is_ok() {
+                                self.lapic.consume_pending(vec);
+                                self.lapic_inflight = Some(vec);
+                                static HLT_INJ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                                let n = HLT_INJ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                if n < 50 || n % 1000 == 0 {
+                                    whp_debug(format_args!("HLT wakeup inject vec={} (#{}) irr={:08x}",
+                                        vec, n, self.lapic.irr[1]));
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    // Also check PIC
+                    if let Some(pic_vec) = self.pending_pic_inject.take() {
+                        let _ = self.inject_pic_interrupt(id, pic_vec);
+                        continue;
+                    }
                     return Ok(VmExitReason::Halted);
                 }
                 WHV_EXIT_REASON_IO_PORT => {
@@ -1906,12 +2120,118 @@ impl VmBackend for WhpBackend {
                         instr_len
                     };
 
-                    // LAPIC MMIO (0xFEE00000) handled by WHP in XApic mode — no exits expected.
+                    // LAPIC MMIO (0xFEE00000) — software LAPIC emulation.
+                    // With LocalApicEmulationMode=None, all LAPIC access exits here.
                     if gpa >= 0xFEE0_0000 && gpa < 0xFEE0_1000 {
-                        whp_debug(format_args!("LAPIC MMIO in XApic mode: gpa={:#x} write={} data={:#x} rip={:#x}",
-                            gpa, is_write, write_data, regs.rip));
+                        let lapic_offset = gpa - 0xFEE0_0000;
+                        {
+                            static LAPIC_MMIO_CTR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                            let n = LAPIC_MMIO_CTR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                            if n < 100 || n % 5000 == 0 {
+                                whp_debug(format_args!("LAPIC MMIO #{} off={:#x} write={} data={:#x} rip={:#x}",
+                                    n, lapic_offset, is_write, write_data, regs.rip));
+                            }
+                        }
                         let mut new_regs = regs;
                         new_regs.rip += instr_len;
+                        if is_write {
+                            let lapic_idx = ((lapic_offset & 0xFFF) >> 4) as usize;
+                            if lapic_idx == LAPIC_IDX_EOI {
+                                // EOI: clear ISR, broadcast to IOAPIC for Remote IRR clearing
+                                let eoi_vec = if let Some(vec) = self.lapic.write_eoi() {
+                                    if self.lapic_inflight == Some(vec) {
+                                        self.lapic_inflight = None;
+                                    }
+                                    Some(vec)
+                                } else if let Some(vec) = self.lapic_inflight.take() {
+                                    self.lapic.complete_interrupt(vec);
+                                    Some(vec)
+                                } else {
+                                    None
+                                };
+                                if let Some(eoi_vec) = eoi_vec {
+                                    static EOI_CTR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                                    let n = EOI_CTR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                    if n < 50 || n % 1000 == 0 {
+                                        whp_debug(format_args!("LAPIC EOI vec={} (#{}) rip={:#x}", eoi_vec, n, regs.rip));
+                                    }
+                                    self.ioapic.eoi_vector(eoi_vec);
+                                    self.deliver_ioapic_pending();
+                                }
+                            } else {
+                                let old_enabled =
+                                    lapic_idx == LAPIC_IDX_SVR && self.lapic.is_enabled();
+                                self.lapic.write(lapic_offset, write_data as u32);
+                                if lapic_idx == LAPIC_IDX_SVR
+                                    && old_enabled
+                                    && !self.lapic.is_enabled()
+                                {
+                                    self.drop_lapic_external_state();
+                                }
+                            }
+                        } else {
+                            // Read: return value from SoftLapic in destination register
+                            let val = self.lapic.read(lapic_offset) as u64;
+                            // Decode dest register from instruction (MOV, MOVZX, MOVSX, etc.)
+                            if instr_byte_count > 0 {
+                                let mut pi = 0;
+                                let mut lapic_rex = 0u8;
+                                while pi < instr_bytes.len() {
+                                    match instr_bytes[pi] {
+                                        0x66 | 0x67 | 0xF0 | 0xF2 | 0xF3
+                                        | 0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65 => { pi += 1; }
+                                        b @ 0x40..=0x4F => { lapic_rex = b; pi += 1; }
+                                        _ => break,
+                                    }
+                                }
+                                // Determine which opcode and where ModR/M is
+                                let (has_modrm, modrm_offset) = if pi < instr_bytes.len() {
+                                    match instr_bytes[pi] {
+                                        // MOV r, r/m (1-byte opcodes)
+                                        0x8A | 0x8B => (true, pi + 1),
+                                        // Two-byte opcodes: 0F B6 (MOVZX r,r/m8), 0F B7 (MOVZX r,r/m16),
+                                        // 0F BE (MOVSX r,r/m8), 0F BF (MOVSX r,r/m16)
+                                        0x0F if pi + 2 < instr_bytes.len() => {
+                                            match instr_bytes[pi + 1] {
+                                                0xB6 | 0xB7 | 0xBE | 0xBF => (true, pi + 2),
+                                                _ => (false, 0),
+                                            }
+                                        }
+                                        _ => (false, 0),
+                                    }
+                                } else { (false, 0) };
+
+                                if has_modrm && modrm_offset < instr_bytes.len() {
+                                    let modrm = instr_bytes[modrm_offset];
+                                    let mut dest = ((modrm >> 3) & 7) as usize;
+                                    if (lapic_rex & 0x04) != 0 { dest += 8; } // REX.R
+                                    match dest {
+                                        0 => new_regs.rax = val,
+                                        1 => new_regs.rcx = val,
+                                        2 => new_regs.rdx = val,
+                                        3 => new_regs.rbx = val,
+                                        4 => new_regs.rsp = val,
+                                        5 => new_regs.rbp = val,
+                                        6 => new_regs.rsi = val,
+                                        7 => new_regs.rdi = val,
+                                        8 => new_regs.r8 = val,
+                                        9 => new_regs.r9 = val,
+                                        10 => new_regs.r10 = val,
+                                        11 => new_regs.r11 = val,
+                                        12 => new_regs.r12 = val,
+                                        13 => new_regs.r13 = val,
+                                        14 => new_regs.r14 = val,
+                                        15 => new_regs.r15 = val,
+                                        _ => new_regs.rax = val,
+                                    }
+                                } else {
+                                    // MOV AL/EAX, moffs (0xA0/0xA1) or unknown — default to RAX
+                                    new_regs.rax = val;
+                                }
+                            } else {
+                                new_regs.rax = val;
+                            }
+                        }
                         self.set_vcpu_regs(id, &new_regs)?;
                         continue;
                     }
@@ -1938,7 +2258,7 @@ impl VmBackend for WhpBackend {
                             self.deliver_ioapic_pending();
                         } else {
                             let val = self.ioapic.read(mmio_off) as u64;
-                            // Decode dest register same as LAPIC
+                            // Decode dest register (MOV, MOVZX, MOVSX, etc.)
                             if instr_byte_count > 0 {
                                 let mut pi = 0;
                                 let mut io_rex = 0u8;
@@ -1950,8 +2270,22 @@ impl VmBackend for WhpBackend {
                                         _ => break,
                                     }
                                 }
-                                if pi < instr_bytes.len() && (instr_bytes[pi] == 0x8B || instr_bytes[pi] == 0x8A) && pi + 1 < instr_bytes.len() {
-                                    let mut dest = ((instr_bytes[pi + 1] >> 3) & 7) as usize;
+                                let (has_modrm, modrm_offset) = if pi < instr_bytes.len() {
+                                    match instr_bytes[pi] {
+                                        0x8A | 0x8B => (true, pi + 1),
+                                        0x0F if pi + 2 < instr_bytes.len() => {
+                                            match instr_bytes[pi + 1] {
+                                                0xB6 | 0xB7 | 0xBE | 0xBF => (true, pi + 2),
+                                                _ => (false, 0),
+                                            }
+                                        }
+                                        _ => (false, 0),
+                                    }
+                                } else { (false, 0) };
+
+                                if has_modrm && modrm_offset < instr_bytes.len() {
+                                    let modrm = instr_bytes[modrm_offset];
+                                    let mut dest = ((modrm >> 3) & 7) as usize;
                                     if (io_rex & 0x04) != 0 { dest += 8; }
                                     match dest {
                                         0 => new_regs.rax = val,
@@ -2012,41 +2346,50 @@ impl VmBackend for WhpBackend {
 
                     if !is_write {
                         let mut regs = self.get_vcpu_regs(id)?;
-                        // Read critical MSRs from WHP virtual registers; others return fixed values
+                        // Map MSR index → WHP virtual register (handled natively by WHP)
                         let whp_msr_reg = match msr_num {
-                            0x1B => Some(REG_APIC_BASE),
-                            0xC000_0080 => Some(REG_EFER),
+                            0x10 => Some(REG_TSC),              // IA32_TSC
+                            0x1B => Some(REG_APIC_BASE),        // IA32_APIC_BASE
+                            0xC000_0080 => Some(REG_EFER),      // IA32_EFER
                             0x174 => Some(REG_SYSENTER_CS),
                             0x175 => Some(REG_SYSENTER_ESP),
                             0x176 => Some(REG_SYSENTER_EIP),
-                            0x277 => Some(REG_PAT),
+                            0x277 => Some(REG_PAT),             // IA32_PAT
                             0xC000_0081 => Some(REG_STAR),
                             0xC000_0082 => Some(REG_LSTAR),
                             0xC000_0083 => Some(REG_CSTAR),
                             0xC000_0084 => Some(REG_SFMASK),
+                            0xC000_0100 => Some(REG_FS),        // IA32_FS_BASE (read via segment base)
+                            0xC000_0101 => Some(REG_GS),        // IA32_GS_BASE (read via segment base)
                             0xC000_0102 => Some(REG_KERNEL_GS_BASE),
+                            0xC000_0103 => Some(REG_TSC_AUX),   // IA32_TSC_AUX
                             _ => None,
                         };
                         let val: u64 = if let Some(reg_id) = whp_msr_reg {
                             let mut v = [WHV_REGISTER_VALUE::default()];
                             if self.get_regs_raw(id, &[reg_id], &mut v).is_ok() {
-                                unsafe { v[0].reg64 }
+                                // FS/GS_BASE: extract .base from segment register value
+                                if reg_id == REG_FS || reg_id == REG_GS {
+                                    // WhvSegment layout: base(u64), limit(u32), selector(u16), attr(u16)
+                                    unsafe { v[0].segment.base }
+                                } else {
+                                    unsafe { v[0].reg64 }
+                                }
                             } else {
                                 0
                             }
-                        } else { match msr_num {
-                            0x17 => 0, // IA32_PLATFORM_ID
-                            0x1A0 => (1 << 11), // IA32_MISC_ENABLE: BTS unavailable (bit 11)
-                            0xFE => 0, // IA32_MTRRCAP
-                            _ => {
-                                static MSR_LOG_CTR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-                                let cnt = MSR_LOG_CTR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                                if cnt < 100 || cnt % 1000 == 0 {
-                                    whp_debug(format_args!("RDMSR {:#x} = 0 (unhandled) rip={:#x}", msr_num, regs.rip));
-                                }
-                                0
+                        } else if Self::is_sw_emulated_msr(msr_num) {
+                            // Software-emulated MSRs (MTRR, MCG, DEBUGCTL, etc.)
+                            self.sw_msr.get(&msr_num).copied().unwrap_or(0)
+                        } else {
+                            // Truly unknown MSR — return 0 and log
+                            static MSR_LOG_CTR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                            let cnt = MSR_LOG_CTR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                            if cnt < 100 || cnt % 1000 == 0 {
+                                whp_debug(format_args!("RDMSR {:#x} = 0 (unhandled) rip={:#x}", msr_num, regs.rip));
                             }
-                        }};
+                            0
+                        };
                         regs.rax = val & 0xFFFF_FFFF;
                         regs.rdx = val >> 32;
                         regs.rip += instr_len;
@@ -2063,8 +2406,9 @@ impl VmBackend for WhpBackend {
                                 whp_debug(format_args!("WRMSR {:#x} = {:#x} rip={:#x}", msr_num, val, cur_rip));
                             }
                         }
-                        // Forward critical MSR writes to WHP virtual registers
+                        // Map MSR index → WHP virtual register
                         let whp_reg = match msr_num {
+                            0x10 => Some(REG_TSC),
                             0x1B => Some(REG_APIC_BASE),
                             0xC000_0080 => Some(REG_EFER),
                             0x174 => Some(REG_SYSENTER_CS),
@@ -2076,10 +2420,23 @@ impl VmBackend for WhpBackend {
                             0xC000_0083 => Some(REG_CSTAR),
                             0xC000_0084 => Some(REG_SFMASK),
                             0xC000_0102 => Some(REG_KERNEL_GS_BASE),
+                            0xC000_0103 => Some(REG_TSC_AUX),
                             _ => None,
                         };
                         if let Some(reg_id) = whp_reg {
                             let _ = self.set_regs_raw(id, &[reg_id], &[WHV_REGISTER_VALUE::from_u64(val)]);
+                        } else if Self::is_sw_emulated_msr(msr_num) {
+                            self.sw_msr.insert(msr_num, val);
+                        }
+                        // FS/GS_BASE writes need special handling (set segment base)
+                        if msr_num == 0xC000_0100 || msr_num == 0xC000_0101 {
+                            let seg_reg = if msr_num == 0xC000_0100 { REG_FS } else { REG_GS };
+                            let mut v = [WHV_REGISTER_VALUE::default()];
+                            if self.get_regs_raw(id, &[seg_reg], &mut v).is_ok() {
+                                // Preserve selector/attr/limit, update base
+                                unsafe { v[0].segment.base = val; }
+                                let _ = self.set_regs_raw(id, &[seg_reg], &v);
+                            }
                         }
                         let mut regs = self.get_vcpu_regs(id)?;
                         regs.rip += instr_len;
@@ -2151,24 +2508,65 @@ impl VmBackend for WhpBackend {
                         ecx &= !(1 << 21); // Remove x2APIC (we emulate xAPIC via MMIO only)
                         ecx &= !(1 << 24); // Remove TSC-Deadline (we don't handle MSR 0x6E0)
                         ecx &= !(1 << 31); // Remove hypervisor present (avoid PV code paths)
+                        edx |= 1 << 9;     // Ensure APIC present (software LAPIC via MMIO)
                     }
                     // CPUID leaf 5: MONITOR/MWAIT parameters — return zeros
                     // since we hide MONITOR support in leaf 1.
                     if leaf == 5 {
                         eax = 0; ebx = 0; ecx = 0; edx = 0;
                     }
+                    // Leaf 6: Thermal/Power Management — keep only ARAT (always-running
+                    // APIC timer, bit 2), clear P-state/HWP features we don't emulate.
+                    if leaf == 6 {
+                        eax &= 1 << 2; // ARAT only
+                        ebx = 0;
+                        ecx = 0;
+                    }
+                    // Leaf 0xB/0x1F: Extended Topology — WHP may report host topology.
+                    // Synthesize simple 1-thread-per-core topology to match KVM behavior.
+                    if leaf == 0xB || leaf == 0x1F {
+                        if subleaf == 0 {
+                            // SMT level: 1 logical processor per core
+                            eax = 0; // bits to shift = 0 (1 thread)
+                            ebx = 1; // 1 logical processor at this level
+                            ecx = (1 << 8) | (subleaf & 0xFF); // level type=1 (SMT)
+                            edx = id; // x2APIC ID
+                        } else if subleaf == 1 {
+                            // Core level
+                            let cpu_count = self.cpu_count.max(1);
+                            let shift = if cpu_count <= 1 { 0 } else { 32 - (cpu_count - 1).leading_zeros() };
+                            eax = shift;
+                            ebx = cpu_count;
+                            ecx = (2 << 8) | (subleaf & 0xFF); // level type=2 (Core)
+                            edx = id;
+                        } else {
+                            // Invalid level — terminator
+                            eax = 0; ebx = 0;
+                            ecx = subleaf & 0xFF; // level type=0 (Invalid)
+                            edx = id;
+                        }
+                    }
+                    // Leaf 0x15: TSC/Core Crystal Clock — zero to prevent guest
+                    // from deriving TSC frequency (avoids miscalibration).
+                    if leaf == 0x15 {
+                        eax = 0; ebx = 0; ecx = 0;
+                    }
+                    // Leaf 0x16: Processor Frequency Info — zero to avoid TSC vs
+                    // P-state mismatch in guest calibration code.
+                    if leaf == 0x16 {
+                        eax = 0; ebx = 0; ecx = 0;
+                    }
+                    // Leaf 0x80000007: Advanced Power Management — keep only
+                    // InvariantTSC (bit 8), clear P-state/frequency bits.
+                    if leaf == 0x8000_0007 {
+                        edx &= 1 << 8; // InvariantTSC only
+                        eax = 0;
+                    }
 
                     // Hide Hyper-V signature so Linux uses standard LAPIC timer
                     if leaf >= 0x40000000 && leaf <= 0x4000FFFF {
                         eax = 0; ebx = 0; ecx = 0; edx = 0;
                     }
-
-                    // Keep WHP's default vendor string (GenuineIntel / AuthenticAMD).
-                    // Windows checks the vendor for CPU-specific code paths and
-                    // crashes (BSOD) with an unrecognized vendor.
-                    // intel_idle is already blocked by clearing MWAIT in leaf 1
-                    // ECX bit 3 and zeroing leaf 5 — the vendor string is not
-                    // needed for that.
 
                     let mut regs = self.get_vcpu_regs(id)?;
                     regs.rax = eax as u64;
@@ -2181,8 +2579,10 @@ impl VmBackend for WhpBackend {
                     continue;
                 }
                 WHV_EXIT_REASON_INTERRUPT_WINDOW => {
-                    // Guest is now interruptible. Like QEMU's InterruptWindow handler:
-                    // set ready_for_pic_interrupt so pre-run can inject on next iteration.
+                    // Guest is now interruptible. Set the flag so the pre-run
+                    // block injects on the next iteration. Do NOT inject here —
+                    // pre-run handles both IOAPIC and PIC in a single path to
+                    // avoid REG_PENDING_INTERRUPTION / REG_PENDING_EVENT conflicts.
                     {
                         static IW_CTR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
                         let n = IW_CTR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -2192,10 +2592,8 @@ impl VmBackend for WhpBackend {
                         }
                     }
                     let _ = self.request_interrupt_window(id, false);
-                    self.deliver_ioapic_pending_inner(true);
                     self.ready_for_pic_interrupt = true;
-                    // Don't return — continue the inner loop so pre-run can
-                    // inject the PIC vector immediately on the next iteration.
+                    // Continue the inner loop — pre-run will inject.
                     continue;
                 }
                 WHV_EXIT_REASON_UNSUPPORTED_FEATURE => {
@@ -2235,6 +2633,10 @@ impl VmBackend for WhpBackend {
                         ctx.exit_data[0], ctx.exit_data[1],
                         ctx.exit_data[2], ctx.exit_data[3],
                     ]) as u8;
+                    if self.lapic_inflight == Some(eoi_vector) {
+                        self.lapic_inflight = None;
+                    }
+                    self.lapic.complete_interrupt(eoi_vector);
                     self.ioapic.eoi_vector(eoi_vector);
                     // Deliver any re-triggered IOAPIC interrupts
                     self.deliver_ioapic_pending();
@@ -2387,39 +2789,10 @@ impl VmBackend for WhpBackend {
     }
 
     fn inject_interrupt(&mut self, id: u32, vector: u8) -> Result<(), VmError> {
-        // XApic mode: use WHvRegisterPendingEvent (0x80000002) with
-        // WHV_X64_PENDING_EXT_INT_EVENT (EventType=5).
-        //
-        // WHV_X64_PENDING_EXT_INT_EVENT layout (128-bit register):
-        //   bit 0:     EventPending = 1
-        //   bits 1-3:  EventType = 5 (WHvX64PendingEventExtInt)
-        //   bits 4-7:  Reserved = 0
-        //   bits 8-15: Vector
-        //   bits 16-63: Reserved = 0
-        //   bits 64-127: Reserved = 0
-        //
-        // Clear HaltSuspend in InternalActivityState — if the vCPU is in HLT,
-        // writing PendingEvent alone won't wake it.
-        let mut activity = [WHV_REGISTER_VALUE::default()];
-        if self.get_regs_raw(id, &[REG_INTERNAL_ACTIVITY_STATE], &mut activity).is_ok() {
-            let state = unsafe { activity[0].reg64 };
-            if state & 2 != 0 {
-                let cleared = WHV_REGISTER_VALUE::from_u64(state & !2);
-                let _ = self.set_regs_raw(id, &[REG_INTERNAL_ACTIVITY_STATE], &[cleared]);
-            }
-        }
-
-        let lo: u64 = 1 | (5u64 << 1) | ((vector as u64) << 8);
-        let val = WHV_REGISTER_VALUE { reg128: [lo, 0] };
-        let result = self.set_regs_raw(id, &[REG_PENDING_EVENT], &[val]);
-        if result.is_err() {
-            static INJECT_FAIL_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-            let cnt = INJECT_FAIL_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            if cnt < 10 || cnt % 1000 == 0 {
-                whp_debug(format_args!("inject_ext_int failed #{} vec={} err={:?}", cnt, vector, result));
-            }
-        }
-        result
+        // Use REG_PENDING_INTERRUPTION (same as inject_pic_interrupt).
+        // Never use REG_PENDING_EVENT — it conflicts with PendingInterruption
+        // and WHP may silently drop one when both are set.
+        self.inject_pic_interrupt(id, vector)
     }
 
     fn inject_exception(&mut self, id: u32, vector: u8, error_code: Option<u32>) -> Result<(), VmError> {

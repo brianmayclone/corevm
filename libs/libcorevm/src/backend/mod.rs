@@ -6,13 +6,13 @@
 pub mod types;
 pub use types::*;
 
-#[cfg(feature = "linux")]
+#[cfg(all(feature = "linux", not(feature = "windows")))]
 pub mod kvm;
 
-#[cfg(feature = "anyos")]
+#[cfg(all(feature = "anyos", not(feature = "linux"), not(feature = "windows")))]
 pub mod anyos;
 
-#[cfg(feature = "windows")]
+#[cfg(all(feature = "windows", not(feature = "linux")))]
 pub mod whp;
 
 #[derive(Debug, Clone)]

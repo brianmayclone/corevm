@@ -37,7 +37,7 @@ pub mod vm;
 pub mod ffi;
 #[cfg(feature = "std")]
 pub mod setup;
-#[cfg(feature = "std")]
+#[cfg(feature = "linux")]
 pub mod net;
 #[cfg(feature = "std")]
 pub mod runtime;

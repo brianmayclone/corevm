@@ -27,11 +27,11 @@ use crate::devices::virtio_input::VirtioInput;
 /// FFI functions that need direct access (e.g., serial input/output,
 /// PS/2 key injection, VGA framebuffer).
 pub struct Vm {
-    #[cfg(feature = "linux")]
+    #[cfg(all(feature = "linux", not(feature = "windows")))]
     pub backend: crate::backend::kvm::KvmBackend,
-    #[cfg(feature = "anyos")]
+    #[cfg(all(feature = "anyos", not(feature = "linux"), not(feature = "windows")))]
     pub backend: crate::backend::anyos::AnyOsBackend,
-    #[cfg(feature = "windows")]
+    #[cfg(all(feature = "windows", not(feature = "linux")))]
     pub backend: crate::backend::whp::WhpBackend,
 
     pub memory: GuestMemory,
@@ -126,11 +126,11 @@ impl Vm {
     pub fn new_with_chipset(ram_size_mb: u32, chipset: &'static crate::devices::chipset::ChipsetConfig) -> Result<Self, VmError> {
         let ram_bytes = (ram_size_mb as usize) * 1024 * 1024;
 
-        #[cfg(feature = "linux")]
+        #[cfg(all(feature = "linux", not(feature = "windows")))]
         let mut backend = crate::backend::kvm::KvmBackend::new()?;
-        #[cfg(feature = "anyos")]
+        #[cfg(all(feature = "anyos", not(feature = "linux"), not(feature = "windows")))]
         let mut backend = crate::backend::anyos::AnyOsBackend::new(ram_bytes)?;
-        #[cfg(feature = "windows")]
+        #[cfg(all(feature = "windows", not(feature = "linux")))]
         let mut backend = crate::backend::whp::WhpBackend::new(ram_bytes)?;
 
         let mut memory = GuestMemory::new(ram_bytes);
