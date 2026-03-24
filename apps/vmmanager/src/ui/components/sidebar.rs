@@ -449,8 +449,10 @@ fn render_vm_entry(
         // "Move to" submenu
         if folder_names.len() > 1 || current_folder.is_none() {
             ui.horizontal(|ui| {
-                ui.add_sized([icon_width, ui.spacing().interact_size.y],
-                    egui::Label::new(egui::RichText::new("\u{1F4C1}").size(13.0)));
+                ui.add_sized(
+                    [icon_width, ui.spacing().interact_size.y],
+                    egui::Label::new(egui::RichText::new("\u{1F4C1}").size(13.0)),
+                );
                 ui.menu_button("Move to...", |ui| {
                     for (i, fname) in folder_names.iter().enumerate() {
                         if Some(i) == current_folder {
@@ -468,7 +470,7 @@ fn render_vm_entry(
             });
         }
 
-        if ui.button("\u{1F4CB} Copy VM...").clicked() {
+        if menu_item(ui, Some("\u{1F4CB}"), "Copy VM...", true, icon_width, None) {
             actions.push(SidebarAction::CopyVm(uuid.to_string()));
             ui.close_menu();
         }

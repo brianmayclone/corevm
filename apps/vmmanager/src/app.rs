@@ -18,6 +18,18 @@ use crate::ui::theme;
 use crate::ui::components::toolbar::{self, ToolbarAction};
 use crate::engine::vm;
 use libcorevm::runtime::VmControlHandle;
+
+/// Detect if running under WSL (Windows Subsystem for Linux).
+/// Checks /proc/version for "microsoft" or "WSL" which is present in WSL2 kernels.
+#[cfg(target_os = "linux")]
+fn is_wsl() -> bool {
+    std::fs::read_to_string("/proc/version")
+        .map(|v| {
+            let lower = v.to_lowercase();
+            lower.contains("microsoft") || lower.contains("wsl")
+        })
+        .unwrap_or(false)
+}
 use libcorevm::ffi::{corevm_ps2_key_press, corevm_ps2_key_release};
 
 /// Shared framebuffer data between VM thread and UI
@@ -150,7 +162,12 @@ impl Default for AppPreferences {
     fn default() -> Self {
         Self {
             theme_mode: theme::ThemeMode::Dark,
-            evdev_capture: cfg!(target_os = "linux"),
+            evdev_capture: {
+                #[cfg(target_os = "linux")]
+                { !is_wsl() }
+                #[cfg(not(target_os = "linux"))]
+                { false }
+            },
             evdev_mouse_device: String::new(),
             evdev_kbd_device: String::new(),
         }
@@ -186,6 +203,12 @@ impl AppPreferences {
                     }
                 }
             }
+        }
+        // Under WSL2, evdev is non-functional (no /dev/input devices for mouse).
+        // Force-disable regardless of saved preference to avoid pkexec errors.
+        #[cfg(target_os = "linux")]
+        if is_wsl() {
+            prefs.evdev_capture = false;
         }
         prefs
     }
