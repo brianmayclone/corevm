@@ -247,7 +247,7 @@ impl Dialog {
             vec![
                 Constraint::Length(4), // iface
                 Constraint::Length(4), // mode
-                Constraint::Length(3), // hostname
+                Constraint::Length(4), // hostname
                 Constraint::Min(1),    // spacer
                 Constraint::Length(1), // help
             ]
@@ -255,10 +255,10 @@ impl Dialog {
             vec![
                 Constraint::Length(4), // iface
                 Constraint::Length(4), // mode
-                Constraint::Length(3), // address
-                Constraint::Length(3), // gateway
-                Constraint::Length(3), // dns
-                Constraint::Length(3), // hostname
+                Constraint::Length(4), // address
+                Constraint::Length(4), // gateway
+                Constraint::Length(4), // dns
+                Constraint::Length(4), // hostname
                 Constraint::Min(1),    // spacer
                 Constraint::Length(1), // help
             ]

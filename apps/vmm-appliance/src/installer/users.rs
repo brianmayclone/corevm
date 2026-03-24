@@ -150,12 +150,12 @@ impl UsersState {
             .constraints([
                 Constraint::Length(1),   // 0: title
                 Constraint::Length(1),   // 1: gap
-                Constraint::Length(3),   // 2: root password
-                Constraint::Length(3),   // 3: root confirm
+                Constraint::Length(4),   // 2: root password
+                Constraint::Length(4),   // 3: root confirm
                 Constraint::Length(1),   // 4: gap
-                Constraint::Length(3),   // 5: username
-                Constraint::Length(3),   // 6: user password
-                Constraint::Length(3),   // 7: user confirm
+                Constraint::Length(4),   // 5: username
+                Constraint::Length(4),   // 6: user password
+                Constraint::Length(4),   // 7: user confirm
                 Constraint::Min(0),      // 8: spacer
                 Constraint::Length(1),   // 9: error
                 Constraint::Length(1),   // 10: help

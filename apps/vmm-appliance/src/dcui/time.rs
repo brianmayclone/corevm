@@ -262,7 +262,7 @@ impl Dialog {
                 Constraint::Length(5), // continent
                 Constraint::Length(5), // city
                 Constraint::Length(4), // ntp toggle
-                Constraint::Length(3), // ntp server
+                Constraint::Length(4), // ntp server
                 Constraint::Min(1),    // spacer
                 Constraint::Length(1), // help
             ])

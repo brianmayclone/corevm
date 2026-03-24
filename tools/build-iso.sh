@@ -239,7 +239,7 @@ LIVE_DIR="$BUILD_DIR/live-root"
 debootstrap --variant=minbase --include=\
 linux-image-amd64,live-boot,live-boot-initramfs-tools,\
 initramfs-tools,systemd,systemd-sysv,udev,\
-parted,e2fsprogs,dosfstools,tar,grub-pc,grub-efi-amd64-bin \
+parted,e2fsprogs,dosfstools,tar,openssl,grub-pc,grub-efi-amd64-bin \
     bookworm "$LIVE_DIR" http://deb.debian.org/debian
 
 # Ensure squashfs module is loaded in initramfs
@@ -339,7 +339,10 @@ find_and_copy() {
     local filename="$1"
     local dest="$2"
     local found
-    found=$(find /usr/lib /usr/share -name "$filename" 2>/dev/null | head -1)
+    # Prefer bios modules over efi64 (isolinux needs bios)
+    found=$(find /usr/lib /usr/share -name "$filename" -not -path "*/efi*" 2>/dev/null | head -1)
+    # Fallback: search everywhere if not found
+    [ -z "$found" ] && found=$(find /usr/lib /usr/share -name "$filename" 2>/dev/null | head -1)
     if [ -n "$found" ]; then
         cp "$found" "$dest"
         echo "  Found $filename at $found"

@@ -11,7 +11,7 @@ pub fn generate_self_signed(target: &Path, cn: &str) -> Result<(PathBuf, PathBuf
     let key_path = tls_dir.join("server.key");
 
     let subject = format!("/CN={}", cn);
-    let status = Command::new("openssl")
+    let output = Command::new("openssl")
         .args([
             "req",
             "-x509",
@@ -28,11 +28,14 @@ pub fn generate_self_signed(target: &Path, cn: &str) -> Result<(PathBuf, PathBuf
             "-subj",
             &subject,
         ])
-        .status()
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
         .context("Failed to execute openssl")?;
 
-    if !status.success() {
-        bail!("openssl failed to generate self-signed certificate for CN={}", cn);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("openssl failed for CN={}: {}", cn, stderr);
     }
 
     Ok((cert_path, key_path))

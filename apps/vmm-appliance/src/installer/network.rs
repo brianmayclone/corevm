@@ -219,10 +219,10 @@ impl NetworkState {
                 Constraint::Length(1),   // 3: gap
                 Constraint::Length(4),   // 4: mode list
                 Constraint::Length(1),   // 5: gap
-                Constraint::Length(3),   // 6: address
-                Constraint::Length(3),   // 7: gateway
-                Constraint::Length(3),   // 8: dns
-                Constraint::Length(3),   // 9: hostname
+                Constraint::Length(4),   // 6: address
+                Constraint::Length(4),   // 7: gateway
+                Constraint::Length(4),   // 8: dns
+                Constraint::Length(4),   // 9: hostname
                 Constraint::Min(0),      // 10: spacer
                 Constraint::Length(1),   // 11: error
                 Constraint::Length(1),   // 12: help

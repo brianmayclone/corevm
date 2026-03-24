@@ -228,7 +228,7 @@ impl Dialog {
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
-                        Constraint::Length(3),
+                        Constraint::Length(4),
                         Constraint::Length(2),
                         Constraint::Min(1),
                         Constraint::Length(1),

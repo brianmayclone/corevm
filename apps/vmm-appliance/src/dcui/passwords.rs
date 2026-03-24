@@ -160,8 +160,8 @@ impl Dialog {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(5),
-                Constraint::Length(3),
-                Constraint::Length(3),
+                Constraint::Length(4),
+                Constraint::Length(4),
                 Constraint::Min(1),
                 Constraint::Length(1),
             ])

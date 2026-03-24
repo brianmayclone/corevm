@@ -144,8 +144,8 @@ impl CertsState {
                 Constraint::Length(1),   // 1: gap
                 Constraint::Length(4),   // 2: mode list
                 Constraint::Length(1),   // 3: gap
-                Constraint::Length(3),   // 4: cert path
-                Constraint::Length(3),   // 5: key path
+                Constraint::Length(4),   // 4: cert path
+                Constraint::Length(4),   // 5: key path
                 Constraint::Min(0),      // 6: spacer
                 Constraint::Length(1),   // 7: error
                 Constraint::Length(1),   // 8: help

@@ -14,12 +14,15 @@ pub struct DiskInfo {
 }
 
 fn run_cmd(program: &str, args: &[&str]) -> Result<()> {
-    let status = Command::new(program)
+    let output = Command::new(program)
         .args(args)
-        .status()
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
         .with_context(|| format!("Failed to execute: {} {}", program, args.join(" ")))?;
-    if !status.success() {
-        bail!("Command failed: {} {}", program, args.join(" "));
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Command failed: {} {}\nstderr: {}", program, args.join(" "), stderr);
     }
     Ok(())
 }

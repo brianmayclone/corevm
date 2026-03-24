@@ -231,7 +231,7 @@ impl TimezoneState {
                 Constraint::Length(8),   // 4: city
                 Constraint::Length(1),   // 5: gap
                 Constraint::Length(4),   // 6: ntp toggle
-                Constraint::Length(3),   // 7: ntp server
+                Constraint::Length(4),   // 7: ntp server
                 Constraint::Min(0),      // 8: spacer
                 Constraint::Length(1),   // 9: help
             ])

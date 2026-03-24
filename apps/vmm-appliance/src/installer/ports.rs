@@ -140,8 +140,8 @@ impl PortsState {
             .constraints([
                 Constraint::Length(1),   // 0: title
                 Constraint::Length(1),   // 1: gap
-                Constraint::Length(3),   // 2: server port
-                Constraint::Length(3),   // 3: cluster port
+                Constraint::Length(4),   // 2: server port
+                Constraint::Length(4),   // 3: cluster port
                 Constraint::Min(0),      // 4: spacer
                 Constraint::Length(1),   // 5: error
                 Constraint::Length(1),   // 6: help
