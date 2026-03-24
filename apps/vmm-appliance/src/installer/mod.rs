@@ -143,6 +143,14 @@ impl ScreenState {
         }
     }
 
+    fn tick(&mut self, config: &mut InstallConfig) -> Option<ScreenResult> {
+        match self {
+            ScreenState::Network(s)  => s.tick(config),
+            ScreenState::Progress(s) => { s.tick(); None }
+            _ => None,
+        }
+    }
+
     fn render(&mut self, frame: &mut Frame, config: &InstallConfig) {
         match self {
             ScreenState::Welcome(s)  => s.render(frame, config),
@@ -223,6 +231,26 @@ fn run_inner(terminal: &mut ratatui::DefaultTerminal) -> anyhow::Result<()> {
     let mut state = ScreenState::for_screen(&current_screen);
 
     loop {
+        // Poll background tasks (network verification, install progress)
+        if let Some(result) = state.tick(&mut config) {
+            match result {
+                ScreenResult::Next => {
+                    if let Some(next) = current_screen.next() {
+                        current_screen = next;
+                        state = ScreenState::for_screen(&current_screen);
+                    }
+                }
+                ScreenResult::Prev => {
+                    if let Some(prev) = current_screen.prev() {
+                        current_screen = prev;
+                        state = ScreenState::for_screen(&current_screen);
+                    }
+                }
+                ScreenResult::Quit => break,
+                ScreenResult::Continue => {}
+            }
+        }
+
         terminal.draw(|frame| {
             state.render(frame, &config);
         })?;

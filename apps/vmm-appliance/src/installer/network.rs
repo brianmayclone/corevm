@@ -2,9 +2,10 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
-use crate::common::network::{detect_interfaces, NetworkConfig, NetworkInterface};
+use crate::common::network::{apply_and_verify, detect_interfaces, NetworkConfig, NetworkInterface};
 use crate::common::widgets::{SelectList, TextInput};
 use super::{InstallConfig, ScreenResult};
+use std::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Field {
@@ -54,6 +55,9 @@ pub struct NetworkState {
     hostname: TextInput,
     focus: Field,
     error: Option<String>,
+    verifying: bool,
+    verify_status: Option<String>,
+    verify_rx: Option<mpsc::Receiver<Result<(NetworkConfig, String), String>>>,
 }
 
 impl NetworkState {
@@ -90,6 +94,9 @@ impl NetworkState {
             hostname,
             focus: Field::Interface,
             error: None,
+            verifying: false,
+            verify_status: None,
+            verify_rx: None,
         }
     }
 
@@ -161,7 +168,33 @@ impl NetworkState {
         }
     }
 
+    pub fn tick(&mut self, config: &mut InstallConfig) -> Option<ScreenResult> {
+        if let Some(rx) = &self.verify_rx {
+            if let Ok(result) = rx.try_recv() {
+                self.verifying = false;
+                self.verify_rx = None;
+                match result {
+                    Ok((cfg, ip)) => {
+                        self.verify_status = Some(format!("IP acquired: {}", ip));
+                        config.network = Some(cfg);
+                        return Some(ScreenResult::Next);
+                    }
+                    Err(e) => {
+                        self.error = Some(e);
+                        self.verify_status = None;
+                    }
+                }
+            }
+        }
+        None
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, config: &mut InstallConfig) -> ScreenResult {
+        // Ignore input while verifying network
+        if self.verifying {
+            return ScreenResult::Continue;
+        }
+
         match key.code {
             KeyCode::Esc => return ScreenResult::Prev,
             KeyCode::Tab => {
@@ -177,8 +210,24 @@ impl NetworkState {
             KeyCode::Enter => {
                 match self.validate() {
                     Ok(cfg) => {
-                        config.network = Some(cfg);
-                        return ScreenResult::Next;
+                        self.error = None;
+                        self.verifying = true;
+                        let timeout = if cfg.dhcp { 15 } else { 5 };
+                        self.verify_status = Some(if cfg.dhcp {
+                            "Requesting DHCP lease...".to_string()
+                        } else {
+                            "Applying network configuration...".to_string()
+                        });
+
+                        let (tx, rx) = mpsc::channel();
+                        self.verify_rx = Some(rx);
+                        let cfg_clone = cfg.clone();
+                        std::thread::spawn(move || {
+                            let result = apply_and_verify(&cfg_clone, timeout)
+                                .map(|ip| (cfg_clone, ip))
+                                .map_err(|e| format!("{}", e));
+                            let _ = tx.send(result);
+                        });
                     }
                     Err(e) => {
                         self.error = Some(e);
@@ -269,17 +318,29 @@ impl NetworkState {
         let host_area = Rect { y: chunks[9].y, height: chunks[9].height, x: col.x, width: col.width };
         self.hostname.render(host_area, buf);
 
-        if let Some(err) = &self.error {
+        if let Some(status) = &self.verify_status {
+            Paragraph::new(status.as_str())
+                .style(Style::default().fg(Color::Yellow))
+                .alignment(Alignment::Center)
+                .render(chunks[11], buf);
+        } else if let Some(err) = &self.error {
             Paragraph::new(err.as_str())
                 .style(Style::default().fg(Color::Red))
                 .alignment(Alignment::Center)
                 .render(chunks[11], buf);
         }
 
-        Paragraph::new("[Tab] Next field  [↑↓] Select/type  [Enter] Continue  [Esc] Back")
-            .style(Style::default().fg(Color::DarkGray))
-            .alignment(Alignment::Center)
-            .render(chunks[12], buf);
+        if self.verifying {
+            Paragraph::new("Verifying network configuration...")
+                .style(Style::default().fg(Color::Yellow))
+                .alignment(Alignment::Center)
+                .render(chunks[12], buf);
+        } else {
+            Paragraph::new("[Tab] Next field  [↑↓] Select/type  [Enter] Continue  [Esc] Back")
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Center)
+                .render(chunks[12], buf);
+        }
     }
 }
 

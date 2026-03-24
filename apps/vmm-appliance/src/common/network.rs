@@ -152,6 +152,41 @@ pub fn apply_networkd_config() -> Result<()> {
     Ok(())
 }
 
+/// Apply network config to the live system and optionally wait for a DHCP lease.
+/// Writes config to /, restarts networkd, waits up to `timeout_secs` for an IP.
+/// Returns the acquired IP or an error message.
+pub fn apply_and_verify(config: &NetworkConfig, timeout_secs: u64) -> Result<String> {
+    use std::path::PathBuf;
+
+    // Write config to live system root
+    write_networkd_config(&PathBuf::from("/"), config)?;
+
+    // Restart networkd
+    apply_networkd_config()?;
+
+    if !config.dhcp {
+        // Static config — IP should be there immediately after a moment
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        if let Some(ip) = read_current_ip(&config.interface)? {
+            return Ok(ip);
+        }
+        bail!("Static IP not applied on {}", config.interface);
+    }
+
+    // DHCP — poll for an IP
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(timeout_secs);
+    loop {
+        if start.elapsed() > timeout {
+            bail!("DHCP timeout: no IP received on {} after {}s", config.interface, timeout_secs);
+        }
+        if let Some(ip) = read_current_ip(&config.interface)? {
+            return Ok(ip);
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
 #[derive(Deserialize)]
 struct IpAddrEntry {
     addr_info: Vec<IpAddrInfo>,
