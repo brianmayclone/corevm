@@ -143,7 +143,7 @@ impl ScreenState {
         }
     }
 
-    fn render(&self, frame: &mut Frame, config: &InstallConfig) {
+    fn render(&mut self, frame: &mut Frame, config: &InstallConfig) {
         match self {
             ScreenState::Welcome(s)  => s.render(frame, config),
             ScreenState::Disk(s)     => s.render(frame, config),
