@@ -5,8 +5,9 @@
 Window.SetBackgroundTopColor(1.0, 1.0, 1.0);
 Window.SetBackgroundBottomColor(1.0, 1.0, 1.0);
 
-# Load and center the logo
+# Load and scale logo to 256x256 (original is 512x512)
 logo = Image("logo.png");
+logo = logo.Scale(256, 256);
 logo_sprite = Sprite(logo);
 logo_sprite.SetX(Window.GetWidth() / 2 - logo.GetWidth() / 2);
 logo_sprite.SetY(Window.GetHeight() / 2 - logo.GetHeight() / 2);
