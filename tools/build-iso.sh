@@ -93,10 +93,11 @@ cp "$SCRIPT_DIR/iso/grub-installed.cfg" "$ROOTFS_DIR/etc/default/grub"
 cp "$SCRIPT_DIR/iso/nftables.conf" "$ROOTFS_DIR/etc/nftables.conf"
 
 # Enable services (use --root= since systemd is not PID 1 in the chroot)
+# Some dependent units may not exist in minbase — ignore those errors
 systemctl --root="$ROOTFS_DIR" enable vmm-dcui.service
 systemctl --root="$ROOTFS_DIR" enable nftables.service
-systemctl --root="$ROOTFS_DIR" enable systemd-networkd.service
-systemctl --root="$ROOTFS_DIR" enable systemd-resolved.service
+systemctl --root="$ROOTFS_DIR" enable systemd-networkd.service || true
+systemctl --root="$ROOTFS_DIR" enable systemd-resolved.service || true
 systemctl --root="$ROOTFS_DIR" enable ssh.service
 
 # Disable getty on tty1 (DCUI takes over)
