@@ -70,7 +70,7 @@ cd "$ROOT"
 echo "[2/9] Building root filesystem..."
 ROOTFS_DIR="$BUILD_DIR/rootfs"
 debootstrap --variant=minbase --include=\
-linux-image-amd64,grub-pc,grub-efi-amd64-bin,systemd,systemd-sysv,\
+linux-image-amd64,grub-pc,grub-efi-amd64-bin,systemd,systemd-sysv,dbus,\
 openssh-server,openssl,chrony,parted,\
 plymouth,plymouth-themes,\
 e2fsprogs,dosfstools,iproute2,sudo,ca-certificates,\
@@ -190,6 +190,36 @@ Restart=always
 [Install]
 WantedBy=multi-user.target
 DCUI_SVC
+
+tee "$ROOTFS_DIR/etc/systemd/system/vmm-server.service" > /dev/null <<'SERVER_SVC'
+[Unit]
+Description=CoreVM Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/vmm/vmm-server
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SERVER_SVC
+
+tee "$ROOTFS_DIR/etc/systemd/system/vmm-cluster.service" > /dev/null <<'CLUSTER_SVC'
+[Unit]
+Description=CoreVM Cluster Controller
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/vmm/vmm-cluster
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+CLUSTER_SVC
 
 # Copy GRUB defaults and nftables config
 cp "$SCRIPT_DIR/iso/grub-installed.cfg" "$ROOTFS_DIR/etc/default/grub"

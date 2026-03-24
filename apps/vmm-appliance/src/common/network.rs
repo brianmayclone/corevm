@@ -138,12 +138,16 @@ mod tests {
 }
 
 pub fn apply_networkd_config() -> Result<()> {
-    let status = Command::new("networkctl")
-        .arg("reload")
-        .status()
-        .context("Failed to execute networkctl reload")?;
-    if !status.success() {
-        bail!("networkctl reload failed");
+    // Restart systemd-networkd to pick up new config
+    let output = Command::new("systemctl")
+        .args(["restart", "systemd-networkd"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .context("Failed to restart systemd-networkd")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("systemctl restart systemd-networkd failed: {}", stderr);
     }
     Ok(())
 }

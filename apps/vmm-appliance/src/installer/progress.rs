@@ -15,9 +15,9 @@ use crate::common::{
     firewall::{write_nftables_config, FirewallConfig},
     network::write_networkd_config,
     system::{
-        configure_chrony, configure_fstab, create_user, extract_rootfs, format_partitions,
-        install_grub, is_efi_booted, mount_target, partition_disk, reboot, set_hostname,
-        set_locale, set_root_password, set_timezone, unmount_target,
+        configure_chrony, configure_fstab, create_user, enable_service, extract_rootfs,
+        format_partitions, install_grub, is_efi_booted, mount_target, partition_disk, reboot,
+        set_hostname, set_locale, set_root_password, set_timezone, unmount_target,
     },
 };
 
@@ -290,6 +290,16 @@ impl ProgressState {
             let config_path = target.join("etc/vmm/appliance.toml");
             if let Err(e) = appliance_config.save(&config_path) {
                 send(ProgressMsg::Error(format!("ApplianceConfig save failed: {}", e)));
+                return;
+            }
+
+            // 10b. Enable role-specific service
+            let svc_name = match &role {
+                ApplianceRole::Server => "vmm-server.service",
+                ApplianceRole::Cluster => "vmm-cluster.service",
+            };
+            if let Err(e) = enable_service(target, svc_name) {
+                send(ProgressMsg::Error(format!("enable_service failed: {}", e)));
                 return;
             }
 

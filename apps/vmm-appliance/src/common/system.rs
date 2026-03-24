@@ -467,6 +467,12 @@ pub fn is_efi_booted() -> bool {
     Path::new("/sys/firmware/efi").exists()
 }
 
+pub fn enable_service(target: &Path, service: &str) -> Result<()> {
+    let target_str = target.to_str().context("Invalid target path")?;
+    run_cmd("systemctl", &["--root", target_str, "enable", service])
+        .with_context(|| format!("Failed to enable {}", service))
+}
+
 pub fn reboot() -> Result<()> {
     Command::new("reboot")
         .status()
