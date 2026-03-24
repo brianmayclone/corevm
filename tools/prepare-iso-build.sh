@@ -53,8 +53,13 @@ case "$DISTRO" in
             echo "Rust already installed: $(cargo --version)"
         fi
 
-        echo "[4/4] Installing Node.js (if not present)..."
-        if ! command -v node >/dev/null 2>&1; then
+        echo "[4/4] Installing Node.js 20+ (required for Vite build)..."
+        NODE_MAJOR=0
+        if command -v node >/dev/null 2>&1; then
+            NODE_MAJOR=$(node --version | sed 's/v\([0-9]*\).*/\1/')
+        fi
+        if [ "$NODE_MAJOR" -lt 20 ]; then
+            echo "Node.js ${NODE_MAJOR:-not found} is too old, installing Node.js 20..."
             curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
             apt-get install -y nodejs
         else
