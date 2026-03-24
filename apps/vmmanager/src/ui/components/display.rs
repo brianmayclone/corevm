@@ -446,7 +446,17 @@ impl DisplayWidget {
             abs_cursor_x: 16383, // center
             abs_cursor_y: 16383, // center
             #[cfg(target_os = "linux")]
-            evdev_input: EvdevInputReader::open(),
+            evdev_input: {
+                // Skip evdev under WSL2 — no /dev/input devices available
+                if std::fs::read_to_string("/proc/version")
+                    .map(|v| { let l = v.to_lowercase(); l.contains("microsoft") || l.contains("wsl") })
+                    .unwrap_or(false)
+                {
+                    None
+                } else {
+                    EvdevInputReader::open()
+                }
+            },
             capture_time: None,
         }
     }
