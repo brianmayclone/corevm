@@ -1081,7 +1081,7 @@ impl Vm {
             pci_dev.config_space[0x2E] = 0x02; // Subsystem device low
             pci_dev.config_space[0x2F] = 0x01;
 
-            // BAR0: 2 MB MMIO (register space)
+            // BAR0: 4 MB MMIO (2 MB registers + 2 MB GTT)
             pci_dev.set_bar(0, bar0_addr as u32, MMIO_SIZE as u32, true);
 
             // BAR2: VRAM aperture (prefetchable, 64-bit)
@@ -1110,7 +1110,7 @@ impl Vm {
         }
 
         eprintln!("[intel-gpu] Intel HD Graphics 2000 (8086:0102) initialized");
-        eprintln!("[intel-gpu] BAR0 (MMIO): 0x{:08X} (2 MB)", bar0_addr);
+        eprintln!("[intel-gpu] BAR0 (MMIO): 0x{:08X} (4 MB)", bar0_addr);
         eprintln!("[intel-gpu] BAR2 (VRAM): 0x{:08X} ({} MB)", bar2_addr, vram_mb);
     }
 

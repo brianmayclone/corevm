@@ -30,8 +30,9 @@ use crate::error::Result;
 pub const VENDOR_ID: u16 = 0x8086;
 pub const DEVICE_ID: u16 = 0x0102;
 
-/// MMIO register space size (BAR0): 2 MB (Sandy Bridge uses up to 0x100000+ for GT registers).
-pub const MMIO_SIZE: usize = 2 * 1024 * 1024;
+/// MMIO register space size (BAR0): 4 MB (2 MB registers + 2 MB GTT aperture).
+/// Sandy Bridge GTTMMADR requires 4 MB total.
+pub const MMIO_SIZE: usize = 4 * 1024 * 1024;
 
 /// Intel HD Graphics device.
 pub struct IntelGpu {

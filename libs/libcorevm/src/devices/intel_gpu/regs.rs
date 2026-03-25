@@ -125,10 +125,10 @@ pub const NUM_FENCES: usize = 16;
 
 // ── GTT (Graphics Translation Table) ────────────────────────────────────────
 
-/// GTT entries start at BAR0 + 0x80000 on Sandy Bridge.
+/// GTT entries start at BAR0 + 0x200000 on Sandy Bridge (upper 2 MB of 4 MB BAR0).
 /// Each entry is 4 bytes: physical address >> 12 | flags.
-pub const GTT_BASE: usize = 0x80000;
-pub const GTT_SIZE: usize = 0x80000; // 512 KB = 128K entries × 4 bytes = 512 MB addressable
+pub const GTT_BASE: usize = 0x200000;
+pub const GTT_SIZE: usize = 0x200000; // 2 MB = 512K entries × 4 bytes = 2 GB addressable
 
 // ── Display register range checks ──────────────────────────────────────────
 
@@ -150,11 +150,64 @@ pub fn is_display_range(offset: usize) -> bool {
         || offset == PIPEASTAT
 }
 
+// ── BSD (Video) Engine ──────────────────────────────────────────────────
+
+pub const BSD_RING_BASE: usize = 0x12000;     // BSD ring buffer base
+pub const BSD_RING_CTL: usize = 0x1203C;      // BSD ring buffer control
+pub const BSD_RING_HEAD: usize = 0x12034;
+pub const BSD_RING_TAIL: usize = 0x12030;
+pub const BSD_HWS_PGA: usize = 0x12080;
+
+// ── Forcewake ───────────────────────────────────────────────────────────
+
+pub const FORCEWAKE: usize = 0xA18C;
+pub const FORCEWAKE_MT: usize = 0xA188;
+pub const FORCEWAKE_ACK: usize = 0x130090;
+pub const GT_FIFO_FREE_ENTRIES: usize = 0x120008;
+
+// ── Power Management ────────────────────────────────────────────────────
+
+pub const GEN6_RP_STATE_CAP: usize = 0x140000;
+pub const GEN6_RPNSWREQ: usize = 0xA008;
+pub const GEN6_RP_CONTROL: usize = 0xA024;
+pub const GEN6_RP_UP_THRESHOLD: usize = 0xA02C;
+pub const GEN6_RP_DOWN_THRESHOLD: usize = 0xA030;
+pub const GEN6_PMINTRMSK: usize = 0xA168;
+pub const GEN6_RP_CUR_UP_EI: usize = 0xA050;
+pub const GEN6_RP_CUR_DOWN_EI: usize = 0xA054;
+pub const GEN6_RP_PREV_UP: usize = 0xA058;
+pub const GEN6_RP_PREV_DOWN: usize = 0xA05C;
+
+// ── Tile / Swizzle ──────────────────────────────────────────────────────
+
+pub const TILECTL: usize = 0x101000;
+pub const ARB_MODE: usize = 0x04030;
+pub const GAM_ECOCHK: usize = 0x04090;
+
 /// Check if offset is in the render engine register space.
 pub fn is_render_range(offset: usize) -> bool {
+    // Render ring
     (0x02000..0x02600).contains(&offset)
         || (0x020C0..0x020D0).contains(&offset)
-        || (0x22000..0x22100).contains(&offset)
+        // BLT ring
+        || (0x22000..0x22200).contains(&offset)
+        // BSD ring
+        || (0x12000..0x12100).contains(&offset)
+        // Fence registers
         || (offset >= FENCE_REG_BASE && offset < FENCE_REG_BASE + NUM_FENCES * 8)
+        // GTT (upper 2 MB of BAR0)
         || (offset >= GTT_BASE && offset < GTT_BASE + GTT_SIZE)
+        // Forcewake
+        || offset == FORCEWAKE || offset == FORCEWAKE_MT || offset == FORCEWAKE_ACK
+        || offset == GT_FIFO_FREE_ENTRIES
+        // Power management
+        || (0xA000..0xA200).contains(&offset)
+        || offset == GEN6_RP_STATE_CAP
+        || (0x130090..0x1300A0).contains(&offset)
+        || (0x140000..0x140010).contains(&offset)
+        // Tile / ARB
+        || offset == TILECTL || offset == ARB_MODE || offset == GAM_ECOCHK
+        || (0x04000..0x040A0).contains(&offset)
+        // Catch-all for 0x100000-0x1FFFFF region (GT/PM registers)
+        || (0x100000..0x200000).contains(&offset)
 }
