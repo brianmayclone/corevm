@@ -1208,7 +1208,7 @@ impl eframe::App for CoreVmApp {
         // Determine VM state for toolbar buttons
         let (vm_selected, vm_running, vm_paused, vm_diag_enabled) = if let Some(uuid) = &self.selected_vm {
             if let Some(vm) = self.find_vm(uuid) {
-                (true, vm.state == VmState::Running, vm.state == VmState::Paused, vm.config.diagnostics)
+                (true, vm.state == VmState::Running || vm.state == VmState::Starting, vm.state == VmState::Paused, vm.config.diagnostics)
             } else {
                 (false, false, false, false)
             }
