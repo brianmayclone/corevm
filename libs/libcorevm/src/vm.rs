@@ -1028,7 +1028,7 @@ impl Vm {
         use crate::devices::intel_gpu::{self, IntelGpu, IntelGpuAperture, MMIO_SIZE};
         use crate::devices::bus::PciDevice;
 
-        let vram_mb = vram_mb.clamp(64, 512);
+        let vram_mb = vram_mb.clamp(16, 512);
         let vram_size = (vram_mb as usize) * 1024 * 1024;
 
         let mut gpu = Box::new(IntelGpu::new(vram_mb));

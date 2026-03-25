@@ -152,7 +152,7 @@ pub fn start_vm(config: &VmConfig, bios_paths: &[std::path::PathBuf]) -> Result<
         corevm_setup_virtio_gpu(handle, config.vram_mb.max(64));
         corevm_setup_virtio_input(handle);
     } else if has_intel_gpu {
-        corevm_setup_intel_gpu(handle, config.vram_mb.max(64));
+        corevm_setup_intel_gpu(handle, config.vram_mb);
     }
 
     // Load firmware BEFORE ACPI tables — load_ovmf() sets vm.uefi_boot which
