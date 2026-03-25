@@ -241,7 +241,7 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
 
     // Intel HD Graphics — if selected in config
     if config.gpu_model == crate::config::GpuModel::IntelHD {
-        let gpu_vram = config.vram_mb.max(64);
+        let gpu_vram = config.vram_mb.max(16);
         corevm_setup_intel_gpu(handle, gpu_vram);
         entry.diag_log.log(DiagCategory::Info, format!("Intel HD Graphics enabled (VRAM={}MB)", gpu_vram));
     }

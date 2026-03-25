@@ -2090,7 +2090,7 @@ impl PciMmioRouter {
     /// Intel GPU BAR2 (VRAM aperture).
     fn intel_gpu_bar2(&self) -> u64 {
         if self.intel_gpu.is_null() { return 0; }
-        self.read_bar(self.chipset.slots.vga, 0x18, 0xFC000000) // 64 MB aligned minimum
+        self.read_bar(self.chipset.slots.vga, 0x18, 0xFE000000) // 32 MB aligned minimum
     }
     fn virtio_gpu_bar0(&self) -> u64 {
         if self.virtio_gpu.is_null() { return 0; }
@@ -2113,6 +2113,17 @@ impl PciMmioRouter {
 impl crate::memory::mmio::MmioHandler for PciMmioRouter {
     fn read(&mut self, offset: u64, size: u8) -> crate::error::Result<u64> {
         let abs_addr = PCI_MMIO_CATCHALL_BASE + offset;
+
+        // Debug: log accesses in Intel GPU BAR0 range
+        #[cfg(feature = "std")]
+        if abs_addr >= 0xFC000000 && abs_addr < 0xFC400000 {
+            static ROUTER_DBG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = ROUTER_DBG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 20 {
+                eprintln!("[router] GPU range read abs=0x{:X} igpu_null={} bar0=0x{:X}",
+                    abs_addr, self.intel_gpu.is_null(), self.intel_gpu_bar0());
+            }
+        }
 
         // Check E1000 BAR0 (128KB region)
         if self.has_e1000() {
