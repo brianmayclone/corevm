@@ -40,8 +40,14 @@ pub fn inject_input(handle: u64, input: &ConsoleInput, fb_width: u32, fb_height:
             }
         }
         ConsoleInput::MouseMove { x, y, buttons } => {
-            // Try USB tablet (absolute positioning) — works if UHCI is enabled
             if fb_width > 0 && fb_height > 0 {
+                // VMware backdoor (preferred — no extra device needed, works with
+                // Linux vmmouse and Windows VMware Tools)
+                let vmw_x = ((*x as u64) * 65535 / fb_width as u64) as u16;
+                let vmw_y = ((*y as u64) * 65535 / fb_height as u64) as u16;
+                corevm_vmware_mouse_move(handle, vmw_x, vmw_y, *buttons);
+
+                // Also send to USB tablet (fallback for guests without VMware driver)
                 let abs_x = ((*x as u64) * 32767 / fb_width as u64) as u16;
                 let abs_y = ((*y as u64) * 32767 / fb_height as u64) as u16;
                 corevm_usb_tablet_move(handle, abs_x, abs_y, *buttons);
@@ -52,7 +58,9 @@ pub fn inject_input(handle: u64, input: &ConsoleInput, fb_width: u32, fb_height:
             corevm_ps2_mouse_move(handle, *dx as i16, *dy as i16, *buttons);
         }
         ConsoleInput::MouseWheel { delta } => {
-            // Try USB tablet wheel first, then PS/2 with wheel
+            // VMware backdoor wheel
+            corevm_vmware_mouse_move_wheel(handle, 0, 0, 0, *delta as i8);
+            // USB tablet wheel (fallback)
             corevm_usb_tablet_move_wheel(handle, 0, 0, 0, *delta as i8);
         }
         ConsoleInput::CtrlAltDel => {

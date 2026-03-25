@@ -1636,6 +1636,32 @@ pub extern "C" fn corevm_handle_io_exit(
     CURRENT_IO_VCPU.store(vcpu_id, Ordering::Relaxed);
     let vm = match get_vm(handle) { Some(v) => v, None => { io_unlock(); return -1 } };
     if data.is_null() { io_unlock(); return -1; }
+
+    // ── VMware Backdoor intercept ──
+    // The VMware backdoor protocol uses port 0x5658 with full register state
+    // (EAX=cmd, EBX/ECX/EDX/ESI/EDI=params). We intercept here before normal
+    // I/O dispatch because IoHandler only sees (port, val), not all registers.
+    if port == crate::devices::vmware::VMWARE_PORT && is_write == 0 {
+        if let Ok(mut regs) = vm.get_vcpu_regs(vcpu_id) {
+            // Check if EDX contains VMware magic (0x564D5868 = "VMXh")
+            if (regs.rdx as u32) == 0x564D5868 {
+                if vm.vmware_backdoor.handle_command(&mut regs) {
+                    let _ = vm.set_vcpu_regs(vcpu_id, &regs);
+                    // Also write EAX result into the I/O response buffer for KVM
+                    let result = regs.rax as u32;
+                    #[cfg(feature = "linux")]
+                    {
+                        let result_bytes = result.to_le_bytes();
+                        let resp = &result_bytes[..size as usize];
+                        vm.set_io_response(vcpu_id, resp);
+                    }
+                    io_unlock();
+                    return 0;
+                }
+            }
+        }
+    }
+
     let buf = unsafe { core::slice::from_raw_parts_mut(data, size as usize) };
     vm.handle_io(port, is_write != 0, size, buf);
 
@@ -3610,6 +3636,35 @@ pub extern "C" fn corevm_uhci_process(handle: u64) -> i32 {
     let vm = match get_vm(handle) { Some(v) => v, None => return 0 };
     let uhci = match vm.uhci() { Some(u) => u, None => return 0 };
     if uhci.process_frame() { 1 } else { 0 }
+}
+
+// ── VMware Backdoor (absolute pointer) ──────────────────────────────────────
+
+/// Send absolute mouse coordinates via the VMware backdoor.
+/// x, y are in range 0..65535 (0%–100% of screen).
+/// buttons: bit0=left, bit1=right, bit2=middle.
+/// This is thread-safe (uses atomics internally).
+#[no_mangle]
+pub extern "C" fn corevm_vmware_mouse_move(handle: u64, x: u16, y: u16, buttons: u8) -> i32 {
+    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
+    vm.vmware_backdoor.set_position(x, y, buttons);
+    0
+}
+
+/// Send absolute mouse coordinates + wheel via the VMware backdoor.
+#[no_mangle]
+pub extern "C" fn corevm_vmware_mouse_move_wheel(handle: u64, x: u16, y: u16, buttons: u8, wheel: i8) -> i32 {
+    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
+    vm.vmware_backdoor.set_position_wheel(x, y, buttons, wheel);
+    0
+}
+
+/// Check if the guest has enabled the VMware absolute pointer.
+/// Returns 1 if enabled, 0 if not.
+#[no_mangle]
+pub extern "C" fn corevm_vmware_pointer_enabled(handle: u64) -> i32 {
+    let vm = match get_vm(handle) { Some(v) => v, None => return 0 };
+    if vm.vmware_backdoor.is_enabled() { 1 } else { 0 }
 }
 
 // ── VirtIO GPU FFI ──

@@ -50,5 +50,6 @@ pub mod virtio_net;
 pub mod virtio_input;
 pub mod disk_cache;
 pub mod net;
+pub mod vmware;
 #[cfg(feature = "linux")]
 pub mod slirp;

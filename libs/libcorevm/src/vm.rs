@@ -113,6 +113,10 @@ pub struct Vm {
     /// `corevm_poll_irqs` (single-threaded context).
     #[cfg(feature = "std")]
     pub pending_mouse: std::sync::Mutex<alloc::vec::Vec<(i16, i16, u8, i8)>>,
+
+    /// VMware backdoor device — provides absolute pointer and VMware detection.
+    /// Thread-safe (uses atomics) so input threads can update the cursor position.
+    pub vmware_backdoor: crate::devices::vmware::VmwareBackdoor,
 }
 
 impl Vm {
@@ -234,6 +238,7 @@ impl Vm {
             net_backend: None,
             #[cfg(feature = "std")]
             pending_mouse: std::sync::Mutex::new(alloc::vec::Vec::new()),
+            vmware_backdoor: crate::devices::vmware::VmwareBackdoor::new(),
             uefi_boot: false,
         })
     }
