@@ -9,6 +9,8 @@ use crate::auth::middleware::AuthUser;
 #[derive(Serialize)]
 pub struct SystemInfo {
     pub version: &'static str,
+    pub build_sha: &'static str,
+    pub build_time: &'static str,
     pub platform: &'static str,
     pub arch: &'static str,
     pub hostname: String,
@@ -44,6 +46,8 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<SystemInfo> {
 
     Json(SystemInfo {
         version: env!("CARGO_PKG_VERSION"),
+        build_sha: env!("COREVM_GIT_SHA"),
+        build_time: env!("COREVM_BUILD_TIMESTAMP"),
         platform: std::env::consts::OS,
         arch: std::env::consts::ARCH,
         hostname,

@@ -47,7 +47,8 @@ async fn main() {
         .with_env_filter(filter)
         .init();
 
-    tracing::info!("vmm-server v{} starting", env!("CARGO_PKG_VERSION"));
+    tracing::info!("vmm-server v{} ({}) built {}",
+        env!("CARGO_PKG_VERSION"), env!("COREVM_GIT_SHA"), env!("COREVM_BUILD_TIMESTAMP"));
 
     // Auto-detect BIOS search paths if not configured
     tracing::info!("CWD: {:?}", std::env::current_dir());

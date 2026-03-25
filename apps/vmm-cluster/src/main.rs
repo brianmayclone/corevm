@@ -47,7 +47,8 @@ async fn main() {
         )
         .init();
 
-    tracing::info!("vmm-cluster v{} starting...", env!("CARGO_PKG_VERSION"));
+    tracing::info!("vmm-cluster v{} ({}) built {}",
+        env!("CARGO_PKG_VERSION"), env!("COREVM_GIT_SHA"), env!("COREVM_BUILD_TIMESTAMP"));
 
     // ── Create data directory ───────────────────────────────────────
     let data_dir = &config.data.data_dir;

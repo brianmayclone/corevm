@@ -4,7 +4,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="$ROOT/dist/iso-build"
-ISO_OUTPUT="$ROOT/dist/corevm-appliance.iso"
+
+# Read version from VERSION file (single source of truth)
+COREVM_VERSION=$(cat "$ROOT/VERSION" | tr -d '[:space:]')
+BUILD_TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
+
+# ISO output filename: include version, optionally append timestamp
+# Override with COREVM_ISO_TIMESTAMP=1 to append build timestamp
+if [ "${COREVM_ISO_TIMESTAMP:-0}" = "1" ]; then
+    ISO_OUTPUT="$ROOT/dist/corevm-appliance-${COREVM_VERSION}-${BUILD_TIMESTAMP}.iso"
+else
+    ISO_OUTPUT="$ROOT/dist/corevm-appliance-${COREVM_VERSION}.iso"
+fi
+echo "Building CoreVM Appliance v${COREVM_VERSION} (${BUILD_TIMESTAMP})"
 
 # ============================================================
 # SAFETY: Verify paths are absolute and point inside the repo
@@ -130,33 +142,34 @@ ShowDelay=0
 PLYMOUTHCONF
 
 # Branding: os-release, issue, motd, hostname
-cat > "$ROOTFS_DIR/etc/os-release" <<'OSRELEASE'
-PRETTY_NAME="CoreVM Appliance 1.0"
+cat > "$ROOTFS_DIR/etc/os-release" <<OSRELEASE
+PRETTY_NAME="CoreVM Appliance ${COREVM_VERSION}"
 NAME="CoreVM"
-VERSION_ID="1.0"
-VERSION="1.0"
+VERSION_ID="${COREVM_VERSION}"
+VERSION="${COREVM_VERSION}"
+BUILD_TIMESTAMP="${BUILD_TIMESTAMP}"
 ID=corevm
 ID_LIKE=debian
 HOME_URL="https://corevm.io"
 OSRELEASE
 
-cat > "$ROOTFS_DIR/etc/issue" <<'ISSUE'
+cat > "$ROOTFS_DIR/etc/issue" <<ISSUE
 
    ____               __     __ __  __
-  / ___|___  _ __ ___ \ \   / /|  \/  |
- | |   / _ \| '__/ _ \ \ \ / / | |\/| |
- | |__| (_) | | |  __/  \ V /  | |  | |
-  \____\___/|_|  \___|   \_/   |_|  |_|
+  / ___|___  _ __ ___ \\ \\   / /|  \\/  |
+ | |   / _ \\| '__/ _ \\ \\ \\/ / | |\\/| |
+ | |__| (_) | | |  __/  \\ V /  | |  | |
+  \\____\\___/|_|  \\___|   \\_/   |_|  |_|
 
-  CoreVM Appliance 1.0 -- \n \l
+  CoreVM Appliance ${COREVM_VERSION} -- \\n \\l
 
 ISSUE
 
 cp "$ROOTFS_DIR/etc/issue" "$ROOTFS_DIR/etc/issue.net"
 
-cat > "$ROOTFS_DIR/etc/motd" <<'MOTD'
+cat > "$ROOTFS_DIR/etc/motd" <<MOTD
 
-  Welcome to CoreVM Appliance 1.0
+  Welcome to CoreVM Appliance ${COREVM_VERSION}
   Manage this appliance via the DCUI on tty1 or the web UI.
 
 MOTD
@@ -277,24 +290,25 @@ grub-pc,grub-efi-amd64-bin \
 echo "squashfs" >> "$LIVE_DIR/etc/initramfs-tools/modules"
 
 # Branding for live environment
-cat > "$LIVE_DIR/etc/os-release" <<'OSRELEASE'
-PRETTY_NAME="CoreVM Appliance Installer"
+cat > "$LIVE_DIR/etc/os-release" <<OSRELEASE
+PRETTY_NAME="CoreVM Appliance Installer ${COREVM_VERSION}"
 NAME="CoreVM"
-VERSION_ID="1.0"
-VERSION="1.0"
+VERSION_ID="${COREVM_VERSION}"
+VERSION="${COREVM_VERSION}"
+BUILD_TIMESTAMP="${BUILD_TIMESTAMP}"
 ID=corevm
 ID_LIKE=debian
 OSRELEASE
 
-cat > "$LIVE_DIR/etc/issue" <<'ISSUE'
+cat > "$LIVE_DIR/etc/issue" <<ISSUE
 
    ____               __     __ __  __
-  / ___|___  _ __ ___ \ \   / /|  \/  |
- | |   / _ \| '__/ _ \ \ \ / / | |\/| |
- | |__| (_) | | |  __/  \ V /  | |  | |
-  \____\___/|_|  \___|   \_/   |_|  |_|
+  / ___|___  _ __ ___ \\ \\   / /|  \\/  |
+ | |   / _ \\| '__/ _ \\ \\ \\/ / | |\\/| |
+ | |__| (_) | | |  __/  \\ V /  | |  | |
+  \\____\\___/|_|  \\___|   \\_/   |_|  |_|
 
-  CoreVM Appliance Installer -- \n \l
+  CoreVM Appliance Installer ${COREVM_VERSION} -- \\n \\l
 
 ISSUE
 

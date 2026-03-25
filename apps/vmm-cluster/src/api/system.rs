@@ -13,6 +13,8 @@ use crate::services::stats::StatsService;
 #[derive(Serialize)]
 pub struct SystemInfo {
     pub version: String,
+    pub build_sha: String,
+    pub build_time: String,
     pub mode: String,
     pub cluster_name: Option<String>,
     pub uptime_secs: u64,
@@ -29,6 +31,8 @@ pub async fn info(
 
     Json(SystemInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
+        build_sha: env!("COREVM_GIT_SHA").to_string(),
+        build_time: env!("COREVM_BUILD_TIMESTAMP").to_string(),
         mode: "cluster".to_string(),
         cluster_name: None,
         uptime_secs: state.started_at.elapsed().as_secs(),

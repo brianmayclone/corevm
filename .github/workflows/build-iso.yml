@@ -1,0 +1,115 @@
+# Build CoreVM Appliance ISO on version tags (vX.Y.Z)
+#
+# Triggered by pushing a tag like v0.2.0, v1.0.0, etc.
+# Produces a bootable ISO as a GitHub Release artifact.
+#
+name: Build Appliance ISO
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'  # v1.0.0, v0.2.0-beta.1, etc.
+  workflow_dispatch:
+    inputs:
+      append_timestamp:
+        description: 'Append build timestamp to ISO filename'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write  # needed for creating releases
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-iso:
+    name: Build ISO
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # Tag push: extract version from tag (strip leading 'v')
+            TAG="${GITHUB_REF#refs/tags/}"
+            VERSION="${TAG#v}"
+          else
+            # Manual dispatch: read from VERSION file
+            VERSION=$(cat VERSION | tr -d '[:space:]')
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building CoreVM Appliance v$VERSION"
+
+      - name: Verify VERSION file matches tag
+        if: github.event_name == 'push'
+        run: |
+          FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
+          TAG_VERSION="${{ steps.version.outputs.version }}"
+          if [ "$FILE_VERSION" != "$TAG_VERSION" ]; then
+            echo "ERROR: VERSION file ($FILE_VERSION) does not match tag ($TAG_VERSION)"
+            echo "Run: ./tools/bump-version.sh $TAG_VERSION"
+            exit 1
+          fi
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            debootstrap xorriso squashfs-tools grub-pc-bin grub-efi-amd64-bin \
+            mtools dosfstools
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build Appliance ISO
+        run: |
+          export COREVM_ISO_TIMESTAMP=${{ github.event.inputs.append_timestamp == 'true' && '1' || '0' }}
+          # For tag pushes, always append timestamp
+          if [ "${{ github.event_name }}" = "push" ]; then
+            export COREVM_ISO_TIMESTAMP=1
+          fi
+          sudo -E env "PATH=$PATH" ./tools/build-iso.sh
+        env:
+          CARGO_TERM_COLOR: always
+
+      - name: List build artifacts
+        run: ls -lh dist/*.iso
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: corevm-appliance-${{ steps.version.outputs.version }}
+          path: dist/*.iso
+          compression-level: 0  # ISO is already compressed
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: CoreVM Appliance ${{ steps.version.outputs.version }}
+          draft: true
+          generate_release_notes: true
+          files: dist/*.iso

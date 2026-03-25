@@ -25,9 +25,17 @@ impl AboutDialog {
                 ui.add_space(8.0);
                 ui.vertical_centered(|ui| {
                     ui.heading("CoreVM Manager");
-                    ui.label(egui::RichText::new("Version 0.1.0").color(theme::text_disabled()));
+                    ui.label(egui::RichText::new(format!(
+                        "Version {} ({})",
+                        env!("CARGO_PKG_VERSION"),
+                        env!("COREVM_GIT_SHA"),
+                    )).color(theme::text_disabled()));
+                    ui.label(egui::RichText::new(format!(
+                        "Built {}",
+                        env!("COREVM_BUILD_TIMESTAMP"),
+                    )).size(11.0).color(theme::text_tertiary()));
                     ui.add_space(8.0);
-                    ui.label("Cross-platform x86 Virtual Machine Manager");
+                    ui.label("x86 Virtual Machine Manager");
                     ui.label(egui::RichText::new("Powered by libcorevm").italics());
                     ui.add_space(4.0);
                     ui.label(egui::RichText::new("\u{00a9} 2026 CoreVM").color(theme::text_subtle()));
