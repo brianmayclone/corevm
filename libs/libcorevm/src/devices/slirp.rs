@@ -24,9 +24,15 @@ use alloc::string::String;
 use std::net::{TcpStream, UdpSocket, SocketAddr, Ipv4Addr, TcpListener};
 use std::io::{Read, Write, ErrorKind};
 use std::time::Instant;
+use core::sync::atomic::{AtomicU8, Ordering};
 use super::net::NetBackend;
 
 // ── Network configuration ────────────────────────────────────────────────────
+
+/// Global counter for automatic guest IP assignment.
+/// Each SlirpNet instance gets a unique last octet (15, 16, 17, ...).
+/// This ensures multiple NAT VMs on the same host don't collide.
+static NEXT_GUEST_OCTET: AtomicU8 = AtomicU8::new(15);
 
 /// Default network parameters (used when no SDN config is provided).
 const DEFAULT_NET_PREFIX: [u8; 3] = [10, 0, 2];
@@ -288,12 +294,47 @@ pub struct SlirpNet {
     ftp_control: BTreeMap<TcpFlowKey, FtpControlState>,
     /// FTP ALG: active-mode data connection listeners.
     ftp_data_listeners: Vec<FtpDataListener>,
+    /// Inbound port-forward listeners (host_port → guest_port).
+    /// Automatically set up so host TCP connections reach the guest.
+    inbound_listeners: Vec<PortForwardListener>,
+    /// Pending inbound connections being forwarded to the guest.
+    inbound_pending: Vec<InboundPending>,
+    /// Next synthetic source port for inbound connections.
+    inbound_next_port: u16,
+}
+
+/// A single inbound port-forward listener (host_port → guest_port).
+struct PortForwardListener {
+    listener: TcpListener,
+    host_port: u16,
+    guest_port: u16,
+}
+
+/// An accepted inbound connection being relayed to the guest via TCP SYN.
+struct InboundPending {
+    /// The accepted host-side TCP stream.
+    stream: TcpStream,
+    /// Guest port to connect to.
+    guest_port: u16,
+    /// Ephemeral "source port" we invented for this inbound connection.
+    synth_port: u16,
+    /// Our (gateway) initial sequence number.
+    our_seq: u32,
+    /// True once we've injected the SYN into the guest.
+    syn_sent: bool,
+    /// Timestamp for timeout.
+    created: Instant,
 }
 
 impl SlirpNet {
     /// Create with default network configuration (10.0.2.0/24).
+    /// Each instance automatically gets a unique guest IP (10.0.2.15, .16, .17, ...).
     pub fn new() -> Self {
-        Self::with_config(SlirpConfig::default())
+        let mut config = SlirpConfig::default();
+        // Assign unique guest IP per instance
+        let octet = NEXT_GUEST_OCTET.fetch_add(1, Ordering::Relaxed);
+        config.guest_ip[3] = octet;
+        Self::with_config(config)
     }
 
     /// Create with custom SDN network configuration.
@@ -311,6 +352,11 @@ impl SlirpNet {
                 config.pxe_next_server[2], config.pxe_next_server[3]);
         }
 
+        // Set up automatic inbound port-forwarding.
+        // Common ports are forwarded 1:1 (host:port → guest:port).
+        // If a port is already in use on the host, it's silently skipped.
+        let inbound_listeners = setup_inbound_forwards(&config);
+
         SlirpNet {
             config,
             guest_mac: [0; 6],
@@ -325,6 +371,9 @@ impl SlirpNet {
             pending_connects: Vec::new(),
             ftp_control: BTreeMap::new(),
             ftp_data_listeners: Vec::new(),
+            inbound_listeners,
+            inbound_pending: Vec::new(),
+            inbound_next_port: 50000,
         }
     }
 
@@ -366,7 +415,7 @@ impl SlirpNet {
         if target_ip[0] != NET_PREFIX[0] || target_ip[1] != NET_PREFIX[1] || target_ip[2] != NET_PREFIX[2] {
             return;
         }
-        if target_ip == &GUEST_IP {
+        if target_ip == &self.config.guest_ip {
             return;
         }
 
@@ -496,7 +545,7 @@ impl SlirpNet {
         }
 
         for (key, data) in responses {
-            self.send_udp_packet(key.remote_ip, GUEST_IP, key.remote_port, key.guest_port, &data);
+            self.send_udp_packet(key.remote_ip, self.config.guest_ip, key.remote_port, key.guest_port, &data);
         }
 
         // Expire old flows (>60s idle)
@@ -544,7 +593,7 @@ impl SlirpNet {
             }
         }
         for (guest_port, data) in replies {
-            self.send_udp_packet(DNS_IP, GUEST_IP, 53, guest_port, &data);
+            self.send_udp_packet(DNS_IP, self.config.guest_ip, 53, guest_port, &data);
         }
     }
 
@@ -636,7 +685,7 @@ impl SlirpNet {
 
         // Send to guest's IP (unicast), not broadcast.
         let src_ip = GATEWAY_IP;
-        let dst_ip = GUEST_IP;
+        let dst_ip = self.config.guest_ip;
         let udp_len = (8 + reply.len()) as u16;
         let mut udp_payload = Vec::with_capacity(8 + reply.len());
         udp_payload.extend_from_slice(&udp_header(67, 68, reply.len() as u16));
@@ -664,7 +713,7 @@ impl SlirpNet {
         reply[4..8].copy_from_slice(xid);
         reply[10] = flags[0]; // flags (broadcast bit etc.)
         reply[11] = flags[1];
-        reply[16..20].copy_from_slice(&GUEST_IP); // yiaddr
+        reply[16..20].copy_from_slice(&self.config.guest_ip); // yiaddr
         reply[20..24].copy_from_slice(&GATEWAY_IP); // siaddr (next server)
         // chaddr
         let mac_len = chaddr.len().min(16);
@@ -1330,7 +1379,7 @@ impl SlirpNet {
 
         // TCP checksum (pseudo-header + TCP header + data)
         let src = key.remote_ip;
-        let dst = GUEST_IP;
+        let dst = self.config.guest_ip;
         let tcp_len = tcp.len() as u16;
         let mut pseudo = vec![0u8; 12 + tcp.len()];
         pseudo[0..4].copy_from_slice(&src);
@@ -1341,7 +1390,7 @@ impl SlirpNet {
         let cksum = ip_checksum(&pseudo);
         put_u16be(&mut tcp, 16, cksum);
 
-        self.send_ip_packet(IP_PROTO_TCP, key.remote_ip, GUEST_IP, &tcp);
+        self.send_ip_packet(IP_PROTO_TCP, key.remote_ip, self.config.guest_ip, &tcp);
     }
 
     // ── Common packet builder ────────────────────────────────────────────
@@ -1400,6 +1449,7 @@ impl NetBackend for SlirpNet {
         self.poll_udp();
         self.poll_ftp();
         self.poll_tcp();
+        self.poll_inbound();
     }
 
     fn description(&self) -> &str {
@@ -1462,4 +1512,139 @@ fn detect_host_dns() -> SocketAddr {
 
     // Fallback: Google DNS
     SocketAddr::new(Ipv4Addr::new(8, 8, 8, 8).into(), 53)
+}
+
+// ── Inbound port forwarding ──────────────────────────────────────────────────
+
+/// Common ports that are automatically forwarded from host to guest (1:1).
+/// If a port is already in use on the host, it's silently skipped.
+const AUTO_FORWARD_PORTS: &[u16] = &[
+    22,    // SSH
+    80,    // HTTP
+    443,   // HTTPS
+    2222,  // SSH alternate
+    3000,  // Dev servers (Vite, Rails, etc.)
+    3306,  // MySQL
+    3389,  // RDP
+    5432,  // PostgreSQL
+    5900,  // VNC
+    8000,  // Dev servers
+    8080,  // HTTP alternate
+    8443,  // HTTPS alternate
+    8888,  // Jupyter, etc.
+    9090,  // Prometheus, Cockpit
+    9443,  // HTTPS alternate
+];
+
+/// Set up inbound port-forward listeners.
+/// Each listener binds to the same port on the host and forwards
+/// accepted connections to the guest's same port number.
+fn setup_inbound_forwards(config: &SlirpConfig) -> Vec<PortForwardListener> {
+    let mut listeners = Vec::new();
+    for &port in AUTO_FORWARD_PORTS {
+        match TcpListener::bind(SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), port)) {
+            Ok(listener) => {
+                listener.set_nonblocking(true).ok();
+                eprintln!("[slirp] Port forward: host:{} → guest {}.{}.{}.{}:{}",
+                    port, config.guest_ip[0], config.guest_ip[1], config.guest_ip[2], config.guest_ip[3], port);
+                listeners.push(PortForwardListener { listener, host_port: port, guest_port: port });
+            }
+            Err(_) => {
+                // Port already in use — skip silently
+            }
+        }
+    }
+    if listeners.is_empty() {
+        eprintln!("[slirp] No inbound ports available for forwarding");
+    } else {
+        eprintln!("[slirp] {} inbound port(s) forwarded", listeners.len());
+    }
+    listeners
+}
+
+impl SlirpNet {
+    /// Poll inbound port-forward listeners for new connections
+    /// and relay pending connections to the guest.
+    fn poll_inbound(&mut self) {
+        let gateway_ip = self.config.gateway_ip;
+
+        // 1. Accept new connections from listeners
+        // Collect into a temp vec to avoid borrowing self.inbound_listeners while mutating self.
+        let mut new_conns: Vec<(TcpStream, u16, std::net::SocketAddr)> = Vec::new();
+        for fwd in &self.inbound_listeners {
+            loop {
+                match fwd.listener.accept() {
+                    Ok((stream, peer)) => {
+                        stream.set_nonblocking(true).ok();
+                        new_conns.push((stream, fwd.guest_port, peer));
+                    }
+                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
+                    Err(_) => break,
+                }
+            }
+        }
+        for (stream, guest_port, peer) in new_conns {
+            let synth_port = self.inbound_next_port;
+            self.inbound_next_port = self.inbound_next_port.wrapping_add(1);
+            if self.inbound_next_port < 50000 { self.inbound_next_port = 50000; }
+            let our_seq: u32 = 0x2000_0000u32.wrapping_add(synth_port as u32 * 0x1000);
+            eprintln!("[slirp] Inbound connection from {} → guest:{}", peer, guest_port);
+            self.inbound_pending.push(InboundPending {
+                stream, guest_port, synth_port, our_seq,
+                syn_sent: false,
+                created: Instant::now(),
+            });
+        }
+
+        // 2. Process pending inbound connections.
+        // Collect SYNs to send and connections to insert, then apply after iteration.
+        let mut syns_to_send: Vec<(TcpFlowKey, u32)> = Vec::new();
+        let mut conns_to_insert: Vec<(TcpFlowKey, TcpConnection)> = Vec::new();
+        let mut completed: Vec<usize> = Vec::new();
+
+        for (i, pending) in self.inbound_pending.iter_mut().enumerate() {
+            if pending.created.elapsed().as_secs() > 10 {
+                completed.push(i);
+                continue;
+            }
+            if !pending.syn_sent {
+                let key = TcpFlowKey {
+                    guest_port: pending.guest_port,
+                    remote_ip: gateway_ip,
+                    remote_port: pending.synth_port,
+                };
+                if let Ok(stream_clone) = pending.stream.try_clone() {
+                    conns_to_insert.push((key, TcpConnection {
+                        stream: stream_clone,
+                        state: TcpState::SynSent,
+                        our_seq: pending.our_seq,
+                        unacked: 0,
+                        guest_seq: 0,
+                        guest_isn: 0,
+                        read_buf: [0u8; 16384],
+                        guest_window: 65535,
+                        guest_wscale: 0,
+                        retransmit_queue: Vec::new(),
+                        last_retransmit: None,
+                        dup_ack_count: 0,
+                    }));
+                    syns_to_send.push((key, pending.our_seq));
+                    pending.syn_sent = true;
+                } else {
+                    completed.push(i);
+                }
+            }
+        }
+
+        // Apply collected mutations
+        for (key, conn) in conns_to_insert {
+            self.tcp_conns.insert(key, conn);
+        }
+        for (key, seq) in syns_to_send {
+            self.send_tcp_flags(key, 0x02, seq, 0, &[]);
+        }
+        for i in completed.into_iter().rev() {
+            self.inbound_pending.remove(i);
+        }
+    }
 }

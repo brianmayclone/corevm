@@ -292,6 +292,16 @@ impl Vm {
         self.serial_ptr = &*serial as *const Serial as *mut Serial;
         self.io.register(0x3F8, 8, serial);
 
+        // COM2-COM4 stubs — Linux probes these during boot.
+        // Return 0xFF (no UART present) so detection fails cleanly.
+        self.io.register(0x2F8, 8, Box::new(EmptyUartStub));  // COM2
+        self.io.register(0x3E8, 8, Box::new(EmptyUartStub));  // COM3
+        self.io.register(0x2E8, 8, Box::new(EmptyUartStub));  // COM4
+
+        // Floppy disk controller (0x3F0-0x3F5, 0x3F7) — no floppy emulated.
+        // Linux writes DOR=0x00 to reset/disable. Absorb silently.
+        self.io.register(0x3F0, 6, Box::new(EmptyUartStub));  // reuse stub (0xFF = no FDC)
+
         // VGA I/O ports (0x3C0-0x3DA) and MMIO framebuffer
         let svga = Box::new(Svga::new_with_vram(1024, 768, self.vram_mb));
         self.svga_ptr = &*svga as *const Svga as *mut Svga;
@@ -324,14 +334,23 @@ impl Vm {
         // ACPI PM at PMBASE 0xB000 (matches FADT PM1a_EVT_BLK in SeaBIOS ACPI tables)
         let acpi_pm = Box::new(AcpiPm::new());
         self.acpi_pm_ptr = &*acpi_pm as *const AcpiPm as *mut AcpiPm;
-        self.io.register(0xB000, 0x40, acpi_pm);
+        self.io.register(0xB000, 0x80, acpi_pm);
         // ACPI PM also at 0x600 — OVMF/UEFI sets ICH9 LPC PMBASE to 0x600.
         // Uses a proxy to the SAME AcpiPm instance so shutdown detection and
         // timer state are shared between SeaBIOS (0xB000) and UEFI (0x600).
-        self.io.register(0x600, 0x40, Box::new(AcpiPmProxy(self.acpi_pm_ptr)));
+        // Range 0x80 covers PM1, PM Timer, GPE0, and TCO registers.
+        self.io.register(0x600, 0x80, Box::new(AcpiPmProxy(self.acpi_pm_ptr)));
 
         // APM (0xB2-0xB3)
         self.io.register(0xB2, 2, Box::new(ApmControl::new()));
+
+        // VMware backdoor port (0x5658) — guest OSes probe this to detect VMware.
+        // Return 0xFFFFFFFF to signal "not VMware" and suppress unhandled I/O logs.
+        self.io.register(0x5658, 2, Box::new(VmwareBackdoorStub));
+
+        // ICH9 LPC I/O registers (0x700-0x71F) — NMI control, GEN_PMCON, etc.
+        // Linux and Windows probe these for NMI configuration and power management.
+        self.io.register(0x700, 0x20, Box::new(Ich9LpcIo::new()));
 
         // fw_cfg (0x510-0x51B: selector, data, DMA ports)
         let mut fw_cfg = Box::new(FwCfg::new(ram_size as u64));
@@ -1396,6 +1415,74 @@ impl crate::io::IoHandler for AcpiPmProxy {
     }
     fn write(&mut self, port: u16, size: u8, val: u32) -> crate::error::Result<()> {
         unsafe { &mut *self.0 }.write(port, size, val)
+    }
+}
+
+// ── Empty UART stub (COM2-COM4) ──
+// Returns 0xFF on all reads (= no UART chip present), silently absorbs writes.
+// This makes Linux/Windows UART detection fail cleanly without log spam.
+
+struct EmptyUartStub;
+
+impl crate::io::IoHandler for EmptyUartStub {
+    fn read(&mut self, _port: u16, _size: u8) -> crate::error::Result<u32> {
+        Ok(0xFF)
+    }
+    fn write(&mut self, _port: u16, _size: u8, _val: u32) -> crate::error::Result<()> {
+        Ok(())
+    }
+}
+
+// ── ICH9 LPC I/O registers (0x700-0x71F) ──
+// Covers NMI control, GEN_PMCON, and related ICH9 registers that
+// Linux and Windows probe during boot.
+
+struct Ich9LpcIo {
+    regs: [u8; 0x20],
+}
+
+impl Ich9LpcIo {
+    fn new() -> Self {
+        let mut regs = [0u8; 0x20];
+        // NMI_SC (offset 0x02, port 0x702): NMI status/control.
+        // Bit 7: SERR# NMI source status (read-only, 0 = no NMI).
+        // Bit 3: IOCHK# NMI enable (0 = disabled). Default safe.
+        regs[0x02] = 0x00;
+        // Port 0x70D (offset 0x0D): often mirrors port 0x61 behavior.
+        // Bit 5: Timer Counter 2 output (speaker timer). Default 0.
+        regs[0x0D] = 0x00;
+        // GEN_PMCON (offset 0x10-0x11, ports 0x710-0x711):
+        // General PM configuration. Default: all features disabled.
+        regs[0x10] = 0x00;
+        regs[0x11] = 0x00;
+        Self { regs }
+    }
+}
+
+impl crate::io::IoHandler for Ich9LpcIo {
+    fn read(&mut self, port: u16, _size: u8) -> crate::error::Result<u32> {
+        let offset = (port & 0x1F) as usize;
+        Ok(self.regs[offset] as u32)
+    }
+    fn write(&mut self, port: u16, _size: u8, val: u32) -> crate::error::Result<()> {
+        let offset = (port & 0x1F) as usize;
+        self.regs[offset] = val as u8;
+        Ok(())
+    }
+}
+
+// ── VMware backdoor stub ──
+// Guest OSes (Linux, Windows) probe port 0x5658 to detect VMware.
+// Returning 0xFFFFFFFF signals "not VMware" and silences the log.
+
+struct VmwareBackdoorStub;
+
+impl crate::io::IoHandler for VmwareBackdoorStub {
+    fn read(&mut self, _port: u16, _size: u8) -> crate::error::Result<u32> {
+        Ok(0xFFFFFFFF)
+    }
+    fn write(&mut self, _port: u16, _size: u8, _val: u32) -> crate::error::Result<()> {
+        Ok(())
     }
 }
 
