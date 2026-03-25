@@ -49,7 +49,7 @@ pub struct AcpiPm {
     timer_count: u32,
     /// Fractional guest instruction credits toward the next PM timer tick.
     instruction_credit: u64,
-    /// Wall-clock epoch for std platforms (used in WHP mode).
+    /// Wall-clock epoch for std platforms.
     #[cfg(feature = "std")]
     epoch: std::time::Instant,
     /// Set when the guest writes SLP_EN with SLP_TYP=S5 (soft-off/shutdown).
@@ -114,7 +114,7 @@ impl AcpiPm {
     }
 
     /// Advance the free-running PM timer by guest execution progress.
-    /// Used in host_test (non-WHP) mode.
+    /// Used in host_test mode.
     pub fn advance(&mut self, guest_instructions: u64) {
         self.instruction_credit = self.instruction_credit.saturating_add(guest_instructions);
         if self.instruction_credit < PM_TIMER_INSTS_PER_TICK {

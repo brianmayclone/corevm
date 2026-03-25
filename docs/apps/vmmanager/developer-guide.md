@@ -22,7 +22,7 @@ apps/vmmanager/src/
 │
 ├── engine/                 VM lifecycle & platform abstraction
 │   ├── vm.rs               VM creation, execution, control
-│   ├── platform.rs         Linux/Windows platform-specific code
+│   ├── platform.rs         Linux platform-specific code
 │   ├── input.rs            Keyboard/mouse input handling
 │   ├── diagnostics.rs      Troubleshooting and logging
 │   ├── iso_detect.rs       ISO file detection
@@ -87,12 +87,12 @@ The VGA framebuffer is rendered as an OpenGL texture:
 
 ### Platform-Specific Code
 
-| Module | Linux | Windows |
-|--------|-------|---------|
-| `platform.rs` | KVM availability check | WHP availability check |
-| `evdev_input.rs` | evdev keyboard capture | N/A |
-| `evdev_mouse.rs` | evdev mouse capture | N/A |
-| `input.rs` | Fallback keyboard/mouse | Windows keyboard/mouse |
+| Module | Linux |
+|--------|-------|
+| `platform.rs` | KVM availability check |
+| `evdev_input.rs` | evdev keyboard capture |
+| `evdev_mouse.rs` | evdev mouse capture |
+| `input.rs` | Fallback keyboard/mouse |
 
 ### Configuration
 

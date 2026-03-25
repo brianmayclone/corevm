@@ -118,7 +118,7 @@ impl Svga {
     ///
     /// `vram_mb`: VRAM size in MiB (clamped to 8..=256). Pass 0 for default (16 MiB).
     /// On `std` targets, the framebuffer is page-aligned so it can be mapped
-    /// as a KVM/WHP memory region for fast guest access.
+    /// as a KVM memory region for fast guest access.
     pub fn new_with_vram(width: u32, height: u32, vram_mb: u32) -> Self {
         let vram_mb = if vram_mb == 0 { 16 } else { vram_mb.clamp(8, 256) };
         let fb_size = (vram_mb as usize) * 1024 * 1024;
@@ -246,7 +246,7 @@ impl Svga {
     }
 
     /// Sync the text buffer from guest physical memory at 0xB8000.
-    /// In hardware-virtualization mode (KVM/WHP), VGA memory writes go
+    /// In hardware-virtualization mode (KVM), VGA memory writes go
     /// directly to RAM and bypass the MMIO handler. This function copies
     /// the text buffer from guest RAM into our internal buffer.
     ///

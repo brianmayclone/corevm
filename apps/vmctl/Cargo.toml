@@ -7,6 +7,3 @@ edition = "2021"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libcorevm = { path = "../../libs/libcorevm", default-features = false, features = ["linux"] }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-libcorevm = { path = "../../libs/libcorevm", default-features = false, features = ["windows"] }

@@ -68,7 +68,6 @@ The VM runs in the main thread:
 | Platform | Feature | Backend |
 |----------|---------|---------|
 | Linux | `libcorevm/linux` | KVM |
-| Windows | `libcorevm/windows` | WHP |
 
 ## Dependencies
 

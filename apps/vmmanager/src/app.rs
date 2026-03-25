@@ -1250,10 +1250,7 @@ impl eframe::App for CoreVmApp {
                             ui.separator();
                             if ui.button("Open Config Directory").clicked() {
                                 let dir = platform::config_dir();
-                                #[cfg(target_os = "linux")]
-                                { let _ = std::process::Command::new("xdg-open").arg(&dir).spawn(); }
-                                #[cfg(target_os = "windows")]
-                                { let _ = std::process::Command::new("explorer").arg(&dir).spawn(); }
+                                let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
                                 ui.close_menu();
                             }
                             ui.separator();

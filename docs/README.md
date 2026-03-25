@@ -9,7 +9,7 @@ docs/
 ├── libcorevm/                 Core VM engine library
 │   ├── overview.md            Architecture & design
 │   ├── devices.md             Emulated hardware reference
-│   ├── backends.md            Execution backends (KVM, WHP, anyOS)
+│   ├── backends.md            Execution backends (KVM, anyOS)
 │   ├── ffi.md                 C FFI reference
 │   └── memory.md              Memory subsystem
 ├── apps/

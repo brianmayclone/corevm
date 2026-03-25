@@ -6,13 +6,8 @@ vmmanager is the native desktop GUI for CoreVM. It provides a graphical interfac
 
 ### Prerequisites
 
-**Linux:**
 - KVM support (`/dev/kvm` accessible)
 - OpenGL support (for framebuffer rendering)
-
-**Windows:**
-- Hyper-V / Windows Hypervisor Platform enabled
-- OpenGL support
 
 ### Building
 
@@ -21,7 +16,7 @@ cd apps/vmmanager
 cargo build --release
 ```
 
-The binary is output to `target/x86_64-unknown-linux-gnu/release/vmmanager` (Linux) or `target/release/vmmanager.exe` (Windows).
+The binary is output to `target/x86_64-unknown-linux-gnu/release/vmmanager`.
 
 ### Running
 
@@ -29,7 +24,7 @@ The binary is output to `target/x86_64-unknown-linux-gnu/release/vmmanager` (Lin
 ./target/release/vmmanager
 ```
 
-On startup, vmmanager checks for hardware virtualization support (KVM on Linux, WHP on Windows) and displays an error dialog if not available.
+On startup, vmmanager checks for KVM hardware virtualization support and displays an error dialog if not available.
 
 ## User Interface
 
@@ -140,12 +135,6 @@ vmmanager can detect ISO files in common locations:
 - Enable virtualization in BIOS/UEFI settings
 - On Linux: `sudo modprobe kvm_intel` or `sudo modprobe kvm_amd`
 - Ensure your user is in the `kvm` group: `sudo usermod -aG kvm $USER`
-
-### "WHP not available" (Windows)
-
-- Enable Hyper-V in Windows Features
-- Enable Windows Hypervisor Platform in Windows Features
-- Reboot after enabling
 
 ### Black screen after start
 

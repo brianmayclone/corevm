@@ -72,9 +72,6 @@ impl Default for VmRuntimeConfig {
             virtio_input: false,
             intel_gpu: false,
             diagnostics: false,
-            #[cfg(target_os = "windows")]
-            cancel_interval: Duration::from_millis(1),
-            #[cfg(not(target_os = "windows"))]
             cancel_interval: Duration::from_millis(1),
             timeout: Duration::ZERO,
         }

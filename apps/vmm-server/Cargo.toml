@@ -59,4 +59,3 @@ gethostname = "0.5"
 [features]
 default = ["linux"]
 linux = ["libcorevm/linux"]
-windows = ["libcorevm/windows"]

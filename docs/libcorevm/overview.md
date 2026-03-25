@@ -1,11 +1,11 @@
 # libcorevm — Architecture & Design
 
-libcorevm is the core x86 virtual machine engine of CoreVM, written entirely in Rust and NASM assembly. It provides full PC hardware emulation with hardware-accelerated execution via KVM (Linux), Hyper-V/WHP (Windows), and anyOS VMd (bare-metal).
+libcorevm is the core x86 virtual machine engine of CoreVM, written entirely in Rust and NASM assembly. It provides full PC hardware emulation with hardware-accelerated execution via KVM (Linux) and anyOS VMd (bare-metal).
 
 ## Design Principles
 
 - **`no_std` at its core** — compiles for bare-metal targets with only `alloc` for heap allocations
-- **Multi-backend** — same VM code runs on KVM, Hyper-V, and anyOS VMd
+- **Multi-backend** — same VM code runs on KVM and anyOS VMd
 - **C FFI** — 58 exported functions allow dynamic loading from any language
 - **Complete emulation** — 25+ hardware devices for full IBM PC compatibility
 
@@ -26,7 +26,6 @@ libs/libcorevm/src/
 ├── backend/            Execution backends
 │   ├── mod.rs          Backend trait definition
 │   ├── kvm.rs          KVM backend (Linux)
-│   ├── whp.rs          WHP backend (Windows / Hyper-V)
 │   └── anyos.rs        anyOS VMd backend (bare-metal)
 │
 ├── devices/            25+ emulated hardware devices
@@ -72,7 +71,6 @@ libs/libcorevm/src/
 3. **Attach media** — Attach disk images and ISOs
 4. **Run** — `corevm_run()` enters the backend execution loop
    - KVM: `ioctl(KVM_RUN)` on the vCPU fd
-   - WHP: `WHvRunVirtualProcessor` API
    - anyOS: VMd syscalls for VT-x/AMD-V
 5. **Handle exits** — I/O port access, MMIO, interrupts are dispatched to device emulation
 6. **Repeat** — Loop until shutdown/reboot/error
@@ -83,8 +81,7 @@ libs/libcorevm/src/
 |---------|-------------|
 | `anyos` (default) | anyOS VMd backend — `no_std`, uses `libheap` and `libsyscall` |
 | `linux` | KVM backend — enables `std`, `libc`, SLIRP networking, file I/O |
-| `windows` | WHP backend — enables `std`, Hyper-V/WHP API |
-| `std` | Standard library support (auto-enabled by `linux`/`windows`) |
+| `std` | Standard library support (auto-enabled by `linux`) |
 | `host_test` | Host-side test utilities |
 
 ## BIOS
@@ -103,6 +100,6 @@ SeaBIOS is supported as an alternative firmware for maximum guest compatibility.
 ## See Also
 
 - [Device Reference](devices.md) — detailed documentation for each emulated device
-- [Backend Reference](backends.md) — KVM, WHP, and anyOS backend details
+- [Backend Reference](backends.md) — KVM and anyOS backend details
 - [C FFI Reference](ffi.md) — complete list of exported functions
 - [Memory Subsystem](memory.md) — guest RAM, MMIO, and paging

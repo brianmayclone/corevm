@@ -238,11 +238,6 @@ pub fn bios_search_paths(extra_paths: &[PathBuf]) -> Vec<PathBuf> {
         paths.push(PathBuf::from("/mnt/c/Program Files/qemu/share"));
     }
 
-    #[cfg(target_os = "windows")]
-    {
-        paths.push(PathBuf::from("C:\\Program Files\\qemu\\share"));
-    }
-
     paths
 }
 

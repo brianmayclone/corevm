@@ -2,20 +2,8 @@ use std::path::PathBuf;
 
 /// Returns the directory where VM configs are stored.
 pub fn config_dir() -> PathBuf {
-    #[cfg(target_os = "linux")]
-    {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        PathBuf::from(home).join(".config/corevm/vms")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let appdata = std::env::var("APPDATA").unwrap_or_else(|_| "C:\\CoreVM".into());
-        PathBuf::from(appdata).join("CoreVM\\vms")
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
-        PathBuf::from("./vms")
-    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    PathBuf::from(home).join(".config/corevm/vms")
 }
 
 /// Returns the directory where layout.conf is stored.
@@ -46,13 +34,10 @@ pub fn bios_search_paths() -> Vec<PathBuf> {
         paths.push(project_root.join("build"));
     }
 
-    #[cfg(target_os = "linux")]
-    {
-        paths.push(PathBuf::from("/usr/share/corevm/bios"));
-        paths.push(PathBuf::from("/usr/local/share/corevm/bios"));
-    }
+    paths.push(PathBuf::from("/usr/share/corevm/bios"));
+    paths.push(PathBuf::from("/usr/local/share/corevm/bios"));
 
-    // SeaBIOS from qemu (WSL/Linux)
+    // SeaBIOS from qemu
     paths.push(PathBuf::from("/mnt/c/Program Files/qemu/share"));
     paths.push(PathBuf::from("/usr/share/seabios"));
     paths.push(PathBuf::from("/usr/share/qemu"));
@@ -73,20 +58,8 @@ pub fn find_bios(name: &str) -> Option<PathBuf> {
 
 /// Returns the directory where disk images are pooled.
 pub fn disk_pool_dir() -> PathBuf {
-    #[cfg(target_os = "linux")]
-    {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        PathBuf::from(home).join(".config/corevm/disks")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let appdata = std::env::var("APPDATA").unwrap_or_else(|_| "C:\\CoreVM".into());
-        PathBuf::from(appdata).join("CoreVM\\disks")
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
-        PathBuf::from("./disks")
-    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    PathBuf::from(home).join(".config/corevm/disks")
 }
 
 /// Host system info for display in settings dialogs.
@@ -104,66 +77,32 @@ pub fn host_info() -> HostInfo {
 }
 
 fn host_cpu_cores() -> u32 {
-    #[cfg(target_os = "linux")]
-    {
-        // Count "processor" lines in /proc/cpuinfo
-        if let Ok(s) = std::fs::read_to_string("/proc/cpuinfo") {
-            let n = s.lines().filter(|l| l.starts_with("processor")).count();
-            if n > 0 { return n as u32; }
-        }
-        1
+    // Count "processor" lines in /proc/cpuinfo
+    if let Ok(s) = std::fs::read_to_string("/proc/cpuinfo") {
+        let n = s.lines().filter(|l| l.starts_with("processor")).count();
+        if n > 0 { return n as u32; }
     }
-    #[cfg(target_os = "windows")]
-    {
-        std::env::var("NUMBER_OF_PROCESSORS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(1)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    { 1 }
+    1
 }
 
 fn host_ram_mb() -> u64 {
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(s) = std::fs::read_to_string("/proc/meminfo") {
-            for line in s.lines() {
-                if let Some(rest) = line.strip_prefix("MemTotal:") {
-                    let kb_str = rest.trim().trim_end_matches("kB").trim();
-                    if let Ok(kb) = kb_str.parse::<u64>() {
-                        return kb / 1024;
-                    }
+    if let Ok(s) = std::fs::read_to_string("/proc/meminfo") {
+        for line in s.lines() {
+            if let Some(rest) = line.strip_prefix("MemTotal:") {
+                let kb_str = rest.trim().trim_end_matches("kB").trim();
+                if let Ok(kb) = kb_str.parse::<u64>() {
+                    return kb / 1024;
                 }
             }
         }
-        4096
     }
-    #[cfg(target_os = "windows")]
-    {
-        // GlobalMemoryStatusEx via extern
-        4096 // fallback; proper impl would use winapi
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    { 4096 }
+    4096
 }
 
 /// Returns the base directory where per-VM machine directories are stored.
 pub fn machines_base_dir() -> PathBuf {
-    #[cfg(target_os = "linux")]
-    {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        PathBuf::from(home).join("corevm-machines")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let home = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".into());
-        PathBuf::from(home).join("corevm-machines")
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
-        PathBuf::from("./corevm-machines")
-    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    PathBuf::from(home).join("corevm-machines")
 }
 
 /// Returns the directory for a specific VM (by name).

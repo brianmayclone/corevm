@@ -103,6 +103,15 @@ impl IntelGpu {
 
     /// Read a 32-bit MMIO register (BAR0).
     pub fn reg_read(&mut self, offset: usize) -> u32 {
+        #[cfg(feature = "std")]
+        {
+            static IGPU_RD_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = IGPU_RD_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 100 {
+                eprintln!("[intel-gpu] MMIO read offset=0x{:06X}", offset);
+            }
+        }
+
         // GMBUS3 data register: special — returns EDID bytes from state machine
         if offset == regs::GMBUS3 {
             return self.gmbus.read_data();
@@ -132,6 +141,15 @@ impl IntelGpu {
 
     /// Write a 32-bit MMIO register (BAR0).
     pub fn reg_write(&mut self, offset: usize, val: u32) {
+        #[cfg(feature = "std")]
+        {
+            static IGPU_WR_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = IGPU_WR_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 100 {
+                eprintln!("[intel-gpu] MMIO write offset=0x{:06X} val=0x{:08X}", offset, val);
+            }
+        }
+
         // GMBUS
         if gmbus::is_gmbus_reg(offset) {
             self.gmbus.write(&mut self.regs, offset, val);

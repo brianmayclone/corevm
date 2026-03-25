@@ -30,15 +30,6 @@ use libcorevm::setup;
 use libcorevm::backend::{VcpuRegs, VcpuSregs};
 use libcorevm::runtime::{VmRuntime, VmRuntimeConfig, VmEvent, EventHandler};
 
-/// Callback for WHP debug output — routes messages to DiagLog's WHP tab.
-#[cfg(target_os = "windows")]
-extern "C" fn whp_debug_callback(ctx: *mut std::ffi::c_void, msg: *const u8, len: u32) {
-    if ctx.is_null() || msg.is_null() { return; }
-    let diag = unsafe { &*(ctx as *const DiagLog) };
-    let text = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(msg, len as usize)) };
-    diag.append_whp_text(text);
-}
-
 /// Retrieve the last error message from libcorevm.
 pub fn get_last_error_public() -> Option<String> {
     setup::get_last_error()
@@ -357,14 +348,6 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
 
     // Write COM1 base address into BDA so SeaBIOS finds the serial port.
     setup::setup_bda_com1(handle);
-
-    // Register WHP debug callback to route output to the diagnostics UI
-    #[cfg(target_os = "windows")]
-    {
-        let diag_for_whp = Box::new(entry.diag_log.clone());
-        let ctx = Box::into_raw(diag_for_whp) as *mut std::ffi::c_void;
-        libcorevm::ffi::corevm_set_whp_debug_callback(Some(whp_debug_callback), ctx);
-    }
 
     // Install SIGUSR1 handler so cancel_vcpu can interrupt KVM_RUN (Linux/KVM only)
     #[cfg(target_os = "linux")]

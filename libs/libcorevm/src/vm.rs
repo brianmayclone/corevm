@@ -27,12 +27,10 @@ use crate::devices::virtio_input::VirtioInput;
 /// FFI functions that need direct access (e.g., serial input/output,
 /// PS/2 key injection, VGA framebuffer).
 pub struct Vm {
-    #[cfg(all(feature = "linux", not(feature = "windows")))]
+    #[cfg(feature = "linux")]
     pub backend: crate::backend::kvm::KvmBackend,
-    #[cfg(all(feature = "anyos", not(feature = "linux"), not(feature = "windows")))]
+    #[cfg(all(feature = "anyos", not(feature = "linux")))]
     pub backend: crate::backend::anyos::AnyOsBackend,
-    #[cfg(all(feature = "windows", not(feature = "linux")))]
-    pub backend: crate::backend::whp::WhpBackend,
 
     pub memory: GuestMemory,
     pub io: IoDispatch,
@@ -131,12 +129,10 @@ impl Vm {
     pub fn new_with_chipset(ram_size_mb: u32, chipset: &'static crate::devices::chipset::ChipsetConfig) -> Result<Self, VmError> {
         let ram_bytes = (ram_size_mb as usize) * 1024 * 1024;
 
-        #[cfg(all(feature = "linux", not(feature = "windows")))]
+        #[cfg(feature = "linux")]
         let mut backend = crate::backend::kvm::KvmBackend::new()?;
-        #[cfg(all(feature = "anyos", not(feature = "linux"), not(feature = "windows")))]
+        #[cfg(all(feature = "anyos", not(feature = "linux")))]
         let mut backend = crate::backend::anyos::AnyOsBackend::new(ram_bytes)?;
-        #[cfg(all(feature = "windows", not(feature = "linux")))]
-        let mut backend = crate::backend::whp::WhpBackend::new(ram_bytes)?;
 
         let mut memory = GuestMemory::new(ram_bytes);
         let io = IoDispatch::new();
@@ -480,11 +476,8 @@ impl Vm {
 
         // I/O APIC and Local APIC MMIO.
         // On Linux/KVM with KVM_CREATE_IRQCHIP, these are handled in-kernel.
-        // On Windows/WHP with XApic mode, the LAPIC is handled by WHP internally
-        // (no MMIO exits at 0xFEE00000) and the IOAPIC is handled by the
-        // SoftIoapic in the WHP backend (intercepted in run_vcpu before reaching
-        // the memory bus). So these standalone handlers are only needed for anyOS.
-        #[cfg(all(not(feature = "linux"), not(feature = "windows")))]
+        // These standalone handlers are only needed for anyOS.
+        #[cfg(not(feature = "linux"))]
         {
             self.memory.add_mmio(0xFEC0_0000, 0x1000, Box::new(IoApic::new()));
             self.memory.add_mmio(0xFEE0_0000, 0x1000, Box::new(Lapic::new()));
@@ -537,7 +530,7 @@ impl Vm {
     ///
     /// Must be called AFTER `setup_standard_devices()` (which creates the
     /// SVGA device).
-    #[cfg(any(feature = "linux", feature = "windows"))]
+    #[cfg(feature = "linux")]
     pub fn setup_vga_lfb_mapping(&mut self) -> Result<(), VmError> {
         if self.svga_ptr.is_null() {
             return Ok(());
@@ -592,12 +585,6 @@ impl Vm {
 
     pub fn set_vcpu_regs(&mut self, id: u32, regs: &VcpuRegs) -> Result<(), VmError> {
         self.backend.set_vcpu_regs(id, regs)
-    }
-
-    /// Store a pending MMIO read response for a specific vCPU (WHP only).
-    #[cfg(feature = "windows")]
-    pub fn set_pending_mmio_read(&mut self, vcpu_id: u32, value: u64, dest_reg: u8) {
-        self.backend.set_pending_mmio_read(vcpu_id, value, dest_reg);
     }
 
     pub fn get_vcpu_sregs(&self, id: u32) -> Result<VcpuSregs, VmError> {
@@ -1045,18 +1032,16 @@ impl Vm {
         let vram_size = (vram_mb as usize) * 1024 * 1024;
 
         let gpu = Box::new(IntelGpu::new(vram_mb));
-        let gpu_ptr = &*gpu as *const IntelGpu as *mut IntelGpu;
+        let gpu_ptr = Box::into_raw(gpu);
         self.intel_gpu_ptr = gpu_ptr;
 
-        // Register BAR0 MMIO (2 MB register space) at a fixed address.
-        // This is below the PCI MMIO hole — i915 reads BAR0 from PCI config.
-        let bar0_addr: u64 = 0xF000_0000;
-        self.memory.add_mmio(bar0_addr, MMIO_SIZE as u64, gpu);
+        // No direct MMIO registration — all accesses go through the PCI MMIO
+        // Router which dynamically reads the current BAR address from PCI config.
+        // Windows relocates BARs, so fixed-address MMIO regions don't work.
 
-        // Register BAR2 MMIO (graphics aperture = VRAM) via proxy.
+        // Default BAR addresses (may be relocated by SeaBIOS/Windows):
+        let bar0_addr: u64 = 0xF000_0000;
         let bar2_addr: u64 = 0xD000_0000;
-        let aperture = Box::new(IntelGpuAperture::new(gpu_ptr));
-        self.memory.add_mmio(bar2_addr, vram_size as u64, aperture);
 
         // Remove standard VGA PCI device and add Intel HD Graphics
         if !self.pci_bus_ptr.is_null() {
@@ -1254,7 +1239,7 @@ impl Vm {
 
     /// Map the VirtIO GPU VRAM as a hypervisor memory region for fast
     /// direct guest access. Must be called after `setup_virtio_gpu()`.
-    #[cfg(any(feature = "linux", feature = "windows"))]
+    #[cfg(feature = "linux")]
     pub fn setup_virtio_gpu_vram_mapping(&mut self) -> core::result::Result<(), VmError> {
         if self.virtio_gpu_ptr.is_null() {
             return Ok(());

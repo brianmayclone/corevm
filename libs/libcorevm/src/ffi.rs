@@ -12,7 +12,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::vm::Vm;
 use crate::backend::types::*;
-#[cfg(any(feature = "linux", feature = "windows"))]
+#[cfg(feature = "linux")]
 use crate::backend::VmBackend;
 use crate::backend::VmExitReason;
 
@@ -389,12 +389,6 @@ pub extern "C" fn corevm_create_vcpu(handle: u64, vcpu_id: u32) -> i32 {
                         (0x3B, 0),             // IA32_TSC_ADJUST: no offset
                     ]);
                 }
-                // On WHP, APs have APIC_BASE set by create_vcpu already.
-                // Put them in HLT state so they wait for SIPI via startup IPI.
-                #[cfg(feature = "windows")]
-                if vcpu_id > 0 {
-                    vm.backend.set_ap_halted(vcpu_id);
-                }
                 0
             }
             Err(e) => { set_last_error(format!("{}", e)); -1 }
@@ -517,8 +511,6 @@ pub extern "C" fn corevm_inject_interrupt(handle: u64, vcpu_id: u32, vector: u8)
 /// Safe to call from any thread — uses per-VM atomic slots, no VM registry access needed.
 #[no_mangle]
 pub extern "C" fn corevm_cancel_vcpu(handle: u64, vcpu_id: u32) -> i32 {
-    #[cfg(feature = "windows")]
-    { return crate::backend::whp::cancel_vcpu_global(vcpu_id); }
     #[cfg(feature = "linux")]
     {
         // Look up the VM's slot index from its backend
@@ -592,27 +584,6 @@ pub extern "C" fn corevm_pit_advance(handle: u64, ticks: u32) -> u32 {
                 // in poll_irqs overwrites the IOAPIC injection with a different
                 // vector, breaking Linux's check_timer() which expects the
                 // IOAPIC vector specifically.
-                #[cfg(feature = "windows")]
-                {
-                    let redir2 = vm.backend.ioapic.redir_entry(2);
-                    let ioapic_active = (redir2 & (1 << 16)) == 0; // pin 2 unmasked
-                    let lapic_enabled = vm.backend.lapic.is_enabled();
-                    if ioapic_active && lapic_enabled {
-                        // APIC mode: deliver through IOAPIC only while the guest
-                        // keeps the LAPIC software-enabled. If the guest clears
-                        // SVR.bit8, routing PIT through IOAPIC wedges early boot
-                        // on WHP because the interrupt is no longer LAPIC-deliverable.
-                        vm.backend.ioapic_set_irq(2, true);
-                        vm.backend.ioapic_set_irq(2, false);
-                    } else {
-                        // Pre-APIC / LAPIC-disabled mode: deliver through PIC only.
-                        if !vm.pic_ptr.is_null() {
-                            let pic = unsafe { &mut *vm.pic_ptr };
-                            pic.raise_irq(0);
-                        }
-                    }
-                }
-                #[cfg(not(feature = "windows"))]
                 {
                     if !vm.pic_ptr.is_null() {
                         let pic = unsafe { &mut *vm.pic_ptr };
@@ -667,11 +638,6 @@ pub extern "C" fn corevm_cmos_advance(handle: u64, ticks_32768: u64) -> u32 {
                     if !vm.pic_ptr.is_null() {
                         let pic = unsafe { &mut *vm.pic_ptr };
                         pic.raise_irq(8);
-                    }
-                    #[cfg(feature = "windows")]
-                    {
-                        vm.backend.ioapic_set_irq(8, true);
-                        vm.backend.ioapic_set_irq(8, false);
                     }
                 }
                 1
@@ -756,11 +722,6 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                             let pic = unsafe { &mut *vm.pic_ptr };
                             pic.raise_irq(irq);
                         }
-                        #[cfg(feature = "windows")]
-                        {
-                            vm.backend.ioapic_set_irq(irq, true);
-                            vm.backend.ioapic_set_irq(irq, false);
-                        }
                     }
                 }
             }
@@ -781,11 +742,6 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         if !vm.pic_ptr.is_null() {
                             let pic = unsafe { &mut *vm.pic_ptr };
                             pic.raise_irq(4);
-                        }
-                        #[cfg(feature = "windows")]
-                        {
-                            vm.backend.ioapic_set_irq(4, true);
-                            vm.backend.ioapic_set_irq(4, false);
                         }
                     }
                 }
@@ -831,31 +787,7 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         }
                     }
                 }
-                #[cfg(feature = "windows")]
-                {
-                    if ahci.msi_enabled {
-                        if want_asserted {
-                            let _ = vm.backend.signal_msi(ahci.msi_address, ahci.msi_data);
-                            ahci.clear_irq();
-                            injected += 1;
-                        }
-                    } else {
-                        if want_asserted {
-                            if !vm.pic_ptr.is_null() {
-                                let pic = unsafe { &mut *vm.pic_ptr };
-                                pic.raise_irq(11);
-                            }
-                            vm.backend.ioapic_set_irq(11, true);
-                            vm.ahci_irq_asserted.store(true, Ordering::Relaxed);
-                            ahci.clear_irq();
-                            injected += 1;
-                        } else if vm.ahci_irq_asserted.load(Ordering::Relaxed) {
-                            vm.backend.ioapic_set_irq(11, false);
-                            vm.ahci_irq_asserted.store(false, Ordering::Relaxed);
-                        }
-                    }
-                }
-                #[cfg(not(any(feature = "linux", feature = "windows")))]
+                #[cfg(not(feature = "linux"))]
                 {
                     if want_asserted {
                         ahci.clear_irq();
@@ -921,24 +853,6 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         }
                     }
                 }
-                #[cfg(feature = "windows")]
-                {
-                    let e1000_irq = vm.chipset.irqs.e1000;
-                    if msi_enabled {
-                        if want_asserted {
-                            let _ = vm.backend.signal_msi(msi_address, msi_data);
-                            injected += 1;
-                        }
-                    } else if want_asserted {
-                        if !vm.pic_ptr.is_null() {
-                            let pic = unsafe { &mut *vm.pic_ptr };
-                            pic.raise_irq(e1000_irq);
-                        }
-                        vm.backend.ioapic_set_irq(e1000_irq, true);
-                        vm.backend.ioapic_set_irq(e1000_irq, false);
-                        injected += 1;
-                    }
-                }
             }
             #[cfg(not(feature = "std"))]
             if !vm.e1000_ptr.is_null() {
@@ -988,11 +902,6 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                             let pic = unsafe { &mut *vm.pic_ptr };
                             pic.raise_irq(irq as u8);
                         }
-                        #[cfg(feature = "windows")]
-                        {
-                            vm.backend.ioapic_set_irq(irq as u8, true);
-                            vm.backend.ioapic_set_irq(irq as u8, false);
-                        }
                     }
                 }
             }
@@ -1013,11 +922,6 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         if !vm.pic_ptr.is_null() {
                             let pic = unsafe { &mut *vm.pic_ptr };
                             pic.raise_irq(9);
-                        }
-                        #[cfg(feature = "windows")]
-                        {
-                            vm.backend.ioapic_set_irq(9, true);
-                            vm.backend.ioapic_set_irq(9, false);
                         }
                     }
                 }
@@ -1054,22 +958,7 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         let _ = vm.backend.set_irq_line(gpu_irq, false);
                     }
                 }
-                #[cfg(feature = "windows")]
-                {
-                    if want_asserted && !vm.virtio_gpu_irq_asserted.load(Ordering::Relaxed) {
-                        vm.virtio_gpu_irq_asserted.store(true, Ordering::Relaxed);
-                        if !vm.pic_ptr.is_null() {
-                            let pic = unsafe { &mut *vm.pic_ptr };
-                            pic.raise_irq(gpu_irq as u8);
-                        }
-                        vm.backend.ioapic_set_irq(gpu_irq as u8, true);
-                        injected += 1;
-                    } else if !want_asserted && vm.virtio_gpu_irq_asserted.load(Ordering::Relaxed) {
-                        vm.virtio_gpu_irq_asserted.store(false, Ordering::Relaxed);
-                        vm.backend.ioapic_set_irq(gpu_irq as u8, false);
-                    }
-                }
-                #[cfg(not(any(feature = "linux", feature = "windows")))]
+                #[cfg(not(feature = "linux"))]
                 {
                     if want_asserted {
                         if !vm.pic_ptr.is_null() {
@@ -1099,24 +988,7 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         }
                     }
                 }
-                #[cfg(feature = "windows")]
-                {
-                    if want_asserted && !vm.virtio_net_irq_asserted.load(Ordering::Relaxed) {
-                        vm.virtio_net_irq_asserted.store(true, Ordering::Relaxed);
-                        if !vm.pic_ptr.is_null() {
-                            let pic = unsafe { &mut *vm.pic_ptr };
-                            pic.raise_irq(11);
-                        }
-                        vm.backend.ioapic_set_irq(11, true);
-                        injected += 1;
-                    } else if !want_asserted && vm.virtio_net_irq_asserted.load(Ordering::Relaxed) {
-                        vm.virtio_net_irq_asserted.store(false, Ordering::Relaxed);
-                        if !vm.ahci_irq_asserted.load(Ordering::Relaxed) && !vm.e1000_irq_asserted.load(Ordering::Relaxed) {
-                            vm.backend.ioapic_set_irq(11, false);
-                        }
-                    }
-                }
-                #[cfg(not(any(feature = "linux", feature = "windows")))]
+                #[cfg(not(feature = "linux"))]
                 {
                     if want_asserted {
                         if !vm.pic_ptr.is_null() {
@@ -1140,16 +1012,6 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         let _ = vm.backend.set_irq_line(10, false);
                         injected += 1;
                     }
-                    #[cfg(feature = "windows")]
-                    {
-                        if !vm.pic_ptr.is_null() {
-                            let pic = unsafe { &mut *vm.pic_ptr };
-                            pic.raise_irq(10);
-                        }
-                        vm.backend.ioapic_set_irq(10, true);
-                        vm.backend.ioapic_set_irq(10, false);
-                        injected += 1;
-                    }
                 }
                 mmio_unlock();
             }
@@ -1163,16 +1025,6 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
                         let _ = vm.backend.set_irq_line(10, false);
                         injected += 1;
                     }
-                    #[cfg(feature = "windows")]
-                    {
-                        if !vm.pic_ptr.is_null() {
-                            let pic = unsafe { &mut *vm.pic_ptr };
-                            pic.raise_irq(10);
-                        }
-                        vm.backend.ioapic_set_irq(10, true);
-                        vm.backend.ioapic_set_irq(10, false);
-                        injected += 1;
-                    }
                 }
                 mmio_unlock();
             }
@@ -1183,41 +1035,23 @@ pub extern "C" fn corevm_poll_irqs(handle: u64) -> u32 {
             if !vm.pic_ptr.is_null() {
                 let pic = unsafe { &mut *vm.pic_ptr };
 
-                #[cfg(feature = "windows")]
-                {
-                    // QEMU WHPX approach: queue PIC vector for pre-run injection.
-                    // run_vcpu's inner loop injects via PendingInterruption when
-                    // the guest becomes interruptible (exit_ctx_interrupt_ok or
-                    // ready_for_pic_interrupt from InterruptWindow exit).
-                    if vm.backend.pending_pic_inject.is_none() {
-                        if let Some(vector) = pic.get_interrupt_vector() {
+                let can_inject = vm.get_vcpu_regs(0)
+                    .map(|r| r.rflags & 0x200 != 0)
+                    .unwrap_or(false);
+                if can_inject {
+                    if let Some(vector) = pic.get_interrupt_vector() {
+                        if vm.inject_interrupt(0, vector).is_ok() {
                             let irq = pic.irq_for_vector(vector).unwrap_or(0);
                             pic.lower_irq(irq);
-                            vm.backend.pending_pic_inject = Some(vector);
                             injected += 1;
-                        }
-                    }
-                }
-                #[cfg(not(feature = "windows"))]
-                {
-                    let can_inject = vm.get_vcpu_regs(0)
-                        .map(|r| r.rflags & 0x200 != 0)
-                        .unwrap_or(false);
-                    if can_inject {
-                        if let Some(vector) = pic.get_interrupt_vector() {
-                            if vm.inject_interrupt(0, vector).is_ok() {
-                                let irq = pic.irq_for_vector(vector).unwrap_or(0);
-                                pic.lower_irq(irq);
-                                injected += 1;
-                                if pic.get_interrupt_vector().is_some() {
-                                    let _ = vm.request_interrupt_window(0, true);
-                                }
+                            if pic.get_interrupt_vector().is_some() {
+                                let _ = vm.request_interrupt_window(0, true);
                             }
                         }
-                    } else {
-                        if pic.get_interrupt_vector().is_some() {
-                            let _ = vm.request_interrupt_window(0, true);
-                        }
+                    }
+                } else {
+                    if pic.get_interrupt_vector().is_some() {
+                        let _ = vm.request_interrupt_window(0, true);
                     }
                 }
             }
@@ -1351,49 +1185,6 @@ pub extern "C" fn corevm_ahci_poll_irq(handle: u64) {
             }
         }
     }
-    #[cfg(feature = "windows")]
-    {
-        if ahci.msi_enabled {
-            // MSI mode: inject via WHvRequestInterrupt with decoded MSI address/data
-            if want_asserted {
-                match vm.backend.signal_msi(ahci.msi_address, ahci.msi_data) {
-                    Ok(_) => {},
-                    Err(_e) => {
-                        // Fallback to legacy IRQ
-                        if vm.ahci_irq_asserted.load(Ordering::Relaxed) {
-                            vm.backend.ioapic_set_irq(11, false);
-                        }
-                        if !vm.pic_ptr.is_null() {
-                            let pic = unsafe { &mut *vm.pic_ptr };
-                            pic.raise_irq(11);
-                        }
-                        vm.backend.ioapic_set_irq(11, true);
-                        vm.ahci_irq_asserted.store(true, Ordering::Relaxed);
-                    }
-                }
-                ahci.clear_irq();
-                // Deassert legacy IRQ line if it was still asserted
-                if vm.ahci_irq_asserted.load(Ordering::Relaxed) {
-                    vm.backend.ioapic_set_irq(11, false);
-                    vm.ahci_irq_asserted.store(false, Ordering::Relaxed);
-                }
-            }
-        } else {
-            // Legacy level-triggered mode — assert and clear irq_pending
-            if want_asserted {
-                if !vm.pic_ptr.is_null() {
-                    let pic = unsafe { &mut *vm.pic_ptr };
-                    pic.raise_irq(11);
-                }
-                vm.backend.ioapic_set_irq(11, true);
-                vm.ahci_irq_asserted.store(true, Ordering::Relaxed);
-                ahci.clear_irq();
-            } else if vm.ahci_irq_asserted.load(Ordering::Relaxed) {
-                vm.backend.ioapic_set_irq(11, false);
-                vm.ahci_irq_asserted.store(false, Ordering::Relaxed);
-            }
-        }
-    }
     ahci_unlock();
 }
 
@@ -1455,16 +1246,12 @@ pub extern "C" fn corevm_pic_debug(handle: u64) -> u32 {
 /// Poll LAPIC timer (TSC-based). Injects interrupt if timer fired and IF=1.
 /// Returns the vector injected (>0) or 0.
 ///
-/// On WHP with XApic mode, the LAPIC timer is handled entirely by WHP's
-/// internal LAPIC emulation — no software polling needed. The SoftLapic in
-/// WhpBackend never receives guest MMIO writes, so polling it is a no-op.
-///
-/// On KVM, the in-kernel LAPIC handles the timer internally too.
+/// On KVM, the in-kernel LAPIC handles the timer internally.
 ///
 /// This function is only useful for the anyOS backend's software LAPIC.
 #[no_mangle]
 pub extern "C" fn corevm_lapic_timer_advance(handle: u64, _ticks: u64) -> u32 {
-    // WHP XApic mode and KVM in-kernel LAPIC both handle the timer internally.
+    // KVM in-kernel LAPIC handles the timer internally.
     // Only the anyOS software LAPIC path would need polling here.
     let _ = (handle, _ticks);
     0
@@ -1475,23 +1262,7 @@ pub extern "C" fn corevm_lapic_timer_advance(handle: u64, _ticks: u64) -> u32 {
 /// and writes initial_count and current_count to out pointers.
 #[no_mangle]
 pub extern "C" fn corevm_lapic_debug(handle: u64, out_initial: *mut u32, out_current: *mut u32, out_lvt: *mut u32) -> u32 {
-    #[cfg(not(feature = "windows"))]
-    { let _ = (handle, out_initial, out_current, out_lvt); return 0; }
-
-    #[cfg(feature = "windows")]
-    match get_vm(handle) {
-        Some(vm) => {
-            let lapic = &vm.backend.lapic;
-            if !out_initial.is_null() { unsafe { *out_initial = lapic.timer_initial; } }
-            if !out_current.is_null() { unsafe { *out_current = lapic.current_count(); } }
-            let lvt = lapic.regs[0x32]; // LVT Timer
-            if !out_lvt.is_null() { unsafe { *out_lvt = lvt; } }
-            let armed = lapic.timer_armed as u32;
-            let pending = lapic.timer_irq_pending as u32;
-            armed | (pending << 1) | (lapic.timer_divide << 2)
-        }
-        None => 0xDEAD,
-    }
+    let _ = (handle, out_initial, out_current, out_lvt); return 0;
 }
 
 /// Inject an exception. Pass `error_code` < 0 for no error code.
@@ -1589,13 +1360,6 @@ pub extern "C" fn corevm_has_hw_support() -> i32 {
             Err(_) => 0,
         };
     }
-    #[cfg(feature = "windows")]
-    {
-        return match crate::backend::whp::WhpBackend::new(0) {
-            Ok(_) => 1,
-            Err(_) => 0,
-        };
-    }
     #[cfg(feature = "anyos")]
     {
         // Ask the kernel: 0=none, 1=VMX, 2=SVM.
@@ -1667,7 +1431,7 @@ pub extern "C" fn corevm_handle_io_exit(
 
     // For IN (read), write response back to the backend.
     // KVM: write into kvm_run shared page.
-    // anyOS/WHP: write response value into guest RAX via set_vcpu_regs.
+    // anyOS: write response value into guest RAX via set_vcpu_regs.
     if is_write == 0 {
         #[cfg(feature = "linux")]
         {
@@ -1740,7 +1504,7 @@ fn is_ahci_mmio(vm: &Vm, addr: u64) -> bool {
 /// For reads (`is_write`=0), `data` is filled with the result.
 /// For writes (`is_write`=1), `data` contains the guest-written value.
 /// `dest_reg` indicates which GP register receives the read result (0=RAX..7=RDI).
-/// `instr_len` is the instruction length for RIP advancement (WHP reads only).
+/// `instr_len` is the instruction length for RIP advancement (non-KVM reads only).
 #[no_mangle]
 pub extern "C" fn corevm_handle_mmio_exit(
     handle: u64, vcpu_id: u32, addr: u64, is_write: u8, size: u8, data: *mut u8,
@@ -1775,12 +1539,7 @@ pub extern "C" fn corevm_handle_mmio_exit(
             let _ = val; // used by other paths
             vm.set_mmio_response(vcpu_id, buf);
         }
-        #[cfg(feature = "windows")]
-        {
-            // Store pending response for THIS vCPU — applied inside run_vcpu before next VM entry.
-            vm.set_pending_mmio_read(vcpu_id, val, dest_reg);
-        }
-        #[cfg(not(any(feature = "linux", feature = "windows")))]
+        #[cfg(not(feature = "linux"))]
         {
             // anyOS or other: set register directly
             if let Ok(mut regs) = vm.get_vcpu_regs(vcpu_id) {
@@ -1916,10 +1675,6 @@ pub extern "C" fn corevm_set_cpu_count(handle: u64, count: u32) -> i32 {
                 // 0x80000008) are filtered with the correct cpu_count.
                 let _ = vm.backend.load_host_cpuid();
             }
-            #[cfg(feature = "windows")]
-            {
-                vm.backend.cpu_count = c;
-            }
             0
         }
         None => -1,
@@ -1997,7 +1752,7 @@ pub extern "C" fn corevm_setup_standard_devices(handle: u64) -> i32 {
         Some(vm) => {
             vm.setup_standard_devices();
             // Map VGA LFB as a hypervisor memory region for fast access.
-            #[cfg(any(feature = "linux", feature = "windows"))]
+            #[cfg(feature = "linux")]
             if let Err(_) = vm.setup_vga_lfb_mapping() {
                 #[cfg(feature = "std")]
                 eprintln!("[corevm] Warning: failed to map VGA LFB as hypervisor region");
@@ -2042,17 +1797,7 @@ pub extern "C" fn corevm_ide_attach_cdrom(handle: u64, fd: i32, size: u64) -> i3
 /// Must be called after corevm_setup_standard_devices (needs fw_cfg device).
 #[no_mangle]
 pub extern "C" fn corevm_setup_acpi_tables(handle: u64) -> i32 {
-    fn dbg(msg: &str) {
-        #[cfg(feature = "windows")]
-        {
-            use std::io::Write;
-            let path = std::env::var("TEMP")
-                .map(|t| std::format!("{}\\acpi_debug.log", t))
-                .unwrap_or_else(|_| std::string::String::from("acpi_debug.log"));
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-                let _ = writeln!(f, "{}", msg);
-            }
-        }
+    fn dbg(_msg: &str) {
     }
     dbg("corevm_setup_acpi_tables called");
     let vm = match get_vm(handle) {
@@ -2192,14 +1937,6 @@ pub extern "C" fn corevm_setup_e1000(handle: u64, mac: *const u8) -> i32 {
             let _ = backend.set_irq_line(11, asserted);
         }));
     }
-    #[cfg(feature = "windows")]
-    {
-        let backend_addr = &mut vm.backend as *mut crate::backend::whp::WhpBackend as usize;
-        e1000_dev.irq_callback = Some(alloc::boxed::Box::new(move |asserted: bool| {
-            let backend = unsafe { &mut *(backend_addr as *mut crate::backend::whp::WhpBackend) };
-            backend.ioapic_set_irq(11, asserted);
-        }));
-    }
 
     // Wrap E1000 in Arc<Mutex> for SMP-safe access from multiple vCPU threads
     // and the net_poll path. Under no_std, use a raw pointer (single-core).
@@ -2303,6 +2040,7 @@ pub struct PciMmioRouter {
     pub e1000: *mut crate::devices::e1000::E1000,
     pub svga: *mut crate::devices::svga::Svga,
     pub virtio_gpu: *mut crate::devices::virtio_gpu::VirtioGpu,
+    pub intel_gpu: *mut crate::devices::intel_gpu::IntelGpu,
     pub virtio_net: *mut crate::devices::virtio_net::VirtioNet,
     pub virtio_kbd: *mut crate::devices::virtio_input::VirtioInput,
     pub virtio_tablet: *mut crate::devices::virtio_input::VirtioInput,
@@ -2338,7 +2076,21 @@ impl PciMmioRouter {
     fn has_e1000(&self) -> bool { !self.e1000.is_null() }
     fn vga_bar2(&self) -> u64 {
         if self.svga.is_null() { return 0; }
+        // When Intel GPU is active, it replaces VGA on the same PCI slot.
+        // Don't route VGA BAR2 accesses to SVGA — they belong to the Intel GPU.
+        if !self.intel_gpu.is_null() { return 0; }
         self.read_bar(self.chipset.slots.vga, 0x18, 0xFFFFF000)
+    }
+    /// Intel GPU BAR0 (MMIO register space, 4 MB).
+    fn intel_gpu_bar0(&self) -> u64 {
+        if self.intel_gpu.is_null() { return 0; }
+        // Intel GPU uses the VGA slot — BAR0 at PCI config offset 0x10
+        self.read_bar(self.chipset.slots.vga, 0x10, 0xFFC00000) // 4 MB aligned
+    }
+    /// Intel GPU BAR2 (VRAM aperture).
+    fn intel_gpu_bar2(&self) -> u64 {
+        if self.intel_gpu.is_null() { return 0; }
+        self.read_bar(self.chipset.slots.vga, 0x18, 0xFC000000) // 64 MB aligned minimum
     }
     fn virtio_gpu_bar0(&self) -> u64 {
         if self.virtio_gpu.is_null() { return 0; }
@@ -2413,6 +2165,51 @@ impl crate::memory::mmio::MmioHandler for PciMmioRouter {
                 }
             }
             return svga_dispi_mmio_read(svga, bar2_off, size);
+        }
+
+        // Check Intel GPU BAR0 (4 MB MMIO register space)
+        if !self.intel_gpu.is_null() {
+            let igpu_bar0 = self.intel_gpu_bar0();
+            let igpu_mmio_size = crate::devices::intel_gpu::MMIO_SIZE as u64;
+
+            #[cfg(feature = "std")]
+            {
+                static IGPU_ROUTE_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let n = IGPU_ROUTE_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n < 10 {
+                    eprintln!("[igpu-route] read abs=0x{:X} bar0=0x{:X} size={} match={}",
+                        abs_addr, igpu_bar0, igpu_mmio_size,
+                        igpu_bar0 != 0 && abs_addr >= igpu_bar0 && abs_addr < igpu_bar0 + igpu_mmio_size);
+                }
+            }
+
+            if igpu_bar0 != 0 && abs_addr >= igpu_bar0 && abs_addr < igpu_bar0 + igpu_mmio_size {
+                let gpu = unsafe { &mut *self.intel_gpu };
+                return gpu.read(abs_addr - igpu_bar0, size);
+            }
+            // Check Intel GPU BAR2 (VRAM aperture)
+            let igpu_bar2 = self.intel_gpu_bar2();
+            if igpu_bar2 != 0 && abs_addr >= igpu_bar2 {
+                let gpu = unsafe { &mut *self.intel_gpu };
+                let vram_size = gpu.vram_size as u64;
+                if abs_addr < igpu_bar2 + vram_size {
+                    let offset = (abs_addr - igpu_bar2) as usize;
+                    let val = match size {
+                        1 => gpu.vram.get(offset).copied().unwrap_or(0) as u64,
+                        2 if offset + 1 < gpu.vram_size => {
+                            u16::from_le_bytes([gpu.vram[offset], gpu.vram[offset + 1]]) as u64
+                        }
+                        4 if offset + 3 < gpu.vram_size => {
+                            u32::from_le_bytes([
+                                gpu.vram[offset], gpu.vram[offset + 1],
+                                gpu.vram[offset + 2], gpu.vram[offset + 3],
+                            ]) as u64
+                        }
+                        _ => 0,
+                    };
+                    return Ok(val);
+                }
+            }
         }
 
         // Check VirtIO GPU BAR0 (16KB region)
@@ -2529,6 +2326,32 @@ impl crate::memory::mmio::MmioHandler for PciMmioRouter {
             return svga_dispi_mmio_write(svga, bar2_off, size, val);
         }
 
+        // Check Intel GPU BAR0 (4 MB MMIO register space)
+        if !self.intel_gpu.is_null() {
+            let igpu_bar0 = self.intel_gpu_bar0();
+            let igpu_mmio_size = crate::devices::intel_gpu::MMIO_SIZE as u64;
+            if igpu_bar0 != 0 && abs_addr >= igpu_bar0 && abs_addr < igpu_bar0 + igpu_mmio_size {
+                let gpu = unsafe { &mut *self.intel_gpu };
+                return gpu.write(abs_addr - igpu_bar0, size, val);
+            }
+            // Check Intel GPU BAR2 (VRAM aperture)
+            let igpu_bar2 = self.intel_gpu_bar2();
+            if igpu_bar2 != 0 && abs_addr >= igpu_bar2 {
+                let gpu = unsafe { &mut *self.intel_gpu };
+                let vram_size = gpu.vram_size as u64;
+                if abs_addr < igpu_bar2 + vram_size {
+                    let offset = (abs_addr - igpu_bar2) as usize;
+                    match size {
+                        1 => { if offset < gpu.vram_size { gpu.vram[offset] = val as u8; } }
+                        2 => { if offset + 1 < gpu.vram_size { gpu.vram[offset..offset+2].copy_from_slice(&(val as u16).to_le_bytes()); } }
+                        4 => { if offset + 3 < gpu.vram_size { gpu.vram[offset..offset+4].copy_from_slice(&(val as u32).to_le_bytes()); } }
+                        _ => {}
+                    }
+                    return Ok(());
+                }
+            }
+        }
+
         // Check VirtIO GPU BAR0 (16KB region)
         if !self.virtio_gpu.is_null() {
             let gpu_base = self.virtio_gpu_bar0();
@@ -2638,6 +2461,7 @@ pub extern "C" fn corevm_setup_ahci(handle: u64, num_ports: u8) -> i32 {
         e1000: core::ptr::null_mut(),
         svga: vm.svga_ptr,
         virtio_gpu: vm.virtio_gpu_ptr,
+        intel_gpu: vm.intel_gpu_ptr,
         virtio_net: vm.virtio_net_ptr,
         virtio_kbd: vm.virtio_kbd_ptr,
         virtio_tablet: vm.virtio_tablet_ptr,
@@ -2861,20 +2685,7 @@ pub extern "C" fn corevm_ioapic_pin_state(handle: u64, pin: u32) -> u64 {
             Err(_) => u64::MAX,
         }
     }
-    #[cfg(feature = "windows")]
-    {
-        match get_vm(handle) {
-            Some(vm) => {
-                if (pin as usize) < 24 {
-                    vm.backend.ioapic.redir_entry(pin as u8)
-                } else {
-                    u64::MAX
-                }
-            }
-            None => u64::MAX,
-        }
-    }
-    #[cfg(not(any(feature = "linux", feature = "windows")))]
+    #[cfg(not(feature = "linux"))]
     {
         let _ = (handle, pin);
         u64::MAX
@@ -2892,7 +2703,7 @@ pub extern "C" fn corevm_vga_get_framebuffer(
     if out_ptr.is_null() || out_len.is_null() { return -1; }
     match vm.svga() {
         Some(svga) => {
-            // Always return the full VRAM buffer. On KVM/WHP it is mapped as
+            // Always return the full VRAM buffer. On KVM it is mapped as
             // a hypervisor memory region and the guest writes directly to it.
             // The caller can check corevm_vga_get_mode() if it needs to know
             // whether the guest is in text or graphics mode.
@@ -2999,7 +2810,7 @@ pub extern "C" fn corevm_vga_get_text_buffer(
     let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
     if out_ptr.is_null() || out_len.is_null() { return -1; }
 
-    // In hardware-virt mode (KVM/WHP), sync text buffer from guest RAM
+    // In hardware-virt mode (KVM), sync text buffer from guest RAM
     // since VGA memory writes bypass the MMIO handler.
     let (ram_ptr, ram_size) = vm.memory.ram_ptr();
     if ram_size > 0xB8000 + 80 * 25 * 2 {
@@ -3802,6 +3613,13 @@ pub extern "C" fn corevm_setup_intel_gpu(handle: u64, vram_mb: u32) -> i32 {
     }
 
     vm.setup_intel_gpu(vram_mb);
+
+    // Update the PCI MMIO router so it routes Intel GPU BAR accesses
+    if !vm.pci_mmio_router_ptr.is_null() && !vm.intel_gpu_ptr.is_null() {
+        let router = unsafe { &mut *vm.pci_mmio_router_ptr };
+        router.intel_gpu = vm.intel_gpu_ptr;
+    }
+
     0
 }
 
@@ -4063,7 +3881,3 @@ pub fn corevm_set_io_activity_callbacks(
         vnet.io_activity_ctx = net_ctx;
     }
 }
-
-// Re-export WHP debug callback setter for use by vmmanager.
-#[cfg(feature = "windows")]
-pub use crate::backend::whp::corevm_set_whp_debug_callback;

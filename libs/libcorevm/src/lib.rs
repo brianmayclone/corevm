@@ -50,58 +50,29 @@ pub(crate) mod syscall {
     pub use libsyscall::{open, read, write, lseek, close};
 }
 
-/// Std-compatible syscall shim for Linux/Windows builds.
+/// Std-compatible syscall shim for Linux builds.
 /// Provides the same signatures as libsyscall for IDE/AHCI disk I/O.
 #[cfg(all(feature = "std", not(feature = "anyos")))]
 pub(crate) mod syscall {
-    #[cfg(not(target_os = "windows"))]
     pub fn lseek(fd: u32, offset: i32, whence: i32) {
         extern "C" { fn lseek64(fd: i32, offset: i64, whence: i32) -> i64; }
         unsafe { lseek64(fd as i32, offset as i64, whence); }
     }
 
-    #[cfg(target_os = "windows")]
-    pub fn lseek(fd: u32, offset: i32, whence: i32) {
-        extern "C" { fn _lseeki64(fd: i32, offset: i64, whence: i32) -> i64; }
-        unsafe { _lseeki64(fd as i32, offset as i64, whence); }
-    }
-
-    #[cfg(not(target_os = "windows"))]
     pub fn read(fd: u32, buf: &mut [u8]) -> u32 {
         extern "C" { fn read(fd: i32, buf: *mut u8, count: usize) -> isize; }
         let ret = unsafe { read(fd as i32, buf.as_mut_ptr(), buf.len()) };
         if ret < 0 { u32::MAX } else { ret as u32 }
     }
 
-    #[cfg(target_os = "windows")]
-    pub fn read(fd: u32, buf: &mut [u8]) -> u32 {
-        extern "C" { fn _read(fd: i32, buf: *mut u8, count: u32) -> i32; }
-        let ret = unsafe { _read(fd as i32, buf.as_mut_ptr(), buf.len() as u32) };
-        if ret < 0 { u32::MAX } else { ret as u32 }
-    }
-
-    #[cfg(not(target_os = "windows"))]
     pub fn write(fd: u32, buf: &[u8]) {
         extern "C" { fn write(fd: i32, buf: *const u8, count: usize) -> isize; }
         unsafe { write(fd as i32, buf.as_ptr(), buf.len()); }
     }
 
-    #[cfg(target_os = "windows")]
-    pub fn write(fd: u32, buf: &[u8]) {
-        extern "C" { fn _write(fd: i32, buf: *const u8, count: u32) -> i32; }
-        unsafe { _write(fd as i32, buf.as_ptr(), buf.len() as u32); }
-    }
-
-    #[cfg(not(target_os = "windows"))]
     pub fn close(fd: u32) {
         extern "C" { fn close(fd: i32) -> i32; }
         unsafe { close(fd as i32); }
-    }
-
-    #[cfg(target_os = "windows")]
-    pub fn close(fd: u32) {
-        extern "C" { fn _close(fd: i32) -> i32; }
-        unsafe { _close(fd as i32); }
     }
 }
 

@@ -704,7 +704,7 @@ fn build_hpet_table() -> Vec<u8> {
 fn build_madt_with_cpus(num_cpus: u32) -> Vec<u8> {
     let num_cpus = num_cpus.max(1).min(32);
     // On KVM the in-kernel PIT delivers on GSI 0, so we omit the IRQ 0→GSI 2
-    // override (4 overrides × 10 = 40 bytes).  On WHP/anyOS the userspace PIT
+    // override (4 overrides × 10 = 40 bytes).  On anyOS the userspace PIT
     // delivers on IOAPIC pin 2, so we *need* the override (5 × 10 = 50 bytes).
     #[cfg(feature = "linux")]
     let override_bytes: u32 = 40;
@@ -740,7 +740,7 @@ fn build_madt_with_cpus(num_cpus: u32) -> Vec<u8> {
     // Interrupt Source Overrides (type=2, len=10)
     // KVM's in-kernel PIT delivers timer interrupts at GSI 0 (IRQ 0),
     // so the IRQ 0 → GSI 2 override is omitted on Linux.
-    // On WHP/anyOS the userspace PIT delivers on IOAPIC pin 2, so the
+    // On anyOS the userspace PIT delivers on IOAPIC pin 2, so the
     // override is required — without it Linux programs pin 0 for the
     // timer and hits "IO-APIC + timer doesn't work!" panic.
     #[cfg(not(feature = "linux"))]

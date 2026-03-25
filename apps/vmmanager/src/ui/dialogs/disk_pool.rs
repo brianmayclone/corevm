@@ -170,10 +170,7 @@ impl DiskPoolDialog {
                         }
                         if ui.add(egui::Button::new("Open Directory").min_size(BUTTON_SIZE)).clicked() {
                             let dir = crate::engine::platform::disk_pool_dir();
-                            #[cfg(target_os = "linux")]
-                            { let _ = std::process::Command::new("xdg-open").arg(&dir).spawn(); }
-                            #[cfg(target_os = "windows")]
-                            { let _ = std::process::Command::new("explorer").arg(&dir).spawn(); }
+                            let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
                         }
                     });
                 });

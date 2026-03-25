@@ -1,13 +1,12 @@
 # libcorevm — Execution Backends
 
-libcorevm supports three execution backends that provide hardware-accelerated VM execution on different platforms. All backends implement the same trait interface, ensuring consistent behavior across platforms.
+libcorevm supports two execution backends that provide hardware-accelerated VM execution on different platforms. All backends implement the same trait interface, ensuring consistent behavior across platforms.
 
 ## Backend Overview
 
 | Backend | Feature Flag | Platform | Acceleration | `no_std` |
 |---------|-------------|----------|--------------|----------|
 | **KVM** | `linux` | Linux | Intel VT-x / AMD-V via `/dev/kvm` | No |
-| **WHP** | `windows` | Windows | Intel VT-x / AMD-V via Hyper-V | No |
 | **anyOS VMd** | `anyos` | anyOS | Direct VT-x / AMD-V | Yes |
 
 ## KVM Backend (Linux)
@@ -45,35 +44,6 @@ KVM exits occur when the guest executes:
 ```bash
 cd libs/libcorevm
 cargo build --release --no-default-features --features linux
-```
-
----
-
-## WHP Backend (Windows)
-
-**Source:** `src/backend/whp.rs`
-
-Uses the Windows Hypervisor Platform (WHP) API, which is part of Hyper-V.
-
-### Requirements
-
-- Windows 10/11 with Hyper-V enabled
-- Windows Hypervisor Platform feature enabled
-- Intel VT-x or AMD-V capable CPU
-
-### How It Works
-
-1. Creates partition via `WHvCreatePartition`
-2. Configures partition properties (processor count, etc.)
-3. Maps guest memory via `WHvMapGpaRange`
-4. Creates virtual processor via `WHvCreateVirtualProcessor`
-5. Enters execution loop: `WHvRunVirtualProcessor` → handle exit → repeat
-
-### Building
-
-```bash
-cd libs/libcorevm
-cargo build --release --no-default-features --features windows
 ```
 
 ---

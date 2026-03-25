@@ -33,7 +33,7 @@ Single-node or multi-node cluster deployments with DRS, HA, and live migration.
 
 <br>
 
-> **CoreVM** is the virtual machine engine behind [anyOS](https://github.com/nicosommelier/anyos). It runs as a standalone Linux/Windows application with hardware acceleration (KVM / Hyper-V) and also compiles as a `no_std` library for embedded use inside the anyOS kernel — where hardware virtualization is provided by the anyOS VMd, leveraging VT-x and AMD-V directly.
+> **CoreVM** is the virtual machine engine behind [anyOS](https://github.com/nicosommelier/anyos). It runs as a standalone Linux application with KVM hardware acceleration and also compiles as a `no_std` library for embedded use inside the anyOS kernel — where hardware virtualization is provided by the anyOS VMd, leveraging VT-x and AMD-V directly.
 
 ---
 
@@ -114,7 +114,7 @@ CoreVM ships with **vmm-server**, **vmm-cluster**, and **vmm-ui** — a full-fea
 
 - **Full x86 ISA** — 16-bit real mode, 32-bit protected mode, 64-bit long mode
 - **Paging** — 2-level (32-bit), PAE (3-level), 4-level (long mode) page table walks with NX, WP, U/S enforcement
-- **Multi-backend** — KVM (Linux), Hyper-V/WHP (Windows), anyOS VMd (bare-metal)
+- **Multi-backend** — KVM (Linux), anyOS VMd (bare-metal)
 
 ### PC Hardware Emulation
 
@@ -207,13 +207,6 @@ rustup install stable
 # https://nodejs.org/ (v18+)
 ```
 
-**Windows (MSVC):**
-```bash
-# Enable Hyper-V / Windows Hypervisor Platform
-# Build from WSL or native Windows
-tools\build_win64.bat
-```
-
 ### CLI (vmctl)
 
 For headless / scripted usage:
@@ -275,8 +268,8 @@ cargo +stable build --release
 │  │   Backend     │  │    Devices     │  │       Memory           │  │
 │  │  ┌────────┐   │  │  E1000  AHCI  │  │  Flat (guest RAM)      │  │
 │  │  │  KVM   │   │  │  IDE   AC97   │  │  MMIO dispatch         │  │
-│  │  │  WHP   │   │  │  SVGA  PS/2   │  │  Segment (real mode)   │  │
-│  │  │ anyOS  │   │  │  PIC   PIT    │  │  Paging (4-level)      │  │
+│  │  │ anyOS  │   │  │  SVGA  PS/2   │  │  Segment (real mode)   │  │
+│  │  │        │   │  │  PIC   PIT    │  │  Paging (4-level)      │  │
 │  │  └────────┘   │  │  APIC  HPET   │  │  PCI hole mapping      │  │
 │  └──────────────┘  │  UART  USB    │  └────────────────────────┘  │
 │                     │  Q35   fw_cfg │                               │
@@ -295,12 +288,11 @@ cargo +stable build --release
 | Backend | Feature | Platform | Description |
 |---------|---------|----------|-------------|
 | **KVM** | `linux` | Linux | Hardware-accelerated via `/dev/kvm`. Guest code runs natively on the CPU. |
-| **WHP** | `windows` | Windows | Hardware-accelerated via Windows Hypervisor Platform (Hyper-V). |
 | **anyOS** | `anyos` | anyOS | Hardware-accelerated via anyOS VMd (VT-x / AMD-V). `no_std` compatible. |
 
 ### `no_std` Design
 
-libcorevm is a `no_std` library at its core. The `std` feature (enabled by `linux` and `windows`) adds file I/O, network sockets, threading, and debug logging. Without `std`, libcorevm compiles for bare-metal targets with only `alloc` for heap allocations.
+libcorevm is a `no_std` library at its core. The `std` feature (enabled by `linux`) adds file I/O, network sockets, threading, and debug logging. Without `std`, libcorevm compiles for bare-metal targets with only `alloc` for heap allocations.
 
 ---
 
@@ -464,7 +456,7 @@ corevm/
 ├── libs/
 │   ├── libcorevm/              Core VM engine (no_std Rust + NASM)
 │   │   ├── src/
-│   │   │   ├── backend/        Execution backends (KVM, WHP, anyOS)
+│   │   │   ├── backend/        Execution backends (KVM, anyOS)
 │   │   │   ├── devices/        25+ emulated hardware devices
 │   │   │   ├── memory/         Memory subsystem (flat, MMIO, paging)
 │   │   │   ├── runtime/        VM execution loop & control
@@ -479,8 +471,7 @@ corevm/
 │   └── hosttests/              Integration & smoke tests
 ├── tools/
 │   ├── build-vmm.sh            Build vmm-server + vmm-ui
-│   ├── build_linux.sh          Legacy Linux build
-│   └── build_win64.bat         Windows build
+│   └── build_linux.sh          Legacy Linux build
 ├── assets/
 │   ├── icons/                  Project logo
 │   └── screenshots/            UI screenshots
@@ -518,7 +509,6 @@ cargo test --release
 | Feature | Description |
 |---------|-------------|
 | `linux` | KVM backend + SLIRP networking + file I/O |
-| `windows` | WHP backend + file I/O |
 | `anyos` | anyOS VMd hardware-accelerated backend (default, `no_std`) |
 | `std` | Standard library (auto-enabled by `linux`/`windows`) |
 | `host_test` | Host-side test utilities |
@@ -602,7 +592,7 @@ libcorevm exposes 58 C ABI functions for dynamic loading (`dlopen`/`dlsym`):
 
 ## Roadmap
 
-- [x] Core VM engine with KVM/WHP/anyOS backends
+- [x] Core VM engine with KVM/anyOS backends
 - [x] 25+ emulated hardware devices
 - [x] Custom NASM BIOS + SeaBIOS support
 - [x] Built-in SLIRP networking (NAT + DHCP + DNS)

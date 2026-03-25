@@ -1,19 +1,16 @@
 //! Hardware virtualization backend abstraction.
 //!
-//! Defines the `VmBackend` trait that platform-specific backends (KVM, WHP, anyOS)
+//! Defines the `VmBackend` trait that platform-specific backends (KVM, anyOS)
 //! implement, along with shared error and exit-reason types.
 
 pub mod types;
 pub use types::*;
 
-#[cfg(all(feature = "linux", not(feature = "windows")))]
+#[cfg(feature = "linux")]
 pub mod kvm;
 
-#[cfg(all(feature = "anyos", not(feature = "linux"), not(feature = "windows")))]
+#[cfg(all(feature = "anyos", not(feature = "linux")))]
 pub mod anyos;
-
-#[cfg(all(feature = "windows", not(feature = "linux")))]
-pub mod whp;
 
 #[derive(Debug, Clone)]
 pub enum VmError {
@@ -25,7 +22,7 @@ pub enum VmError {
     MemoryMapFailed,
     VmEntryFailed(u32),
     BackendError(i32),
-    /// Backend error with context: (HRESULT, step description)
+    /// Backend error with context: (error code, step description)
     BackendErrorCtx(i32, &'static str),
 }
 
@@ -39,8 +36,8 @@ impl core::fmt::Display for VmError {
             VmError::InvalidVcpuId => write!(f, "Invalid vCPU ID"),
             VmError::MemoryMapFailed => write!(f, "Memory mapping failed"),
             VmError::VmEntryFailed(code) => write!(f, "VM entry failed (code {})", code),
-            VmError::BackendError(code) => write!(f, "Backend error (HRESULT 0x{:08X})", *code as u32),
-            VmError::BackendErrorCtx(code, step) => write!(f, "{} failed (HRESULT 0x{:08X})", step, *code as u32),
+            VmError::BackendError(code) => write!(f, "Backend error (code 0x{:08X})", *code as u32),
+            VmError::BackendErrorCtx(code, step) => write!(f, "{} failed (code 0x{:08X})", step, *code as u32),
         }
     }
 }
@@ -76,7 +73,7 @@ pub enum VmExitReason {
     Shutdown,
     Debug,
     Error,
-    /// vCPU was cancelled (immediate_exit on KVM, WHvCancelRunVirtualProcessor on WHP).
+    /// vCPU was cancelled (immediate_exit on KVM).
     Cancelled,
 }
 

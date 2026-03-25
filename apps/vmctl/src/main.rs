@@ -439,10 +439,7 @@ fn main() {
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
     let cancel_interval_ms: u64 = if args.hpet { 10 } else { 100 };
-    #[cfg(target_os = "windows")]
-    let cancel_interval_ms: u64 = 1;
 
     let rt_config = VmRuntimeConfig {
         handle,

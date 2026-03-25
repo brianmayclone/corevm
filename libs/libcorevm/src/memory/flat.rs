@@ -19,7 +19,7 @@ use crate::error::Result;
 /// matching the x86 memory model.
 ///
 /// On `std` targets, memory is allocated with 4KB page alignment
-/// (required by KVM and WHP for guest RAM mapping).
+/// (required by KVM for guest RAM mapping).
 pub struct FlatMemory {
     /// Backing storage.
     #[cfg(not(feature = "std"))]
