@@ -1031,17 +1031,19 @@ impl Vm {
         let vram_mb = vram_mb.clamp(64, 512);
         let vram_size = (vram_mb as usize) * 1024 * 1024;
 
-        let gpu = Box::new(IntelGpu::new(vram_mb));
-        let gpu_ptr = Box::into_raw(gpu);
+        let mut gpu = Box::new(IntelGpu::new(vram_mb));
+        let gpu_ptr = &mut *gpu as *mut IntelGpu;
         self.intel_gpu_ptr = gpu_ptr;
 
-        // No direct MMIO registration — all accesses go through the PCI MMIO
-        // Router which dynamically reads the current BAR address from PCI config.
-        // Windows relocates BARs, so fixed-address MMIO regions don't work.
+        // BAR0: MMIO register space (4 MB). Registered as MMIO handler so
+        // accesses cause KVM exits and route to our register emulation.
+        // Use 0xFC000000 — this is where SeaBIOS places the largest BAR.
+        let bar0_addr: u64 = 0xFC00_0000;
+        self.memory.add_mmio(bar0_addr, MMIO_SIZE as u64, gpu);
 
-        // Default BAR addresses (may be relocated by SeaBIOS/Windows):
-        let bar0_addr: u64 = 0xF000_0000;
-        let bar2_addr: u64 = 0xD000_0000;
+        // BAR2: VRAM aperture. Registered as a KVM memory region for direct
+        // guest writes (no exit per pixel). SeaBIOS places this at 0xF8000000.
+        let bar2_addr: u64 = 0xF800_0000;
 
         // Remove standard VGA PCI device and add Intel HD Graphics
         if !self.pci_bus_ptr.is_null() {
