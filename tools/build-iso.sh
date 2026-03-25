@@ -363,15 +363,24 @@ mksquashfs "$LIVE_DIR" "$ISO_STAGING/live/filesystem.squashfs" -comp xz -noappen
 cp "$SCRIPT_DIR/iso/grub.cfg" "$ISO_STAGING/boot/grub/"
 cp "$SCRIPT_DIR/iso/isolinux.cfg" "$ISO_STAGING/isolinux/"
 
-# Copy isolinux/syslinux boot files (search common paths)
+# Copy isolinux/syslinux boot files (search standard package paths first)
 find_and_copy() {
     local filename="$1"
     local dest="$2"
     local found
-    # Prefer bios modules over efi64 (isolinux needs bios)
-    found=$(find /usr/lib /usr/share -name "$filename" -not -path "*/efi*" 2>/dev/null | head -1)
-    # Fallback: search everywhere if not found
-    [ -z "$found" ] && found=$(find /usr/lib /usr/share -name "$filename" 2>/dev/null | head -1)
+    # Prefer standard isolinux/syslinux package paths to avoid picking up
+    # incompatible versions from other software (e.g. VMware)
+    for dir in /usr/lib/ISOLINUX /usr/lib/syslinux/modules/bios /usr/share/syslinux; do
+        if [ -f "$dir/$filename" ]; then
+            found="$dir/$filename"
+            break
+        fi
+    done
+    # Fallback: search /usr/lib and /usr/share, excluding efi and third-party paths
+    if [ -z "$found" ]; then
+        found=$(find /usr/lib /usr/share -name "$filename" \
+            -not -path "*/efi*" -not -path "*/vmware/*" 2>/dev/null | head -1)
+    fi
     if [ -n "$found" ]; then
         cp "$found" "$dest"
         echo "  Found $filename at $found"
