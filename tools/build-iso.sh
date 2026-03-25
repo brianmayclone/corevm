@@ -381,7 +381,7 @@ cp "$SCRIPT_DIR/iso/isolinux.cfg" "$ISO_STAGING/isolinux/"
 find_and_copy() {
     local filename="$1"
     local dest="$2"
-    local found
+    local found=""
     # Prefer standard isolinux/syslinux package paths to avoid picking up
     # incompatible versions from other software (e.g. VMware)
     for dir in /usr/lib/ISOLINUX /usr/lib/syslinux/modules/bios /usr/share/syslinux; do
