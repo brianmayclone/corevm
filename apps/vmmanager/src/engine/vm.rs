@@ -100,9 +100,29 @@ impl EventHandler for VmManagerEventHandler {
     }
 }
 
-/// Start a VM. Sets up libcorevm, spawns execution thread.
-pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
-    let config = &entry.config;
+/// Successful result from background VM initialization.
+/// Contains the handles that must be applied to VmEntry on the UI thread.
+pub struct VmStartResult {
+    pub uuid: String,
+    pub vm_handle: u64,
+    pub control: VmControlHandle,
+    pub vm_thread: std::thread::JoinHandle<()>,
+}
+
+/// Input data for background VM start (all cloneable / Send-safe).
+struct VmStartInput {
+    config: crate::config::VmConfig,
+    framebuffer: Arc<Mutex<FrameBufferData>>,
+    diag_log: DiagLog,
+    device_activity: Arc<Mutex<crate::app::DeviceActivity>>,
+}
+
+/// Run VM initialization on the current thread (expensive: KVM setup, BIOS load,
+/// disk attach).  Returns the handles needed to update VmEntry, or an error.
+///
+/// This is the function that should be called from a background thread.
+fn start_vm_inner(input: VmStartInput) -> Result<VmStartResult, String> {
+    let config = &input.config;
 
     // Install SIGUSR1 handler so the cancel thread can interrupt KVM_RUN
     // without terminating the process (SIGUSR1 default action = terminate).
@@ -110,9 +130,9 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
     libcorevm::backend::kvm::install_sigusr1_handler();
 
     // Reset diagnostics log
-    entry.diag_log.clear();
-    if entry.config.diagnostics {
-        entry.diag_log.log(DiagCategory::Info, format!("Starting VM '{}' RAM={}MB BIOS={:?}", config.name, config.ram_mb, config.bios_type));
+    input.diag_log.clear();
+    if config.diagnostics {
+        input.diag_log.log(DiagCategory::Info, format!("Starting VM '{}' RAM={}MB BIOS={:?}", config.name, config.ram_mb, config.bios_type));
     }
 
     // Create VM
@@ -147,7 +167,7 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
     // HPET — required for Windows guests
     if config.guest_os.is_windows() {
         corevm_setup_hpet(handle);
-        entry.diag_log.log(DiagCategory::Info, "HPET enabled (Windows guest)".into());
+        input.diag_log.log(DiagCategory::Info, "HPET enabled (Windows guest)".into());
     }
 
     // Setup AHCI controller (replaces IDE)
@@ -164,7 +184,7 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
         match config.nic_model {
             crate::config::NicModel::VirtioNet => {
                 corevm_setup_virtio_net(handle, mac.as_ptr());
-                entry.diag_log.log(DiagCategory::Info, format!(
+                input.diag_log.log(DiagCategory::Info, format!(
                     "VirtIO-Net NIC enabled (mac={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X})",
                     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
                 ));
@@ -173,15 +193,15 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
             }
             crate::config::NicModel::E1000 => {
                 corevm_setup_e1000(handle, mac.as_ptr());
-                entry.diag_log.log(DiagCategory::Info, format!(
+                input.diag_log.log(DiagCategory::Info, format!(
                     "E1000 NIC enabled (mac={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X})",
                     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
                 ));
                 // Load E1000 PXE ROM — SeaBIOS needs this to initialize the NIC
                 let extra_bios_paths = platform::bios_search_paths();
                 match setup::load_e1000_rom(handle, &extra_bios_paths) {
-                    Ok(()) => entry.diag_log.log(DiagCategory::Info, "E1000 PXE ROM loaded".into()),
-                    Err(e) => entry.diag_log.log(DiagCategory::Info, format!("E1000 ROM warning: {}", e)),
+                    Ok(()) => input.diag_log.log(DiagCategory::Info, "E1000 PXE ROM loaded".into()),
+                    Err(e) => input.diag_log.log(DiagCategory::Info, format!("E1000 ROM warning: {}", e)),
                 }
             }
         }
@@ -205,45 +225,45 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
                     bridge_name.len() as u32,
                 );
                 if ret != 0 {
-                    entry.diag_log.log(DiagCategory::Error,
+                    input.diag_log.log(DiagCategory::Error,
                         format!("TAP setup failed (tap={}, bridge={}), falling back to disconnected",
                             tap_name, bridge_name));
                     corevm_setup_net(handle, 0);
                 }
             }
         }
-        entry.diag_log.log(DiagCategory::Info, format!("Network backend: {:?}", config.net_mode));
+        input.diag_log.log(DiagCategory::Info, format!("Network backend: {:?}", config.net_mode));
     }
 
     // UHCI USB Controller with tablet — if enabled in config
     if config.usb_tablet {
         corevm_setup_uhci(handle);
-        entry.diag_log.log(DiagCategory::Info, "UHCI USB controller + tablet enabled".to_string());
+        input.diag_log.log(DiagCategory::Info, "UHCI USB controller + tablet enabled".to_string());
     }
 
     // AC97 Audio Controller — only if enabled in config
     if config.audio_enabled {
         corevm_setup_ac97(handle);
-        entry.diag_log.log(DiagCategory::Info, "AC97 audio controller enabled".to_string());
+        input.diag_log.log(DiagCategory::Info, "AC97 audio controller enabled".to_string());
     }
 
     // VirtIO GPU — if selected in config
     if config.gpu_model == crate::config::GpuModel::VirtioGpu {
         let gpu_vram = config.vram_mb.max(64);
         corevm_setup_virtio_gpu(handle, gpu_vram);
-        entry.diag_log.log(DiagCategory::Info, format!("VirtIO GPU enabled (VRAM={}MB)", gpu_vram));
+        input.diag_log.log(DiagCategory::Info, format!("VirtIO GPU enabled (VRAM={}MB)", gpu_vram));
 
         // VirtIO Input devices — disabled for now. PS/2 keyboard/mouse works
         // fine with VirtIO GPU. Re-enable once VirtIO Input driver issues are resolved.
         // corevm_setup_virtio_input(handle);
-        // entry.diag_log.log(DiagCategory::Info, "VirtIO Input (keyboard + tablet) enabled".into());
+        // input.diag_log.log(DiagCategory::Info, "VirtIO Input (keyboard + tablet) enabled".into());
     }
 
     // Intel HD Graphics — if selected in config
     if config.gpu_model == crate::config::GpuModel::IntelHD {
         let gpu_vram = config.vram_mb.max(16);
         corevm_setup_intel_gpu(handle, gpu_vram);
-        entry.diag_log.log(DiagCategory::Info, format!("Intel HD Graphics enabled (VRAM={}MB)", gpu_vram));
+        input.diag_log.log(DiagCategory::Info, format!("Intel HD Graphics enabled (VRAM={}MB)", gpu_vram));
     }
 
     // Load firmware BEFORE ACPI tables — load_ovmf() sets vm.uefi_boot which
@@ -277,7 +297,7 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
     } else {
         corevm_setup_acpi_tables(handle)
     };
-    entry.diag_log.log(DiagCategory::Info, format!("ACPI tables setup: rc={} (hpet={})", acpi_rc, config.guest_os.is_windows()));
+    input.diag_log.log(DiagCategory::Info, format!("ACPI tables setup: rc={} (hpet={})", acpi_rc, config.guest_os.is_windows()));
 
     // Attach ISO — always on AHCI (port 1) for SeaBIOS boot.
     // For Windows guests, also attach on IDE so Windows Setup can use its
@@ -286,9 +306,9 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
         setup::attach_image_to_ahci(handle, &config.iso_image, 1, true)?;
         if config.guest_os.is_windows() {
             setup::attach_cdrom_to_ide(handle, &config.iso_image)?;
-            entry.diag_log.log(DiagCategory::Info, "ISO attached via AHCI + IDE (Windows compat)".into());
+            input.diag_log.log(DiagCategory::Info, "ISO attached via AHCI + IDE (Windows compat)".into());
         } else {
-            entry.diag_log.log(DiagCategory::Info, "ISO attached via AHCI".into());
+            input.diag_log.log(DiagCategory::Info, "ISO attached via AHCI".into());
         }
     }
 
@@ -316,29 +336,29 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
     } else {
         setup::set_initial_cpu_state(handle)
     };
-    if entry.config.diagnostics {
+    if config.diagnostics {
         if let Err(ref e) = sregs_rc {
-            entry.diag_log.log(DiagCategory::Error, format!("set_initial_cpu_state failed: {}", e));
+            input.diag_log.log(DiagCategory::Error, format!("set_initial_cpu_state failed: {}", e));
         }
         // Dump actual VP state after setup
         let mut sregs = VcpuSregs::default();
         let mut regs = VcpuRegs::default();
         corevm_get_vcpu_sregs(handle, 0, &mut sregs);
         corevm_get_vcpu_regs(handle, 0, &mut regs);
-        entry.diag_log.log(DiagCategory::CpuState, format!(
+        input.diag_log.log(DiagCategory::CpuState, format!(
             "VP state: CS={:04X}:{:016X}(lim={:X} attr={:02X}/{}/{}) RIP={:X} RFLAGS={:X} CR0={:X}",
             sregs.cs.selector, sregs.cs.base, sregs.cs.limit,
             sregs.cs.type_, sregs.cs.s, sregs.cs.present,
             regs.rip, regs.rflags, sregs.cr0
         ));
-        entry.diag_log.log(DiagCategory::CpuState, format!(
+        input.diag_log.log(DiagCategory::CpuState, format!(
             "SS={:04X}:{:016X} DS={:04X}:{:016X} TR={:04X}:{:016X}(type={:02X} s={} p={})",
             sregs.ss.selector, sregs.ss.base,
             sregs.ds.selector, sregs.ds.base,
             sregs.tr.selector, sregs.tr.base,
             sregs.tr.type_, sregs.tr.s, sregs.tr.present
         ));
-        entry.diag_log.log(DiagCategory::CpuState, format!(
+        input.diag_log.log(DiagCategory::CpuState, format!(
             "GDT base={:X} lim={:X}  IDT base={:X} lim={:X}  CR4={:X} EFER={:X}",
             sregs.gdt.base, sregs.gdt.limit,
             sregs.idt.base, sregs.idt.limit,
@@ -353,21 +373,21 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     libcorevm::backend::kvm::install_sigusr1_handler();
 
-    let fb = entry.framebuffer.clone();
-    let diag = entry.diag_log.clone();
-    let diag_enabled = entry.config.diagnostics;
-    let num_cpus = entry.config.cpu_cores.max(1).min(32);
+    let fb = input.framebuffer.clone();
+    let diag = input.diag_log.clone();
+    let diag_enabled = config.diagnostics;
+    let num_cpus = config.cpu_cores.max(1).min(32);
 
-    let has_virtio_gpu = entry.config.gpu_model == crate::config::GpuModel::VirtioGpu;
-    let has_intel_gpu = entry.config.gpu_model == crate::config::GpuModel::IntelHD;
+    let has_virtio_gpu = config.gpu_model == crate::config::GpuModel::VirtioGpu;
+    let has_intel_gpu = config.gpu_model == crate::config::GpuModel::IntelHD;
     let has_virtio_input = false; // VirtIO Input disabled — PS/2 works fine with VirtIO GPU
 
     let rt_config = VmRuntimeConfig {
         handle,
         num_cpus,
-        usb_tablet: entry.config.usb_tablet,
-        audio_enabled: entry.config.audio_enabled,
-        net_enabled: entry.config.net_enabled,
+        usb_tablet: config.usb_tablet,
+        audio_enabled: config.audio_enabled,
+        net_enabled: config.net_enabled,
         virtio_gpu: has_virtio_gpu,
         virtio_input: has_virtio_input,
         intel_gpu: has_intel_gpu,
@@ -378,7 +398,7 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
     // Wire up I/O activity callbacks so the UI can show device activity indicators
     {
         use crate::app::DeviceKind;
-        let activity = entry.device_activity.clone();
+        let activity = input.device_activity.clone();
 
         // AHCI callback: port 0..N = disk, ATAPI ports = cdrom
         let activity_disk = Arc::into_raw(activity.clone()) as *mut ();
@@ -436,12 +456,58 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
         corevm_destroy(handle);
     });
 
-    entry.vm_handle = Some(handle);
-    entry.control = Some(control);
-    entry.vm_thread = Some(thread);
-    entry.state = VmState::Running;
+    Ok(VmStartResult {
+        uuid: config.uuid.clone(),
+        vm_handle: handle,
+        control,
+        vm_thread: thread,
+    })
+}
 
+/// Apply the result of a successful VM start to the VmEntry.
+pub fn apply_start_result(entry: &mut VmEntry, result: VmStartResult) {
+    entry.vm_handle = Some(result.vm_handle);
+    entry.control = Some(result.control);
+    entry.vm_thread = Some(result.vm_thread);
+    entry.state = VmState::Running;
+}
+
+/// Start a VM synchronously (blocks the calling thread).
+/// Used for reboot where we must restart immediately.
+pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
+    entry.revalidate();
+    if !entry.errors.is_empty() {
+        return Err(format!("Cannot start VM: {}", entry.errors.join(", ")));
+    }
+    let input = VmStartInput {
+        config: entry.config.clone(),
+        framebuffer: entry.framebuffer.clone(),
+        diag_log: entry.diag_log.clone(),
+        device_activity: entry.device_activity.clone(),
+    };
+    let result = start_vm_inner(input)?;
+    apply_start_result(entry, result);
     Ok(())
+}
+
+/// Kick off VM initialization on a background thread.
+/// Returns a receiver that delivers the result (or error) once ready.
+/// The caller must set the VM state to `Starting` before calling this.
+pub fn start_vm_background(
+    entry: &VmEntry,
+) -> std::sync::mpsc::Receiver<Result<VmStartResult, String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let input = VmStartInput {
+        config: entry.config.clone(),
+        framebuffer: entry.framebuffer.clone(),
+        diag_log: entry.diag_log.clone(),
+        device_activity: entry.device_activity.clone(),
+    };
+    thread::spawn(move || {
+        let result = start_vm_inner(input);
+        let _ = tx.send(result);
+    });
+    rx
 }
 
 /// Stop a running VM (non-blocking).

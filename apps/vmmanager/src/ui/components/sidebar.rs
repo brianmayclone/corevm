@@ -8,6 +8,7 @@ use crate::ui::theme;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum VmState {
     Stopped,
+    Starting,
     Running,
     Paused,
     Stopping,
@@ -375,6 +376,7 @@ fn render_vm_entry(
         if state != VmState::Stopped {
             let dot_color = match state {
                 VmState::Running => theme::success_green(),
+                VmState::Starting => theme::accent_blue(),
                 VmState::Paused => theme::warning_orange(),
                 VmState::Stopping => theme::warning_orange(),
                 VmState::Stopped => unreachable!(),

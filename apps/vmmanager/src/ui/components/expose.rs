@@ -214,6 +214,7 @@ pub fn render_expose(
         if tile.state != VmState::Stopped {
             let dot_color = match tile.state {
                 VmState::Running => theme::success_green(),
+                VmState::Starting => theme::accent_blue(),
                 VmState::Paused => theme::warning_orange(),
                 VmState::Stopping => theme::warning_orange(),
                 VmState::Stopped => unreachable!(),
@@ -236,6 +237,7 @@ pub fn render_expose(
         // State label
         let (state_label, state_color) = match tile.state {
             VmState::Running => ("Running", theme::success_green()),
+            VmState::Starting => ("Starting\u{2026}", theme::accent_blue()),
             VmState::Paused => ("Paused", theme::warning_orange()),
             VmState::Stopping => ("Stopping\u{2026}", theme::warning_orange()),
             VmState::Stopped => ("Powered Off", theme::text_tertiary()),

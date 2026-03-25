@@ -645,6 +645,10 @@ pub struct CoreVmApp {
     pub file_pick_target: Option<FilePickTarget>,
     pub sidebar_state: SidebarState,
     pub expose_state: ExposeState,
+    /// Receiver for background VM start results (uuid → result).
+    pub vm_start_rx: Option<std::sync::mpsc::Receiver<Result<vm::VmStartResult, String>>>,
+    /// UUID of the VM currently being started in the background.
+    pub vm_starting_uuid: Option<String>,
     pub display_focused: bool,
     pub last_key_label: Option<String>,
     pub last_key_time: std::time::Instant,
@@ -704,6 +708,8 @@ impl CoreVmApp {
             file_pick_target: None,
             sidebar_state: SidebarState::default(),
             expose_state: ExposeState::default(),
+            vm_start_rx: None,
+            vm_starting_uuid: None,
             display_focused: false,
             last_key_label: None,
             last_key_time: std::time::Instant::now(),
@@ -773,9 +779,6 @@ impl CoreVmApp {
         match action {
             ToolbarAction::Start => {
                 if let Some(uuid) = self.selected_vm.clone() {
-                    let mut started_ok = false;
-                    let mut usb_tablet = false;
-                    let mut diag_name = String::new();
                     if let Some(entry) = self.find_vm_mut(&uuid) {
                         // Re-validate before start
                         entry.revalidate();
@@ -784,21 +787,11 @@ impl CoreVmApp {
                                 "Cannot start VM: {}", entry.errors.join(", ")
                             ));
                         } else {
-                        usb_tablet = entry.config.usb_tablet;
-                        if let Err(e) = vm::start_vm(entry) {
-                            self.error_message = Some(format!("Failed to start VM: {}", e));
-                        } else {
-                            started_ok = true;
-                            if entry.config.diagnostics {
-                                diag_name = entry.config.name.clone();
-                            }
-                        }
-                        }
-                    }
-                    if started_ok {
-                        self.display.usb_tablet_mode = usb_tablet;
-                        if !diag_name.is_empty() {
-                            self.diagnostics_window = Some(DiagnosticsWindow::new(&diag_name));
+                            // Kick off background initialization
+                            entry.state = VmState::Starting;
+                            let rx = vm::start_vm_background(entry);
+                            self.vm_start_rx = Some(rx);
+                            self.vm_starting_uuid = Some(uuid);
                         }
                     }
                 }
@@ -957,7 +950,7 @@ impl CoreVmApp {
         let state_label = match vm.state {
             VmState::Running => "Running",
             VmState::Paused => "Paused",
-            VmState::Stopped | VmState::Stopping => return None,
+            VmState::Stopped | VmState::Stopping | VmState::Starting => return None,
         };
 
         let activity = vm.device_activity.lock().ok();
@@ -1522,6 +1515,9 @@ impl eframe::App for CoreVmApp {
                             (false, None)
                         };
                         self.display_focused = display_focused;
+                    } else if state == VmState::Starting {
+                        self.display_focused = false;
+                        render_starting(ui, ctx);
                     } else {
                         self.display_focused = false;
                         if let Some(vm) = self.find_vm(uuid) {
@@ -1888,6 +1884,41 @@ impl eframe::App for CoreVmApp {
             }
         }
 
+        // Poll background VM start: check if initialization finished.
+        if let Some(ref rx) = self.vm_start_rx {
+            if let Ok(result) = rx.try_recv() {
+                let uuid = self.vm_starting_uuid.take();
+                self.vm_start_rx = None;
+                match result {
+                    Ok(start_result) => {
+                        let started_uuid = start_result.uuid.clone();
+                        if let Some(entry) = self.find_vm_mut(&started_uuid) {
+                            let usb_tablet = entry.config.usb_tablet;
+                            let diag_name = if entry.config.diagnostics {
+                                Some(entry.config.name.clone())
+                            } else {
+                                None
+                            };
+                            vm::apply_start_result(entry, start_result);
+                            self.display.usb_tablet_mode = usb_tablet;
+                            if let Some(name) = diag_name {
+                                self.diagnostics_window = Some(DiagnosticsWindow::new(&name));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // Reset state back to Stopped
+                        if let Some(uuid) = &uuid {
+                            if let Some(entry) = self.find_vm_mut(uuid) {
+                                entry.state = VmState::Stopped;
+                            }
+                        }
+                        self.error_message = Some(format!("Failed to start VM: {}", e));
+                    }
+                }
+            }
+        }
+
         // Poll stopping VMs: join thread once it has finished (non-blocking).
         for vm in &mut self.vms {
             if vm.state == VmState::Stopping {
@@ -1944,7 +1975,7 @@ impl eframe::App for CoreVmApp {
         }
 
         // Repaint when VM running or stopping (need to poll thread completion)
-        if self.vms.iter().any(|v| v.state == VmState::Running || v.state == VmState::Stopping) {
+        if self.vms.iter().any(|v| v.state == VmState::Running || v.state == VmState::Stopping || v.state == VmState::Starting) {
             ctx.request_repaint();
         }
     }
@@ -2016,6 +2047,7 @@ fn render_summary(ui: &mut egui::Ui, vm: &VmEntry, os_icon: Option<egui::Texture
         // State label
         let (state_label, state_color) = match vm.state {
             VmState::Running => ("Running", theme::success_green()),
+            VmState::Starting => ("Starting\u{2026}", theme::accent_blue()),
             VmState::Paused => ("Paused", theme::warning_orange()),
             VmState::Stopping => ("Stopping\u{2026}", theme::warning_orange()),
             VmState::Stopped => ("Powered Off", theme::text_tertiary()),
@@ -2150,6 +2182,68 @@ fn extract_vga_text(text_buffer: &[u16], cols: u32, rows: u32) -> String {
 }
 
 /// Copy the current framebuffer contents to the OS clipboard as an image.
+/// Render a startup spinner with progress indication while the VM is initializing.
+fn render_starting(ui: &mut egui::Ui, ctx: &egui::Context) {
+    let available = ui.available_size();
+
+    ui.vertical_centered(|ui| {
+        ui.add_space(available.y * 0.3);
+
+        // Animated spinner using a rotating arc
+        let time = ctx.input(|i| i.time);
+        let spinner_size = 48.0;
+        let (spinner_rect, _) = ui.allocate_exact_size(
+            egui::vec2(spinner_size, spinner_size),
+            egui::Sense::hover(),
+        );
+        let center = spinner_rect.center();
+        let radius = spinner_size / 2.0 - 4.0;
+
+        // Background circle (track)
+        ui.painter().circle_stroke(
+            center,
+            radius,
+            egui::Stroke::new(3.0, theme::widget_bg_inactive()),
+        );
+
+        // Rotating arc — draw as a series of line segments
+        let arc_length = std::f32::consts::PI * 1.2; // ~216 degrees
+        let start_angle = (time * 2.5) as f32; // rotation speed
+        let segments = 32;
+        for i in 0..segments {
+            let t0 = start_angle + arc_length * (i as f32 / segments as f32);
+            let t1 = start_angle + arc_length * ((i + 1) as f32 / segments as f32);
+            let p0 = center + egui::vec2(t0.cos(), t0.sin()) * radius;
+            let p1 = center + egui::vec2(t1.cos(), t1.sin()) * radius;
+            // Fade the arc: bright at the leading edge, fading at the trailing edge
+            let alpha = ((i + 1) as f32 / segments as f32 * 255.0) as u8;
+            let color = egui::Color32::from_rgba_unmultiplied(
+                theme::accent_blue().r(),
+                theme::accent_blue().g(),
+                theme::accent_blue().b(),
+                alpha,
+            );
+            ui.painter().line_segment([p0, p1], egui::Stroke::new(3.0, color));
+        }
+
+        ui.add_space(16.0);
+        ui.label(
+            egui::RichText::new("Starting Virtual Machine\u{2026}")
+                .size(16.0)
+                .color(theme::text_secondary()),
+        );
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new("Initializing hardware and loading firmware")
+                .size(12.0)
+                .color(theme::text_tertiary()),
+        );
+
+        // Keep repainting for animation
+        ctx.request_repaint();
+    });
+}
+
 fn copy_framebuffer_to_clipboard(fb: &FrameBufferData) -> Result<(), String> {
     let w = fb.width as usize;
     let h = fb.height as usize;
