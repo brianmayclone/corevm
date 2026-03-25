@@ -41,6 +41,9 @@ pub fn router() -> Router<Arc<AppState>> {
         // Direct host-to-host migration
         .route("/agent/migration/send", post(handlers::migration_send))
         .route("/agent/migration/receive", post(handlers::migration_receive))
+        // Network / Bridge management (Cluster sends these)
+        .route("/agent/network/bridge/setup", post(handlers::setup_bridge))
+        .route("/agent/network/bridge/teardown", post(handlers::teardown_bridge))
         // Package management + command execution (for storage wizard)
         .route("/agent/packages/check", post(handlers::check_packages))
         .route("/agent/packages/install", post(handlers::install_packages))

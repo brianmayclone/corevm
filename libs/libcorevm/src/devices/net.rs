@@ -59,3 +59,72 @@ impl NetBackend for NullNet {
     fn recv(&mut self) -> Vec<Vec<u8>> { Vec::new() }
     fn description(&self) -> &str { "none (disconnected)" }
 }
+
+// ── TAP backend ──────────────────────────────────────────────────────────────
+
+/// TAP network backend — bridges guest traffic to a Linux TAP device.
+///
+/// The TAP device is created on construction and optionally joined to an
+/// existing Linux bridge (e.g. `br0`).  All Ethernet frames pass through
+/// unmodified, giving the guest a real presence on the host network.
+#[cfg(feature = "linux")]
+pub struct TapNet {
+    tap: crate::net::tap::TapDevice,
+    rx_buf: [u8; 2048],
+    description: alloc::string::String,
+}
+
+#[cfg(feature = "linux")]
+impl TapNet {
+    /// Create a new TAP backend.
+    ///
+    /// * `tap_name` — requested TAP device name (empty = kernel assigns one).
+    /// * `bridge`   — if non-empty, join this Linux bridge after creation.
+    ///
+    /// Returns an error if the TAP device cannot be created (missing
+    /// CAP_NET_ADMIN, /dev/net/tun unavailable, etc.).
+    pub fn new(tap_name: &str, bridge: &str) -> Result<Self, alloc::string::String> {
+        let tap = crate::net::tap::TapDevice::new(tap_name)
+            .map_err(|e| alloc::format!("TAP create '{}': {}", tap_name, e))?;
+
+        tap.bring_up()
+            .map_err(|e| alloc::format!("TAP bring_up '{}': {}", tap.name(), e))?;
+
+        if !bridge.is_empty() {
+            tap.add_to_bridge(bridge)
+                .map_err(|e| alloc::format!("TAP add '{}' to bridge '{}': {}", tap.name(), bridge, e))?;
+        }
+
+        let desc = alloc::format!("tap:{} bridge:{}", tap.name(),
+            if bridge.is_empty() { "none" } else { bridge });
+
+        Ok(Self {
+            tap,
+            rx_buf: [0u8; 2048],
+            description: desc,
+        })
+    }
+}
+
+#[cfg(feature = "linux")]
+impl NetBackend for TapNet {
+    fn send(&mut self, frame: &[u8]) {
+        let _ = self.tap.write_frame(frame);
+    }
+
+    fn recv(&mut self) -> Vec<Vec<u8>> {
+        let mut frames = Vec::new();
+        loop {
+            match self.tap.read_frame(&mut self.rx_buf) {
+                Ok(0) => break,
+                Ok(n) => frames.push(self.rx_buf[..n].to_vec()),
+                Err(_) => break,
+            }
+        }
+        frames
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+}

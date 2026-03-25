@@ -147,6 +147,44 @@ pub struct ResizeDiskRequest {
     pub new_size_bytes: u64,
 }
 
+// ── Network / Bridge Commands (Cluster → Node) ─────────────────────────
+
+/// Command to set up a bridge + optional VXLAN overlay on a node.
+/// Sent when a virtual network is created or a new node joins the cluster.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SetupBridgeRequest {
+    /// Unique network ID from the cluster (used for naming: e.g. "sdn42").
+    pub network_id: i64,
+    /// Linux bridge name to create (e.g. "sdn42").
+    pub bridge_name: String,
+    /// Subnet in CIDR notation (e.g. "10.0.50.0/24") — for informational use.
+    pub subnet: String,
+    /// Optional VLAN ID (1–4094). If set, the bridge is VLAN-tagged.
+    pub vlan_id: Option<i32>,
+    /// Optional VXLAN configuration for cross-host overlay networking.
+    pub vxlan: Option<VxlanConfig>,
+}
+
+/// VXLAN overlay configuration for cross-host VM communication.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VxlanConfig {
+    /// VXLAN Network Identifier (VNI) — must be unique per virtual network.
+    pub vni: u32,
+    /// Multicast group for BUM traffic (e.g. "239.1.1.1"), or empty for unicast.
+    pub group: String,
+    /// UDP port for VXLAN (default: 4789).
+    pub port: u16,
+    /// Local IP to use as VTEP source (the host's main IP).
+    pub local_ip: String,
+}
+
+/// Command to tear down a bridge on a node.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TeardownBridgeRequest {
+    pub network_id: i64,
+    pub bridge_name: String,
+}
+
 // ── Generic Agent Response ──────────────────────────────────────────────
 
 /// Simple success/error response from agent operations.

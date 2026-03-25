@@ -113,6 +113,20 @@ pub struct SettingsDialog {
     pub saved: bool,
     /// Index of disk being confirmed for reset (None = no confirmation dialog)
     reset_confirm_disk: Option<usize>,
+    /// Cached list of Linux bridges on the host.
+    host_bridges: Vec<String>,
+    /// Cached list of physical host interfaces (for bridge uplink).
+    host_interfaces: Vec<String>,
+    /// Whether bridge list has been loaded.
+    bridges_loaded: bool,
+    /// Show the "Create Bridge" inline form.
+    show_create_bridge: bool,
+    /// Name for new bridge being created.
+    new_bridge_name: String,
+    /// Uplink interface for new bridge (e.g. "eth0").
+    new_bridge_uplink: String,
+    /// Error/status from bridge creation.
+    bridge_create_status: Option<String>,
 }
 
 impl SettingsDialog {
@@ -123,6 +137,13 @@ impl SettingsDialog {
             open: true,
             saved: false,
             reset_confirm_disk: None,
+            host_bridges: Vec::new(),
+            host_interfaces: Vec::new(),
+            bridges_loaded: false,
+            show_create_bridge: false,
+            new_bridge_name: String::from("br0"),
+            new_bridge_uplink: String::new(),
+            bridge_create_status: None,
         }
     }
 
@@ -852,8 +873,166 @@ impl SettingsDialog {
             });
 
             if self.config.net_mode == NetMode::Bridge {
-                labeled_row(ui, "Host NIC:", |ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.config.net_host_nic).desired_width(FIELD_MIN_WIDTH));
+                // Load bridges and interfaces on first display
+                if !self.bridges_loaded {
+                    self.host_bridges = list_host_bridges();
+                    self.host_interfaces = list_host_physical_interfaces();
+                    self.bridges_loaded = true;
+                }
+
+                labeled_row(ui, "Bridge:", |ui| {
+                    if self.host_bridges.is_empty() {
+                        // No bridges found — text input fallback
+                        ui.add(egui::TextEdit::singleline(&mut self.config.net_host_nic)
+                            .desired_width(FIELD_MIN_WIDTH)
+                            .hint_text("br0"));
+                    } else {
+                        // Dropdown with all available bridges
+                        let selected_label = if self.config.net_host_nic.is_empty() {
+                            "Select bridge...".to_string()
+                        } else {
+                            self.config.net_host_nic.clone()
+                        };
+                        egui::ComboBox::from_id_salt("bridge_combo")
+                            .width(FIELD_MIN_WIDTH)
+                            .selected_text(&selected_label)
+                            .show_ui(ui, |ui| {
+                                for br in &self.host_bridges {
+                                    ui.selectable_value(&mut self.config.net_host_nic, br.clone(), br);
+                                }
+                            });
+                    }
+                    // Refresh button
+                    if ui.small_button("\u{21BB}").on_hover_text("Refresh bridge list").clicked() {
+                        self.host_bridges = list_host_bridges();
+                        self.host_interfaces = list_host_physical_interfaces();
+                    }
+                });
+
+                // Create / Delete Bridge section
+                ui.horizontal(|ui| {
+                    ui.add_space(LABEL_WIDTH + 8.0);
+                    if ui.small_button("+ Create Bridge").clicked() {
+                        self.show_create_bridge = !self.show_create_bridge;
+                        self.bridge_create_status = None;
+                    }
+                    // Delete selected bridge
+                    let can_delete = !self.config.net_host_nic.is_empty()
+                        && self.host_bridges.contains(&self.config.net_host_nic);
+                    if can_delete {
+                        if ui.small_button("\u{1F5D1} Delete").on_hover_text(
+                            format!("Remove bridge '{}' (pkexec)", self.config.net_host_nic)
+                        ).clicked() {
+                            let name = self.config.net_host_nic.clone();
+                            match delete_bridge_pkexec(&name) {
+                                Ok(()) => {
+                                    self.bridge_create_status = Some(format!("Bridge '{}' removed.", name));
+                                    self.config.net_host_nic.clear();
+                                    self.host_bridges = list_host_bridges();
+                                    self.host_interfaces = list_host_physical_interfaces();
+                                }
+                                Err(e) => {
+                                    self.bridge_create_status = Some(format!("Failed: {}", e));
+                                }
+                            }
+                        }
+                    }
+                    ui.colored_label(
+                        theme::text_dim(),
+                        format!("{} bridge(s) available", self.host_bridges.len()),
+                    );
+                });
+
+                if self.show_create_bridge {
+                    ui.add_space(4.0);
+                    egui::Frame::new()
+                        .fill(theme::info_bar_bg())
+                        .corner_radius(egui::CornerRadius::same(4))
+                        .inner_margin(egui::Margin::symmetric(10, 8))
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new("Create Linux Bridge").strong());
+                            ui.add_space(4.0);
+                            labeled_row(ui, "Name:", |ui| {
+                                ui.add(egui::TextEdit::singleline(&mut self.new_bridge_name)
+                                    .desired_width(120.0)
+                                    .hint_text("br0"));
+                            });
+                            labeled_row(ui, "Uplink:", |ui| {
+                                let uplink_label = if self.new_bridge_uplink.is_empty() {
+                                    "Select interface...".to_string()
+                                } else {
+                                    self.new_bridge_uplink.clone()
+                                };
+                                egui::ComboBox::from_id_salt("bridge_uplink_combo")
+                                    .width(180.0)
+                                    .selected_text(&uplink_label)
+                                    .show_ui(ui, |ui| {
+                                        for iface in &self.host_interfaces {
+                                            ui.selectable_value(&mut self.new_bridge_uplink, iface.clone(), iface);
+                                        }
+                                    });
+                            });
+                            ui.horizontal(|ui| {
+                                ui.add_space(LABEL_WIDTH + 8.0);
+                                ui.colored_label(
+                                    theme::text_dim(),
+                                    "The host interface's IP will be moved to the bridge.",
+                                );
+                            });
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.add_space(LABEL_WIDTH + 8.0);
+                                if ui.button("Create (pkexec)").clicked() {
+                                    if self.new_bridge_name.trim().is_empty() {
+                                        self.bridge_create_status = Some("Bridge name is required.".into());
+                                    } else if self.new_bridge_uplink.is_empty() {
+                                        self.bridge_create_status = Some("Please select an uplink interface.".into());
+                                    } else {
+                                        let name = self.new_bridge_name.trim().to_string();
+                                        let uplink = self.new_bridge_uplink.clone();
+                                        match create_bridge_with_uplink_pkexec(&name, &uplink) {
+                                            Ok(()) => {
+                                                self.bridge_create_status = Some(format!("Bridge '{}' created with uplink '{}'.", name, uplink));
+                                                self.config.net_host_nic = name;
+                                                self.host_bridges = list_host_bridges();
+                                                self.host_interfaces = list_host_physical_interfaces();
+                                                self.show_create_bridge = false;
+                                            }
+                                            Err(e) => {
+                                                self.bridge_create_status = Some(format!("Failed: {}", e));
+                                            }
+                                        }
+                                    }
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    self.show_create_bridge = false;
+                                }
+                            });
+                            if let Some(ref status) = self.bridge_create_status {
+                                ui.add_space(2.0);
+                                let color = if status.starts_with("Failed") { theme::error_red() } else { theme::accent_blue() };
+                                ui.colored_label(color, status);
+                            }
+                        });
+                }
+
+                // Show status from create/delete operations (when create form is closed)
+                if !self.show_create_bridge {
+                    if let Some(ref status) = self.bridge_create_status {
+                        ui.horizontal(|ui| {
+                            ui.add_space(LABEL_WIDTH + 8.0);
+                            let color = if status.starts_with("Failed") { theme::error_red() } else { theme::accent_blue() };
+                            ui.colored_label(color, status);
+                        });
+                    }
+                }
+
+                ui.horizontal(|ui| {
+                    ui.add_space(LABEL_WIDTH + 8.0);
+                    ui.colored_label(
+                        theme::text_dim(),
+                        "TAP device is auto-created and attached to the selected bridge.",
+                    );
                 });
             }
 
@@ -1002,4 +1181,204 @@ fn format_disk_size(bytes: u64) -> String {
     } else {
         format!("{} B", bytes)
     }
+}
+
+// ── Bridge helpers ──────────────────────────────────────────────────────
+
+/// List all Linux bridges on the host by reading /sys/class/net/*/bridge.
+fn list_host_bridges() -> Vec<String> {
+    let net_dir = std::path::Path::new("/sys/class/net");
+    if !net_dir.exists() { return Vec::new(); }
+
+    let mut bridges = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(net_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if entry.path().join("bridge").exists() {
+                bridges.push(name);
+            }
+        }
+    }
+    bridges.sort();
+    bridges
+}
+
+/// List physical network interfaces (ethernet/wireless, not virtual/bridge/loopback).
+fn list_host_physical_interfaces() -> Vec<String> {
+    let net_dir = std::path::Path::new("/sys/class/net");
+    if !net_dir.exists() { return Vec::new(); }
+
+    let mut ifaces = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(net_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let path = entry.path();
+            // Skip loopback, bridges, virtual interfaces
+            if name == "lo" { continue; }
+            if path.join("bridge").exists() { continue; }
+            if name.starts_with("veth") || name.starts_with("virbr") || name.starts_with("docker")
+                || name.starts_with("br-") || name.starts_with("vnet") || name.starts_with("tap")
+                || name.starts_with("vm") || name.starts_with("vx") || name.starts_with("sdn") {
+                continue;
+            }
+            // Check it's not already slaved to a bridge
+            if path.join("master").exists() { continue; }
+            ifaces.push(name);
+        }
+    }
+    ifaces.sort();
+    ifaces
+}
+
+/// Validate a bridge name.
+fn validate_bridge_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 15 {
+        return Err("Bridge name must be 1-15 characters.".into());
+    }
+    if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        return Err("Bridge name may only contain letters, digits, dash, underscore.".into());
+    }
+    Ok(())
+}
+
+/// Run a command via pkexec. Returns Ok(()) on success.
+fn pkexec(args: &[&str]) -> Result<(), String> {
+    let output = std::process::Command::new("pkexec")
+        .args(args)
+        .output()
+        .map_err(|e| format!("Failed to run pkexec: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(stderr.trim().to_string());
+    }
+    Ok(())
+}
+
+/// Get the IPv4 address + prefix of an interface (e.g. "192.168.1.10/24").
+fn get_interface_ipv4(iface: &str) -> Option<String> {
+    let output = std::process::Command::new("ip")
+        .args(["-4", "-o", "addr", "show", iface])
+        .output().ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Format: "2: eth0    inet 192.168.1.10/24 brd 192.168.1.255 scope global eth0"
+    for line in stdout.lines() {
+        if let Some(inet_pos) = line.find("inet ") {
+            let rest = &line[inet_pos + 5..];
+            return rest.split_whitespace().next().map(|s| s.to_string());
+        }
+    }
+    None
+}
+
+/// Get the default gateway IP.
+fn get_default_gateway() -> Option<String> {
+    let output = std::process::Command::new("ip")
+        .args(["-4", "route", "show", "default"])
+        .output().ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // "default via 192.168.1.1 dev eth0"
+    let parts: Vec<&str> = stdout.split_whitespace().collect();
+    parts.iter().position(|&p| p == "via").and_then(|i| parts.get(i + 1).map(|s| s.to_string()))
+}
+
+/// Create a Linux bridge with an uplink interface using pkexec.
+///
+/// This performs the full "libvirt-style" bridge setup:
+/// 1. Create the bridge
+/// 2. Read the uplink's IP address and default gateway
+/// 3. Add the uplink interface to the bridge
+/// 4. Move the IP address from the uplink to the bridge
+/// 5. Restore the default route via the bridge
+fn create_bridge_with_uplink_pkexec(name: &str, uplink: &str) -> Result<(), String> {
+    validate_bridge_name(name)?;
+
+    let bridge_path = format!("/sys/class/net/{}", name);
+    if std::path::Path::new(&bridge_path).exists() {
+        return Err(format!("Bridge '{}' already exists.", name));
+    }
+
+    // Read current uplink IP and gateway BEFORE modifying anything
+    let uplink_ip = get_interface_ipv4(uplink);
+    let gateway = get_default_gateway();
+
+    // 1. Create bridge and bring it up
+    pkexec(&["ip", "link", "add", name, "type", "bridge"])
+        .map_err(|e| format!("Bridge creation: {}", e))?;
+    pkexec(&["ip", "link", "set", name, "up"])
+        .map_err(|e| format!("Bridge up: {}", e))?;
+
+    // 2. Add uplink interface to bridge
+    pkexec(&["ip", "link", "set", uplink, "master", name])
+        .map_err(|e| format!("Add uplink to bridge: {}", e))?;
+
+    // 3. Move IP from uplink to bridge (so the host keeps network connectivity)
+    if let Some(ref ip_cidr) = uplink_ip {
+        // Remove IP from uplink
+        let _ = pkexec(&["ip", "addr", "del", ip_cidr, "dev", uplink]);
+        // Add IP to bridge
+        pkexec(&["ip", "addr", "add", ip_cidr, "dev", name])
+            .map_err(|e| format!("Assign IP to bridge: {}", e))?;
+    }
+
+    // 4. Restore default route via bridge
+    if let Some(ref gw) = gateway {
+        let _ = pkexec(&["ip", "route", "add", "default", "via", gw, "dev", name]);
+    }
+
+    Ok(())
+}
+
+/// Remove a Linux bridge using pkexec.
+///
+/// This reverses the bridge setup:
+/// 1. Read the bridge's IP and its member interfaces
+/// 2. Move the IP back to the first physical member (uplink)
+/// 3. Remove all members from the bridge
+/// 4. Delete the bridge
+/// 5. Restore the default route
+fn delete_bridge_pkexec(name: &str) -> Result<(), String> {
+    let bridge_path = format!("/sys/class/net/{}", name);
+    if !std::path::Path::new(&bridge_path).exists() {
+        return Err(format!("Bridge '{}' does not exist.", name));
+    }
+
+    // Read bridge IP and gateway before teardown
+    let bridge_ip = get_interface_ipv4(name);
+    let gateway = get_default_gateway();
+
+    // Find member interfaces
+    let mut members = Vec::new();
+    let brif_path = format!("/sys/class/net/{}/brif", name);
+    if let Ok(entries) = std::fs::read_dir(&brif_path) {
+        for entry in entries.flatten() {
+            members.push(entry.file_name().to_string_lossy().to_string());
+        }
+    }
+
+    // Find the first physical member (uplink) to restore IP to
+    let uplink = members.iter().find(|m| {
+        !m.starts_with("tap") && !m.starts_with("vm") && !m.starts_with("vx") && !m.starts_with("veth")
+    }).cloned();
+
+    // Remove all members from bridge
+    for member in &members {
+        let _ = pkexec(&["ip", "link", "set", member, "nomaster"]);
+    }
+
+    // Delete bridge
+    pkexec(&["ip", "link", "set", name, "down"])
+        .map_err(|e| format!("Bridge down: {}", e))?;
+    pkexec(&["ip", "link", "del", name])
+        .map_err(|e| format!("Bridge delete: {}", e))?;
+
+    // Restore IP to uplink interface
+    if let (Some(ref ip_cidr), Some(ref uplink_name)) = (&bridge_ip, &uplink) {
+        let _ = pkexec(&["ip", "addr", "add", ip_cidr, "dev", uplink_name]);
+        // Restore default route
+        if let Some(ref gw) = gateway {
+            let _ = pkexec(&["ip", "route", "add", "default", "via", gw, "dev", uplink_name]);
+        }
+    }
+
+    Ok(())
 }

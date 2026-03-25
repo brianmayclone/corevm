@@ -68,12 +68,33 @@ pub async fn create_network(
         validation::validate_vlan(vlan)
             .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
     }
-    let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
-    let id = NetworkService::create_network(&db, &body.cluster_id, &body.name, &body.subnet,
-        &body.gateway, body.vlan_id)
-        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
-    AuditService::log(&db, user.id, "network.create", "network", &id.to_string(), Some(&body.name));
-    Ok(Json(serde_json::json!({"id": id})))
+    let id = {
+        let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
+        let id = NetworkService::create_network(&db, &body.cluster_id, &body.name, &body.subnet,
+            &body.gateway, body.vlan_id)
+            .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+        AuditService::log(&db, user.id, "network.create", "network", &id.to_string(), Some(&body.name));
+        id
+    };
+
+    // Deploy bridge on all online nodes in this cluster
+    let bridge_name = format!("sdn{}", id);
+    let setup_req = vmm_core::cluster::SetupBridgeRequest {
+        network_id: id,
+        bridge_name: bridge_name.clone(),
+        subnet: body.subnet.clone(),
+        vlan_id: body.vlan_id,
+        vxlan: Some(vmm_core::cluster::VxlanConfig {
+            vni: id as u32 + 10000, // Offset to avoid collisions with other VNIs
+            group: format!("239.1.{}.{}", (id / 256) % 256, id % 256),
+            port: 4789,
+            local_ip: String::new(), // Node will use its own IP
+        }),
+    };
+
+    deploy_bridge_to_nodes(&state, &body.cluster_id, &setup_req).await;
+
+    Ok(Json(serde_json::json!({"id": id, "bridge": bridge_name})))
 }
 
 pub async fn update_network(
@@ -238,8 +259,134 @@ pub async fn delete_network(
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_operator(&user)?;
+
+    // Get network cluster_id before deletion
+    let cluster_id = {
+        let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
+        let net = NetworkService::get_network(&db, id).map_err(|e| AppError(StatusCode::NOT_FOUND, e))?;
+        net.cluster_id.clone()
+    };
+
+    // Tear down bridges on all nodes
+    let bridge_name = format!("sdn{}", id);
+    let teardown_req = vmm_core::cluster::TeardownBridgeRequest {
+        network_id: id,
+        bridge_name,
+    };
+    teardown_bridge_from_nodes(&state, &cluster_id, &teardown_req).await;
+
+    // Delete from DB
     let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
     NetworkService::delete_network(&db, id).map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
     AuditService::log(&db, user.id, "network.delete", "network", &id.to_string(), None);
     Ok(Json(serde_json::json!({"ok": true})))
+}
+
+// ── Bridge Deployment Helpers ────────────────────────────────────────────
+
+/// Deploy a bridge configuration to all online nodes in the cluster.
+async fn deploy_bridge_to_nodes(
+    state: &Arc<ClusterState>,
+    cluster_id: &str,
+    req: &vmm_core::cluster::SetupBridgeRequest,
+) {
+    // Get all online nodes for this cluster
+    let nodes: Vec<_> = {
+        let db = state.db.lock().ok();
+        let cluster_nodes: Vec<(String, String, String)> = db.and_then(|db| {
+            let mut stmt = db.prepare(
+                "SELECT id, address, agent_token FROM hosts WHERE cluster_id = ?1"
+            ).ok()?;
+            let rows = stmt.query_map(rusqlite::params![cluster_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            }).ok()?;
+            Some(rows.filter_map(|r| r.ok()).collect())
+        }).unwrap_or_default();
+        cluster_nodes
+    };
+
+    for (node_id, address, token) in &nodes {
+        // Check if node is online
+        let is_online = state.nodes.get(node_id)
+            .map(|n| n.status == crate::state::NodeStatus::Online)
+            .unwrap_or(false);
+        if !is_online { continue; }
+
+        // Fill in local_ip for VXLAN — each node uses its own IP
+        let mut node_req = req.clone();
+        if let Some(ref mut vxlan) = node_req.vxlan {
+            if vxlan.local_ip.is_empty() {
+                // Extract IP from node address (http://1.2.3.4:8443 → 1.2.3.4)
+                if let Some(ip) = extract_ip_from_url(address) {
+                    vxlan.local_ip = ip;
+                }
+            }
+        }
+
+        match crate::node_client::NodeClient::new(address, token) {
+            Ok(client) => {
+                match client.setup_bridge(&node_req).await {
+                    Ok(resp) if resp.success => {
+                        tracing::info!("Bridge '{}' deployed to node {}", req.bridge_name, node_id);
+                    }
+                    Ok(resp) => {
+                        tracing::warn!("Bridge deploy to node {} failed: {:?}", node_id, resp.error);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Bridge deploy to node {} failed: {}", node_id, e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Cannot connect to node {} for bridge deploy: {}", node_id, e);
+            }
+        }
+    }
+}
+
+/// Remove a bridge from all online nodes in the cluster.
+async fn teardown_bridge_from_nodes(
+    state: &Arc<ClusterState>,
+    cluster_id: &str,
+    req: &vmm_core::cluster::TeardownBridgeRequest,
+) {
+    let nodes: Vec<(String, String, String)> = {
+        let db = state.db.lock().ok();
+        db.and_then(|db| {
+            let mut stmt = db.prepare(
+                "SELECT id, address, agent_token FROM hosts WHERE cluster_id = ?1"
+            ).ok()?;
+            let rows = stmt.query_map(rusqlite::params![cluster_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            }).ok()?;
+            Some(rows.filter_map(|r| r.ok()).collect())
+        }).unwrap_or_default()
+    };
+
+    for (node_id, address, token) in &nodes {
+        let is_online = state.nodes.get(node_id)
+            .map(|n| n.status == crate::state::NodeStatus::Online)
+            .unwrap_or(false);
+        if !is_online { continue; }
+
+        if let Ok(client) = crate::node_client::NodeClient::new(address, token) {
+            match client.teardown_bridge(req).await {
+                Ok(_) => tracing::info!("Bridge '{}' removed from node {}", req.bridge_name, node_id),
+                Err(e) => tracing::warn!("Bridge teardown on node {} failed: {}", node_id, e),
+            }
+        }
+    }
+}
+
+/// Extract IP address from a URL like "https://192.168.1.10:8443".
+fn extract_ip_from_url(url: &str) -> Option<String> {
+    let url = url.trim_start_matches("https://").trim_start_matches("http://");
+    // Remove port if present
+    let host = url.split(':').next()?;
+    // Verify it looks like an IP
+    if host.parse::<std::net::Ipv4Addr>().is_ok() {
+        Some(host.to_string())
+    } else {
+        None
+    }
 }

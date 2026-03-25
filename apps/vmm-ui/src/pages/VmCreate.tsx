@@ -153,6 +153,7 @@ export default function VmCreate() {
           cluster_id: selectedClusterId,
           host_id: selectedHostId || undefined,
           config: { ...form, uuid: '' },
+          network_id: selectedNetworkId || undefined,
         })
         navigate(`/vms/${data.id}`)
       } else {
@@ -330,13 +331,16 @@ export default function VmCreate() {
                       onChange={(e) => {
                         const id = e.target.value ? parseInt(e.target.value) : null
                         setSelectedNetworkId(id)
-                        // Auto-set network mode to UserMode for SDN
-                        if (id) set('net_mode', 'usermode')
+                        // SDN networks use bridge mode — cluster auto-configures the bridge
+                        if (id) {
+                          set('net_mode', 'bridge')
+                          set('net_enabled', true)
+                        }
                       }}
                     />
                     {selectedNetworkId && (
                       <p className="text-xs text-vmm-text-muted mt-1">
-                        The VM will receive its IP, DNS, and gateway from this SDN network's DHCP/DNS services.
+                        The VM will be bridged into this network and receive its IP via DHCP. Cross-host communication is handled via VXLAN overlay.
                       </p>
                     )}
                   </FormField>

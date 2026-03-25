@@ -3054,7 +3054,8 @@ pub extern "C" fn corevm_e1000_has_rx_irq(handle: u64) -> u32 {
 // ── Network Backend ──
 
 /// Set up the network backend for the VM.
-/// mode: 0 = none, 1 = user-mode NAT (SLIRP), 2 = TAP (not yet implemented).
+/// mode: 0 = none, 1 = user-mode NAT (SLIRP).
+/// For TAP/bridge mode use [`corevm_setup_net_tap`] instead.
 /// Must be called AFTER corevm_setup_e1000().
 #[no_mangle]
 pub extern "C" fn corevm_setup_net(handle: u64, mode: i32) -> i32 {
@@ -3080,6 +3081,64 @@ pub extern "C" fn corevm_setup_net(handle: u64, mode: i32) -> i32 {
     }
     #[cfg(not(feature = "std"))]
     { let _ = (handle, mode); -1 }
+}
+
+/// Set up TAP/bridge network backend.
+///
+/// Creates a TAP device, brings it up, and optionally joins it to a Linux
+/// bridge.  The guest gets a real Layer-2 presence on the host network.
+///
+/// * `tap_name_ptr`    — C string: requested TAP name (empty = kernel assigns).
+/// * `bridge_name_ptr` — C string: bridge to join (empty = standalone TAP).
+///
+/// Requires CAP_NET_ADMIN or root.  Returns 0 on success, -1 on error.
+#[cfg(feature = "linux")]
+#[no_mangle]
+pub extern "C" fn corevm_setup_net_tap(
+    handle: u64,
+    tap_name_ptr: *const u8,
+    tap_name_len: u32,
+    bridge_name_ptr: *const u8,
+    bridge_name_len: u32,
+) -> i32 {
+    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
+
+    let tap_name = if tap_name_ptr.is_null() || tap_name_len == 0 {
+        ""
+    } else {
+        unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(tap_name_ptr, tap_name_len as usize)) }
+    };
+
+    let bridge_name = if bridge_name_ptr.is_null() || bridge_name_len == 0 {
+        ""
+    } else {
+        unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(bridge_name_ptr, bridge_name_len as usize)) }
+    };
+
+    match crate::devices::net::TapNet::new(tap_name, bridge_name) {
+        Ok(tap_net) => {
+            vm.net_backend = Some(alloc::boxed::Box::new(tap_net));
+            0
+        }
+        Err(e) => {
+            eprintln!("[corevm] TAP setup failed: {}", e);
+            -1
+        }
+    }
+}
+
+/// Stub for non-Linux platforms (TAP not available).
+#[cfg(not(feature = "linux"))]
+#[no_mangle]
+pub extern "C" fn corevm_setup_net_tap(
+    handle: u64,
+    _tap_name_ptr: *const u8,
+    _tap_name_len: u32,
+    _bridge_name_ptr: *const u8,
+    _bridge_name_len: u32,
+) -> i32 {
+    let _ = handle;
+    -1
 }
 
 /// Setup user-mode networking with custom SDN configuration.

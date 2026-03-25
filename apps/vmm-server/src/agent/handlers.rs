@@ -390,6 +390,28 @@ pub async fn delete_disk(
     Ok(Json(AgentResponse::ok()))
 }
 
+// ── Network / Bridge Management ─────────────────────────────────────────
+
+/// POST /agent/network/bridge/setup — Create a bridge (+ optional VXLAN).
+pub async fn setup_bridge(
+    _agent: AgentAuth,
+    Json(req): Json<vmm_core::cluster::SetupBridgeRequest>,
+) -> Result<Json<AgentResponse>, AppError> {
+    crate::api::network::setup_bridge(&req)
+        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(AgentResponse::ok()))
+}
+
+/// POST /agent/network/bridge/teardown — Remove a bridge.
+pub async fn teardown_bridge(
+    _agent: AgentAuth,
+    Json(req): Json<vmm_core::cluster::TeardownBridgeRequest>,
+) -> Result<Json<AgentResponse>, AppError> {
+    crate::api::network::teardown_bridge(&req.bridge_name)
+        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(AgentResponse::ok()))
+}
+
 // ── Direct Host-to-Host Migration ───────────────────────────────────────
 
 /// POST /agent/migration/send — Send VM disks directly to another host.

@@ -62,6 +62,8 @@ pub fn router() -> Router<Arc<AppState>> {
         // Network
         .route("/api/network/interfaces", get(network::list_interfaces))
         .route("/api/network/stats", get(network::network_stats))
+        .route("/api/network/bridges", get(network::list_bridges).post(network::create_bridge))
+        .route("/api/network/bridges/{name}", delete(network::delete_bridge))
         // Settings
         .route("/api/settings/server", get(settings::get_server))
         .route("/api/settings/time", get(settings::get_time))

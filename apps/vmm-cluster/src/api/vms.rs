@@ -22,6 +22,9 @@ pub struct CreateVmRequest {
     /// Optional: specific host to place on. If omitted, scheduler decides.
     pub host_id: Option<String>,
     pub config: serde_json::Value,
+    /// Optional: SDN network to attach the VM to.
+    /// When set, the cluster enriches the config with bridge mode + sdn_config.
+    pub network_id: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -65,7 +68,31 @@ pub async fn create(
     require_operator(&user)?;
 
     let vm_id = uuid::Uuid::new_v4().to_string().replace("-", "");
-    let config_json = serde_json::to_string(&body.config)
+
+    // Enrich VM config with SDN network details (bridge mode + sdn_config)
+    let mut config = body.config.clone();
+    if let Some(network_id) = body.network_id {
+        let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock error".into()))?;
+        let net = crate::services::network::NetworkService::get_network(&db, network_id)
+            .map_err(|e| AppError(StatusCode::BAD_REQUEST, format!("Network not found: {}", e)))?;
+        drop(db);
+
+        // Parse subnet to build SdnNetConfig
+        let bridge_name = format!("sdn{}", network_id);
+        let sdn_config = build_sdn_config(&net)
+            .map_err(|e| AppError(StatusCode::BAD_REQUEST, format!("Invalid network config: {}", e)))?;
+
+        // Override network settings in the VM config
+        if let Some(obj) = config.as_object_mut() {
+            obj.insert("net_mode".into(), serde_json::json!("bridge"));
+            obj.insert("net_host_nic".into(), serde_json::json!(bridge_name));
+            obj.insert("net_enabled".into(), serde_json::json!(true));
+            obj.insert("sdn_config".into(), serde_json::to_value(&sdn_config)
+                .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?);
+        }
+    }
+
+    let config_json = serde_json::to_string(&config)
         .map_err(|e| AppError(StatusCode::BAD_REQUEST, e.to_string()))?;
 
     // Step 1: Create VM in cluster DB (authority)
@@ -91,7 +118,7 @@ pub async fn create(
 
         let provision_req = vmm_core::cluster::ProvisionVmRequest {
             vm_id: vm_id.clone(),
-            config: body.config.clone(),
+            config: config.clone(),
         };
 
         let resp = client.post(format!("{}/agent/vms/provision", &node.address))
@@ -271,4 +298,80 @@ pub async fn delete(
     AuditService::log(&db, user.id, "vm.delete", "vm", &id, None);
 
     Ok(Json(serde_json::json!({"ok": true})))
+}
+
+// ── SDN Config Builder ──────────────────────────────────────────────────
+
+/// Build an SdnNetConfig from a VirtualNetwork definition.
+/// Parses the subnet CIDR and gateway to create the byte-level config
+/// that SLIRP (and the DHCP server) needs.
+fn build_sdn_config(net: &crate::services::network::VirtualNetwork) -> Result<vmm_core::config::SdnNetConfig, String> {
+    // Parse gateway IP (e.g. "10.0.50.1")
+    let gw: std::net::Ipv4Addr = net.gateway.parse()
+        .map_err(|_| format!("Invalid gateway IP: {}", net.gateway))?;
+    let gw_octets = gw.octets();
+
+    // Parse subnet CIDR (e.g. "10.0.50.0/24")
+    let (subnet_ip, prefix_len) = parse_cidr(&net.subnet)?;
+    let sub_octets = subnet_ip.octets();
+
+    // Calculate netmask from prefix length
+    let mask_bits: u32 = if prefix_len == 0 { 0 } else { !((1u32 << (32 - prefix_len)) - 1) };
+    let netmask = mask_bits.to_be_bytes();
+
+    // Guest IP: DHCP range start (or gateway + 100 as fallback)
+    let guest_ip = if !net.dhcp_range_start.is_empty() {
+        net.dhcp_range_start.parse::<std::net::Ipv4Addr>()
+            .map(|ip| ip.octets())
+            .unwrap_or([sub_octets[0], sub_octets[1], sub_octets[2], gw_octets[3].wrapping_add(100)])
+    } else {
+        [sub_octets[0], sub_octets[1], sub_octets[2], gw_octets[3].wrapping_add(100)]
+    };
+
+    // DNS IP: same as gateway (the SLIRP internal DNS relay)
+    let dns_ip = gw_octets;
+
+    // Upstream DNS
+    let upstream_dns: Vec<String> = if net.dns_upstream.is_empty() {
+        Vec::new()
+    } else {
+        net.dns_upstream.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+    };
+
+    // PXE next-server
+    let pxe_next_server = if net.pxe_next_server.is_empty() {
+        [0, 0, 0, 0]
+    } else {
+        net.pxe_next_server.parse::<std::net::Ipv4Addr>()
+            .map(|ip| ip.octets())
+            .unwrap_or([0, 0, 0, 0])
+    };
+
+    Ok(vmm_core::config::SdnNetConfig {
+        net_prefix: [sub_octets[0], sub_octets[1], sub_octets[2]],
+        gateway_ip: gw_octets,
+        dns_ip,
+        guest_ip,
+        netmask,
+        upstream_dns,
+        dns_domain: net.dns_domain.clone(),
+        pxe_boot_file: net.pxe_boot_file.clone(),
+        pxe_next_server,
+    })
+}
+
+/// Parse a CIDR notation string like "10.0.50.0/24".
+fn parse_cidr(cidr: &str) -> Result<(std::net::Ipv4Addr, u8), String> {
+    let parts: Vec<&str> = cidr.split('/').collect();
+    if parts.len() != 2 {
+        return Err(format!("Invalid CIDR: {}", cidr));
+    }
+    let ip: std::net::Ipv4Addr = parts[0].parse()
+        .map_err(|_| format!("Invalid IP in CIDR: {}", parts[0]))?;
+    let prefix: u8 = parts[1].parse()
+        .map_err(|_| format!("Invalid prefix length: {}", parts[1]))?;
+    if prefix > 32 {
+        return Err(format!("Prefix length {} > 32", prefix));
+    }
+    Ok((ip, prefix))
 }

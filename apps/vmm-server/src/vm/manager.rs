@@ -109,12 +109,29 @@ pub fn start_vm(config: &VmConfig, bios_paths: &[std::path::PathBuf]) -> Result<
                 corevm_setup_net(handle, 1);
             }
         } else {
-            let net_mode_id = match config.net_mode {
-                NetMode::Disconnected => 0,
+            match config.net_mode {
+                NetMode::Disconnected => {
+                    corevm_setup_net(handle, 0);
+                }
                 NetMode::UserMode => unreachable!(),
-                NetMode::Bridge => 2,
-            };
-            corevm_setup_net(handle, net_mode_id);
+                NetMode::Bridge => {
+                    // Generate a TAP name from the VM UUID (first 8 chars)
+                    let tap_name = format!("vm{}", &config.uuid[..8.min(config.uuid.len())]);
+                    let bridge_name = &config.net_host_nic;
+                    let ret = corevm_setup_net_tap(
+                        handle,
+                        tap_name.as_ptr(),
+                        tap_name.len() as u32,
+                        bridge_name.as_ptr(),
+                        bridge_name.len() as u32,
+                    );
+                    if ret != 0 {
+                        eprintln!("[vm] WARNING: TAP setup failed (tap={}, bridge={}), falling back to disconnected",
+                            tap_name, bridge_name);
+                        corevm_setup_net(handle, 0);
+                    }
+                }
+            }
         }
     }
 

@@ -102,6 +102,28 @@ impl NodeClient {
         resp.json().await.map_err(|e| format!("Invalid response: {}", e))
     }
 
+    /// POST /agent/network/bridge/setup — Set up a bridge on this node.
+    pub async fn setup_bridge(&self, req: &vmm_core::cluster::SetupBridgeRequest) -> Result<AgentResponse, String> {
+        let resp = self.http.post(format!("{}/agent/network/bridge/setup", &self.base_url))
+            .header("X-Agent-Token", &self.agent_token)
+            .json(req)
+            .send().await
+            .map_err(|e| format!("Connection failed: {}", e))?;
+
+        resp.json().await.map_err(|e| format!("Invalid response: {}", e))
+    }
+
+    /// POST /agent/network/bridge/teardown — Remove a bridge from this node.
+    pub async fn teardown_bridge(&self, req: &vmm_core::cluster::TeardownBridgeRequest) -> Result<AgentResponse, String> {
+        let resp = self.http.post(format!("{}/agent/network/bridge/teardown", &self.base_url))
+            .header("X-Agent-Token", &self.agent_token)
+            .json(req)
+            .send().await
+            .map_err(|e| format!("Connection failed: {}", e))?;
+
+        resp.json().await.map_err(|e| format!("Invalid response: {}", e))
+    }
+
     /// Generic POST to an agent endpoint (no body).
     async fn post_agent(&self, path: &str) -> Result<AgentResponse, String> {
         let resp = self.http.post(format!("{}{}", &self.base_url, path))

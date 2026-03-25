@@ -127,6 +127,176 @@ fn get_ipv4_address(iface: &str) -> Option<String> {
     None
 }
 
+// ── Bridge Management ────────────────────────────────────────────────────
+
+/// POST /api/network/bridges — Create a Linux bridge (+ optional VXLAN).
+pub async fn create_bridge(
+    _auth: AuthUser,
+    Json(req): Json<vmm_core::cluster::SetupBridgeRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    setup_bridge(&req)
+        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::json!({"ok": true, "bridge": req.bridge_name})))
+}
+
+/// DELETE /api/network/bridges/{name} — Remove a bridge (+ associated VXLAN).
+pub async fn delete_bridge(
+    _auth: AuthUser,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    teardown_bridge(&name)
+        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+/// GET /api/network/bridges — List existing bridges.
+pub async fn list_bridges(
+    _auth: AuthUser,
+) -> Result<Json<Vec<BridgeInfo>>, AppError> {
+    let bridges = read_bridges()
+        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(bridges))
+}
+
+#[derive(serde::Serialize)]
+pub struct BridgeInfo {
+    pub name: String,
+    pub state: String,
+    pub members: Vec<String>,
+}
+
+/// Create a Linux bridge, optionally with a VXLAN interface attached.
+pub fn setup_bridge(req: &vmm_core::cluster::SetupBridgeRequest) -> Result<(), String> {
+    // Check if bridge already exists
+    let bridge_path = format!("/sys/class/net/{}", req.bridge_name);
+    if std::path::Path::new(&bridge_path).exists() {
+        eprintln!("[net] Bridge '{}' already exists, skipping creation", req.bridge_name);
+        return Ok(());
+    }
+
+    // Create the bridge
+    run_ip(&["link", "add", &req.bridge_name, "type", "bridge"])?;
+    run_ip(&["link", "set", &req.bridge_name, "up"])?;
+    eprintln!("[net] Created bridge '{}'", req.bridge_name);
+
+    // Set up VXLAN overlay if configured
+    if let Some(ref vxlan) = req.vxlan {
+        let vxlan_name = format!("vx{}", req.network_id);
+        let vni_str = vxlan.vni.to_string();
+        let port_str = vxlan.port.to_string();
+
+        let mut args = vec![
+            "link", "add", &vxlan_name, "type", "vxlan",
+            "id", &vni_str, "dstport", &port_str,
+        ];
+
+        if !vxlan.group.is_empty() {
+            args.extend(&["group", &vxlan.group]);
+        }
+        if !vxlan.local_ip.is_empty() {
+            args.extend(&["local", &vxlan.local_ip]);
+        }
+        // Use the physical device for multicast routing
+        args.extend(&["dev", "lo"]); // will be overridden below if we can find the default route dev
+
+        // Try to find the default route interface for VXLAN
+        if let Some(dev) = get_default_route_dev() {
+            let last = args.len() - 1;
+            args[last] = &dev;
+            run_ip(&args)?;
+        } else {
+            // Remove dev/lo and try without explicit dev
+            args.truncate(args.len() - 2);
+            run_ip(&args)?;
+        }
+
+        run_ip(&["link", "set", &vxlan_name, "master", &req.bridge_name])?;
+        run_ip(&["link", "set", &vxlan_name, "up"])?;
+        eprintln!("[net] Created VXLAN '{}' (VNI={}) on bridge '{}'", vxlan_name, vxlan.vni, req.bridge_name);
+    }
+
+    Ok(())
+}
+
+/// Tear down a bridge and any associated VXLAN interface.
+pub fn teardown_bridge(bridge_name: &str) -> Result<(), String> {
+    let bridge_path = format!("/sys/class/net/{}", bridge_name);
+    if !std::path::Path::new(&bridge_path).exists() {
+        return Ok(()); // Already gone
+    }
+
+    // Find and remove VXLAN interfaces attached to this bridge
+    if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("vx") {
+                // Check if this vxlan is a member of our bridge
+                let master_path = format!("/sys/class/net/{}/master", name);
+                if let Ok(link) = std::fs::read_link(&master_path) {
+                    if link.file_name().map(|f| f.to_string_lossy().to_string()) == Some(bridge_name.to_string()) {
+                        let _ = run_ip(&["link", "del", &name]);
+                        eprintln!("[net] Removed VXLAN '{}'", name);
+                    }
+                }
+            }
+        }
+    }
+
+    run_ip(&["link", "set", bridge_name, "down"])?;
+    run_ip(&["link", "del", bridge_name])?;
+    eprintln!("[net] Removed bridge '{}'", bridge_name);
+    Ok(())
+}
+
+/// Read all bridges from /sys/class/net.
+fn read_bridges() -> Result<Vec<BridgeInfo>, String> {
+    let mut bridges = Vec::new();
+    let net_dir = std::path::Path::new("/sys/class/net");
+    if !net_dir.exists() { return Ok(bridges); }
+
+    for entry in std::fs::read_dir(net_dir).map_err(|e| e.to_string())?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !entry.path().join("bridge").exists() { continue; }
+
+        let state = std::fs::read_to_string(entry.path().join("operstate"))
+            .unwrap_or_default().trim().to_string();
+
+        // List bridge members
+        let mut members = Vec::new();
+        let brif_path = entry.path().join("brif");
+        if let Ok(ports) = std::fs::read_dir(&brif_path) {
+            for port in ports.flatten() {
+                members.push(port.file_name().to_string_lossy().to_string());
+            }
+        }
+
+        bridges.push(BridgeInfo { name, state, members });
+    }
+    Ok(bridges)
+}
+
+fn run_ip(args: &[&str]) -> Result<(), String> {
+    let output = std::process::Command::new("ip")
+        .args(args)
+        .output()
+        .map_err(|e| format!("Failed to run 'ip {}': {}", args.join(" "), e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("'ip {}' failed: {}", args.join(" "), stderr.trim()));
+    }
+    Ok(())
+}
+
+fn get_default_route_dev() -> Option<String> {
+    let output = std::process::Command::new("ip")
+        .args(["route", "show", "default"])
+        .output().ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // "default via 192.168.1.1 dev eth0 ..."
+    let parts: Vec<&str> = stdout.split_whitespace().collect();
+    parts.iter().position(|&p| p == "dev").and_then(|i| parts.get(i + 1).map(|s| s.to_string()))
+}
+
 fn get_ipv6_address(iface: &str) -> Option<String> {
     let output = std::process::Command::new("ip")
         .args(["-6", "addr", "show", iface, "scope", "global"])
