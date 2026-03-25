@@ -14,6 +14,7 @@ use libcorevm::ffi::{
     corevm_setup_standard_devices, corevm_setup_acpi_tables, corevm_setup_acpi_tables_with_hpet, corevm_setup_ahci, corevm_setup_e1000, corevm_setup_hpet, corevm_setup_ac97,
     corevm_setup_uhci,
     corevm_setup_virtio_gpu, corevm_virtio_gpu_get_framebuffer, corevm_virtio_gpu_get_mode, corevm_has_virtio_gpu, corevm_virtio_gpu_scanout_active,
+    corevm_setup_intel_gpu, corevm_has_intel_gpu, corevm_intel_gpu_get_framebuffer, corevm_intel_gpu_get_mode,
     corevm_setup_virtio_input,
     corevm_get_vcpu_regs,
     corevm_get_vcpu_sregs,
@@ -237,7 +238,7 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
 
     // VirtIO GPU — if selected in config
     if config.gpu_model == crate::config::GpuModel::VirtioGpu {
-        let gpu_vram = config.vram_mb.max(64); // VirtIO GPU needs at least 64MB VRAM
+        let gpu_vram = config.vram_mb.max(64);
         corevm_setup_virtio_gpu(handle, gpu_vram);
         entry.diag_log.log(DiagCategory::Info, format!("VirtIO GPU enabled (VRAM={}MB)", gpu_vram));
 
@@ -245,6 +246,13 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
         // fine with VirtIO GPU. Re-enable once VirtIO Input driver issues are resolved.
         // corevm_setup_virtio_input(handle);
         // entry.diag_log.log(DiagCategory::Info, "VirtIO Input (keyboard + tablet) enabled".into());
+    }
+
+    // Intel HD Graphics — if selected in config
+    if config.gpu_model == crate::config::GpuModel::IntelHD {
+        let gpu_vram = config.vram_mb.max(64);
+        corevm_setup_intel_gpu(handle, gpu_vram);
+        entry.diag_log.log(DiagCategory::Info, format!("Intel HD Graphics enabled (VRAM={}MB)", gpu_vram));
     }
 
     // Load firmware BEFORE ACPI tables — load_ovmf() sets vm.uefi_boot which
@@ -368,6 +376,7 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
     let num_cpus = entry.config.cpu_cores.max(1).min(32);
 
     let has_virtio_gpu = entry.config.gpu_model == crate::config::GpuModel::VirtioGpu;
+    let has_intel_gpu = entry.config.gpu_model == crate::config::GpuModel::IntelHD;
     let has_virtio_input = false; // VirtIO Input disabled — PS/2 works fine with VirtIO GPU
 
     let rt_config = VmRuntimeConfig {
@@ -378,6 +387,7 @@ pub fn start_vm(entry: &mut VmEntry) -> Result<(), String> {
         net_enabled: entry.config.net_enabled,
         virtio_gpu: has_virtio_gpu,
         virtio_input: has_virtio_input,
+        intel_gpu: has_intel_gpu,
         diagnostics: diag_enabled,
         ..Default::default()
     };

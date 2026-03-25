@@ -63,6 +63,7 @@ pub struct Vm {
     pub ac97_ptr: *mut Ac97,
     pub uhci_ptr: *mut crate::devices::uhci::Uhci,
     pub virtio_gpu_ptr: *mut VirtioGpu,
+    pub intel_gpu_ptr: *mut crate::devices::intel_gpu::IntelGpu,
     pub virtio_net_ptr: *mut VirtioNet,
     pub virtio_kbd_ptr: *mut VirtioInput,
     pub virtio_tablet_ptr: *mut VirtioInput,
@@ -221,6 +222,7 @@ impl Vm {
             ac97_ptr: core::ptr::null_mut(),
             uhci_ptr: core::ptr::null_mut(),
             virtio_gpu_ptr: core::ptr::null_mut(),
+            intel_gpu_ptr: core::ptr::null_mut(),
             virtio_net_ptr: core::ptr::null_mut(),
             virtio_kbd_ptr: core::ptr::null_mut(),
             virtio_tablet_ptr: core::ptr::null_mut(),
@@ -1017,6 +1019,99 @@ impl Vm {
         } else {
             Some(unsafe { &*self.virtio_gpu_ptr })
         }
+    }
+
+    /// Get a reference to the Intel GPU device, if set up.
+    pub fn intel_gpu(&mut self) -> Option<&mut crate::devices::intel_gpu::IntelGpu> {
+        if self.intel_gpu_ptr.is_null() { None }
+        else { Some(unsafe { &mut *self.intel_gpu_ptr }) }
+    }
+
+    /// Get a const reference to the Intel GPU device.
+    pub fn intel_gpu_ref(&self) -> Option<&crate::devices::intel_gpu::IntelGpu> {
+        if self.intel_gpu_ptr.is_null() { None }
+        else { Some(unsafe { &*self.intel_gpu_ptr }) }
+    }
+
+    /// Set up the Intel HD Graphics device, replacing the standard VGA adapter.
+    /// Call after `setup_standard_devices()`.
+    pub fn setup_intel_gpu(&mut self, vram_mb: u32) {
+        if !self.intel_gpu_ptr.is_null() { return; }
+
+        use crate::devices::intel_gpu::{self, IntelGpu, IntelGpuAperture, MMIO_SIZE};
+        use crate::devices::bus::PciDevice;
+
+        let vram_mb = vram_mb.clamp(64, 512);
+        let vram_size = (vram_mb as usize) * 1024 * 1024;
+
+        let gpu = Box::new(IntelGpu::new(vram_mb));
+        let gpu_ptr = &*gpu as *const IntelGpu as *mut IntelGpu;
+        self.intel_gpu_ptr = gpu_ptr;
+
+        // Register BAR0 MMIO (2 MB register space) at a fixed address.
+        // This is below the PCI MMIO hole — i915 reads BAR0 from PCI config.
+        let bar0_addr: u64 = 0xF000_0000;
+        self.memory.add_mmio(bar0_addr, MMIO_SIZE as u64, gpu);
+
+        // Register BAR2 MMIO (graphics aperture = VRAM) via proxy.
+        let bar2_addr: u64 = 0xD000_0000;
+        let aperture = Box::new(IntelGpuAperture::new(gpu_ptr));
+        self.memory.add_mmio(bar2_addr, vram_size as u64, aperture);
+
+        // Remove standard VGA PCI device and add Intel HD Graphics
+        if !self.pci_bus_ptr.is_null() {
+            let pci_bus = unsafe { &mut *self.pci_bus_ptr };
+            pci_bus.remove_device(self.chipset.slots.vga);
+
+            let mut pci_dev = PciDevice::new(
+                intel_gpu::VENDOR_ID,  // 0x8086
+                intel_gpu::DEVICE_ID,  // 0x0102 (HD Graphics 2000)
+                0x03,   // Display controller
+                0x00,   // VGA compatible
+                0x00,   // prog-if
+            );
+            pci_dev.device = self.chipset.slots.vga;
+
+            // Revision ID: Sandy Bridge stepping D2
+            pci_dev.config_space[0x08] = 0x09;
+
+            // Subsystem: Intel
+            pci_dev.config_space[0x2C] = 0x86; // Subsystem vendor low (0x8086)
+            pci_dev.config_space[0x2D] = 0x80;
+            pci_dev.config_space[0x2E] = 0x02; // Subsystem device low
+            pci_dev.config_space[0x2F] = 0x01;
+
+            // BAR0: 2 MB MMIO (register space)
+            pci_dev.set_bar(0, bar0_addr as u32, MMIO_SIZE as u32, true);
+
+            // BAR2: VRAM aperture (prefetchable, 64-bit)
+            // For PCI, set BAR2 as 32-bit for simplicity
+            pci_dev.set_bar(2, bar2_addr as u32, vram_size as u32, true);
+
+            // Interrupt: same as VGA slot
+            pci_dev.set_interrupt(self.chipset.irqs.vga, 1);
+
+            // GMCH Graphics Control (PCI config 0x50-0x51):
+            // Report stolen memory size and GTT size
+            // Bits 7:4 = GMS (Graphics Memory Size): 0101 = 32MB stolen
+            // Bits 9:8 = GGMS (GTT size): 01 = 1 MB GTT
+            pci_dev.config_space[0x50] = 0x50; // 32 MB stolen, 1 MB GTT
+            pci_dev.config_space[0x51] = 0x01;
+
+            // MCHBAR / BSM (Base of Stolen Memory) at config 0x5C
+            // Point to end of VRAM aperture
+            let bsm = bar2_addr as u32 + vram_size as u32;
+            pci_dev.config_space[0x5C] = (bsm & 0xFF) as u8;
+            pci_dev.config_space[0x5D] = ((bsm >> 8) & 0xFF) as u8;
+            pci_dev.config_space[0x5E] = ((bsm >> 16) & 0xFF) as u8;
+            pci_dev.config_space[0x5F] = ((bsm >> 24) & 0xFF) as u8;
+
+            pci_bus.add_device(pci_dev);
+        }
+
+        eprintln!("[intel-gpu] Intel HD Graphics 2000 (8086:0102) initialized");
+        eprintln!("[intel-gpu] BAR0 (MMIO): 0x{:08X} (2 MB)", bar0_addr);
+        eprintln!("[intel-gpu] BAR2 (VRAM): 0x{:08X} ({} MB)", bar2_addr, vram_mb);
     }
 
     /// Set up the VirtIO GPU device at PCI slot 00:07.0.

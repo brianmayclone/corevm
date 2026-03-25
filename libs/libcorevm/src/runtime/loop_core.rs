@@ -250,6 +250,10 @@ fn poll_devices(
         corevm_virtio_gpu_process(handle);
     }
 
+    // Intel GPU: no periodic refresh needed — the native driver (i915/igfx)
+    // manages the display pipeline. VGA/SVGA handles the boot display.
+    // Framebuffer refresh will be triggered by DSPASURF writes from the driver.
+
     // VirtIO Input event processing.
     if config.virtio_input {
         corevm_virtio_input_process(handle);

@@ -145,11 +145,14 @@ pub fn start_vm(config: &VmConfig, bios_paths: &[std::path::PathBuf]) -> Result<
         corevm_setup_ac97(handle);
     }
 
-    // VirtIO GPU
+    // GPU setup
     let has_virtio_gpu = config.gpu_model == GpuModel::VirtioGpu;
+    let has_intel_gpu = config.gpu_model == GpuModel::IntelHD;
     if has_virtio_gpu {
         corevm_setup_virtio_gpu(handle, config.vram_mb.max(64));
         corevm_setup_virtio_input(handle);
+    } else if has_intel_gpu {
+        corevm_setup_intel_gpu(handle, config.vram_mb.max(64));
     }
 
     // Load firmware BEFORE ACPI tables — load_ovmf() sets vm.uefi_boot which
@@ -216,6 +219,7 @@ pub fn start_vm(config: &VmConfig, bios_paths: &[std::path::PathBuf]) -> Result<
         net_enabled: config.net_enabled,
         virtio_gpu: has_virtio_gpu,
         virtio_input: has_virtio_gpu,
+        intel_gpu: has_intel_gpu,
         diagnostics: false,
         ..Default::default()
     };

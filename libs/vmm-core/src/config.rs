@@ -72,6 +72,8 @@ pub enum GpuModel {
     StdVga,
     #[serde(alias = "virtiogpu", alias = "virtio-gpu", alias = "virtio_gpu")]
     VirtioGpu,
+    #[serde(alias = "intelhd", alias = "intel-hd", alias = "intel_hd")]
+    IntelHD,
 }
 
 /// Virtual network adapter model.
@@ -294,6 +296,7 @@ impl VmConfig {
         let gpu_str = match self.gpu_model {
             GpuModel::StdVga => "stdvga",
             GpuModel::VirtioGpu => "virtiogpu",
+            GpuModel::IntelHD => "intelhd",
         };
         let nic_str = match self.nic_model {
             NicModel::E1000 => "e1000",
@@ -395,6 +398,7 @@ impl VmConfig {
                 },
                 "gpu" => cfg.gpu_model = match val {
                     "virtiogpu" | "virtio-gpu" | "virtio_gpu" => GpuModel::VirtioGpu,
+                    "intelhd" | "intel-hd" | "intel_hd" => GpuModel::IntelHD,
                     _ => GpuModel::StdVga,
                 },
                 "vram_mb" => cfg.vram_mb = val.parse().unwrap_or(16),

@@ -13,6 +13,7 @@ use libcorevm::ffi::{
     corevm_vga_get_fb_offset, corevm_has_virtio_gpu,
     corevm_virtio_gpu_get_framebuffer, corevm_virtio_gpu_get_mode,
     corevm_virtio_gpu_scanout_active,
+    corevm_has_intel_gpu, corevm_intel_gpu_get_framebuffer, corevm_intel_gpu_get_mode,
     corevm_read_phys,
 };
 
@@ -123,6 +124,34 @@ fn update_framebuffer(handle: u64, fb: &Arc<Mutex<FrameBufferData>>) {
             let mut fb_ptr: *const u8 = std::ptr::null();
             let mut fb_len: u32 = 0;
             if corevm_virtio_gpu_get_framebuffer(handle, &mut fb_ptr, &mut fb_len) == 0
+                && !fb_ptr.is_null() && fb_len > 0
+            {
+                let fb_size = (gpu_w as usize) * (gpu_h as usize) * 4;
+                if (fb_len as usize) >= fb_size {
+                    let raw = unsafe { std::slice::from_raw_parts(fb_ptr, fb_size) };
+                    fb_lock.text_mode = false;
+                    fb_lock.width = gpu_w;
+                    fb_lock.height = gpu_h;
+                    fb_lock.pixels.resize(fb_size, 0);
+                    fb_lock.pixels.copy_from_slice(raw);
+                    fb_lock.dirty = true;
+                    return;
+                }
+            }
+        }
+    }
+
+    // Intel GPU (if active)
+    if corevm_has_intel_gpu(handle) != 0 {
+        let mut gpu_w: u32 = 0;
+        let mut gpu_h: u32 = 0;
+        let mut gpu_bpp: u8 = 0;
+        if corevm_intel_gpu_get_mode(handle, &mut gpu_w, &mut gpu_h, &mut gpu_bpp) == 0
+            && gpu_w > 0 && gpu_h > 0
+        {
+            let mut fb_ptr: *const u8 = std::ptr::null();
+            let mut fb_len: u32 = 0;
+            if corevm_intel_gpu_get_framebuffer(handle, &mut fb_ptr, &mut fb_len) == 0
                 && !fb_ptr.is_null() && fb_len > 0
             {
                 let fb_size = (gpu_w as usize) * (gpu_h as usize) * 4;

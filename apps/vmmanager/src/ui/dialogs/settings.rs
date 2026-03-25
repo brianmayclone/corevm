@@ -534,6 +534,7 @@ impl SettingsDialog {
                 match self.config.gpu_model {
                     GpuModel::StdVga => "Bochs VBE compatible adapter. Works with all guest operating systems.",
                     GpuModel::VirtioGpu => "VirtIO GPU with 3D acceleration. Requires Vulkan on host. Drivers via Windows Update.",
+                    GpuModel::IntelHD => "Intel HD Graphics 2000. Native i915 (Linux) and igfx (Windows) drivers. No extra installation needed.",
                 },
             );
         });

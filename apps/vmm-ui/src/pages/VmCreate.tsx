@@ -51,6 +51,7 @@ const bootOptions = [
 const gpuOptions = [
   { value: 'stdvga', label: 'Standard VGA (Bochs VBE)' },
   { value: 'virtiogpu', label: 'VirtIO GPU' },
+  { value: 'intelhd', label: 'Intel HD Graphics (native driver)' },
 ]
 
 const nicOptions = [

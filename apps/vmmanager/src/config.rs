@@ -176,7 +176,7 @@ impl VmConfig {
             self.ram_mb, self.cpu_cores, disk_lines, self.iso_image,
             boot, bios,
             alloc,
-            match self.gpu_model { GpuModel::StdVga => "stdvga", GpuModel::VirtioGpu => "virtiogpu" },
+            match self.gpu_model { GpuModel::StdVga => "stdvga", GpuModel::VirtioGpu => "virtiogpu", GpuModel::IntelHD => "intelhd" },
             self.vram_mb,
             match self.nic_model { NicModel::E1000 => "e1000", NicModel::VirtioNet => "virtionet" },
             if self.net_enabled { "1" } else { "0" },
@@ -253,6 +253,7 @@ impl VmConfig {
                 },
                 "gpu" => cfg.gpu_model = match val {
                     "virtiogpu" | "virtio-gpu" | "virtio_gpu" => GpuModel::VirtioGpu,
+                    "intelhd" | "intel-hd" | "intel_hd" => GpuModel::IntelHD,
                     _ => GpuModel::StdVga,
                 },
                 "vram_mb" => cfg.vram_mb = val.parse().unwrap_or(16),

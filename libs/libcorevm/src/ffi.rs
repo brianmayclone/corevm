@@ -3785,6 +3785,69 @@ pub extern "C" fn corevm_virtio_gpu_scanout_active(handle: u64) -> i32 {
     if gpu.scanout_active { 1 } else { 0 }
 }
 
+// ── Intel HD Graphics FFI ──
+
+/// Set up the Intel HD Graphics device, replacing the standard VGA adapter.
+/// `vram_mb` is VRAM size in MiB (clamped to 64-512).
+/// Must be called AFTER corevm_setup_standard_devices().
+#[no_mangle]
+pub extern "C" fn corevm_setup_intel_gpu(handle: u64, vram_mb: u32) -> i32 {
+    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
+
+    // Remove standard VGA PCI device
+    if !vm.pci_bus_ptr.is_null() {
+        let pci_bus = unsafe { &mut *vm.pci_bus_ptr };
+        let vga_slot = vm.chipset.slots.vga;
+        pci_bus.devices.retain(|d| d.device != vga_slot);
+    }
+
+    vm.setup_intel_gpu(vram_mb);
+    0
+}
+
+/// Get Intel GPU framebuffer pointer and size.
+#[no_mangle]
+pub extern "C" fn corevm_intel_gpu_get_framebuffer(
+    handle: u64, out_ptr: *mut *const u8, out_len: *mut u32,
+) -> i32 {
+    if out_ptr.is_null() || out_len.is_null() { return -1; }
+    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
+    let gpu = match vm.intel_gpu_ref() { Some(g) => g, None => return -1 };
+    let (ptr, len) = gpu.framebuffer_ptr();
+    unsafe { *out_ptr = ptr; *out_len = len as u32; }
+    0
+}
+
+/// Get Intel GPU current display mode.
+#[no_mangle]
+pub extern "C" fn corevm_intel_gpu_get_mode(
+    handle: u64, out_width: *mut u32, out_height: *mut u32, out_bpp: *mut u8,
+) -> i32 {
+    if out_width.is_null() || out_height.is_null() || out_bpp.is_null() { return -1; }
+    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
+    let gpu = match vm.intel_gpu_ref() { Some(g) => g, None => return -1 };
+    let (w, h, bpp) = gpu.display_mode();
+    unsafe { *out_width = w; *out_height = h; *out_bpp = bpp as u8; }
+    0
+}
+
+/// Refresh Intel GPU framebuffer from VRAM.
+/// Call periodically (~60 Hz) to update the host display.
+#[no_mangle]
+pub extern "C" fn corevm_intel_gpu_refresh(handle: u64) -> i32 {
+    let vm = match get_vm(handle) { Some(v) => v, None => return -1 };
+    let gpu = match vm.intel_gpu() { Some(g) => g, None => return -1 };
+    gpu.refresh_framebuffer();
+    0
+}
+
+/// Check if the Intel GPU device is set up.
+#[no_mangle]
+pub extern "C" fn corevm_has_intel_gpu(handle: u64) -> i32 {
+    let vm = match get_vm(handle) { Some(v) => v, None => return 0 };
+    if vm.intel_gpu_ptr.is_null() { 0 } else { 1 }
+}
+
 // ── VirtIO-Net FFI ──
 
 /// Set up the VirtIO-Net device at PCI slot 00:08.0.

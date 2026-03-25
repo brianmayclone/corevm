@@ -46,6 +46,9 @@ pub struct VmRuntimeConfig {
     /// Process VirtIO Input events.
     pub virtio_input: bool,
 
+    /// Refresh Intel GPU framebuffer from VRAM periodically.
+    pub intel_gpu: bool,
+
     /// Enable diagnostic event emission (CPU state dumps, exit counts).
     pub diagnostics: bool,
 
@@ -67,6 +70,7 @@ impl Default for VmRuntimeConfig {
             net_enabled: false,
             virtio_gpu: false,
             virtio_input: false,
+            intel_gpu: false,
             diagnostics: false,
             #[cfg(target_os = "windows")]
             cancel_interval: Duration::from_millis(1),

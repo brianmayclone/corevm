@@ -12,6 +12,10 @@ pub enum GpuModel {
     /// Uses host Vulkan for rendering. Windows gets WHQL-signed drivers
     /// via Windows Update (viogpudo). PCI ID 1AF4:1050.
     VirtioGpu,
+    /// Intel HD Graphics 2000 (Sandy Bridge GT1) — native i915/igfx drivers
+    /// in Linux and Windows. No extra driver installation needed.
+    /// PCI ID 8086:0102.
+    IntelHD,
 }
 
 impl GpuModel {
@@ -20,6 +24,7 @@ impl GpuModel {
         match self {
             GpuModel::StdVga => "Standard VGA (Bochs VBE)",
             GpuModel::VirtioGpu => "VirtIO GPU (3D-accelerated)",
+            GpuModel::IntelHD => "Intel HD Graphics (native driver)",
         }
     }
 
@@ -27,6 +32,7 @@ impl GpuModel {
     pub const ALL: &'static [GpuModel] = &[
         GpuModel::StdVga,
         GpuModel::VirtioGpu,
+        GpuModel::IntelHD,
     ];
 }
 
