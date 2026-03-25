@@ -51,6 +51,8 @@ pub enum SidebarAction {
     ConfigureVm(String),
     /// Request to copy/clone a VM
     CopyVm(String),
+    /// A folder was clicked — show Exposé view for this folder
+    SelectFolder(usize),
 }
 
 pub struct SidebarLayout {
@@ -652,14 +654,94 @@ pub fn render_sidebar(
                 let folder_name = layout.folders[fi].name.clone();
                 let folder_expanded = layout.folders[fi].expanded;
 
-                let header_text = egui::RichText::new(format!("\u{1F4C1} {}", folder_name))
-                    .size(13.0)
-                    .color(theme::folder_header_text());
+                // Custom folder header: arrow (toggles expand) + label (selects folder / Exposé)
+                let row_height = 22.0;
+                let arrow_width = 18.0;
+                let full_width = ui.available_width();
+                let (header_rect, header_resp) = ui.allocate_exact_size(
+                    egui::vec2(full_width, row_height),
+                    egui::Sense::click(),
+                );
 
-                let header = egui::CollapsingHeader::new(header_text)
-                    .id_salt(format!("folder_{}", fi))
-                    .default_open(folder_expanded)
-                    .show(ui, |ui| {
+                // Hover highlight on the whole header row
+                if header_resp.hovered() {
+                    ui.painter().rect_filled(header_rect, egui::CornerRadius::same(4), theme::widget_bg_hovered());
+                }
+
+                // Arrow region (left part) — only clicking here toggles expand/collapse
+                let arrow_rect = egui::Rect::from_min_size(
+                    header_rect.min,
+                    egui::vec2(arrow_width, row_height),
+                );
+                let arrow_resp = ui.allocate_rect(arrow_rect, egui::Sense::click());
+                if arrow_resp.clicked() {
+                    layout.folders[fi].expanded = !layout.folders[fi].expanded;
+                }
+
+                // Draw the arrow
+                let arrow_char = if folder_expanded { "\u{25BE}" } else { "\u{25B8}" }; // ▾ or ▸
+                ui.painter().text(
+                    arrow_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    arrow_char,
+                    egui::FontId::proportional(11.0),
+                    theme::text_secondary(),
+                );
+
+                // Folder icon + name (right of arrow) — clicking here selects folder (Exposé)
+                let label_rect = egui::Rect::from_min_max(
+                    egui::pos2(header_rect.min.x + arrow_width, header_rect.min.y),
+                    header_rect.max,
+                );
+                let label_resp = ui.allocate_rect(label_rect, egui::Sense::click());
+
+                ui.painter().text(
+                    egui::pos2(label_rect.min.x + 2.0, label_rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    format!("\u{1F4C1} {}", folder_name),
+                    egui::FontId::proportional(13.0),
+                    theme::folder_header_text(),
+                );
+
+                // Click on folder label → select folder (Exposé view)
+                if label_resp.clicked() {
+                    *selected = None;
+                    actions.push(SidebarAction::SelectFolder(fi));
+                }
+
+                // Context menu on the whole header
+                header_resp.context_menu(|ui| {
+                    ui.label(egui::RichText::new(&folder_name).strong());
+                    ui.separator();
+                    if ui.button("\u{270F} Rename").clicked() {
+                        sidebar_state.rename_folder_idx = Some(fi);
+                        sidebar_state.rename_buffer = folder_name.clone();
+                        ui.close_menu();
+                    }
+                    if num_folders > 1 {
+                        if ui.button("\u{1F5D1} Delete Folder").clicked() {
+                            actions.push(SidebarAction::DeleteFolder(fi));
+                            ui.close_menu();
+                        }
+                    }
+                });
+
+                // Drop target: if dragging a VM over this folder header
+                if sidebar_state.dragging_vm.is_some() {
+                    if header_resp.hovered() && ui.input(|i| i.pointer.any_released()) {
+                        if let Some(vm_uuid) = sidebar_state.dragging_vm.take() {
+                            actions.push(SidebarAction::MoveVm {
+                                vm_uuid,
+                                target_folder: Some(fi),
+                            });
+                        }
+                    }
+                }
+
+                // Folder contents (only when expanded)
+                if folder_expanded {
+                    // Indent the contents slightly
+                    ui.indent(format!("folder_content_{}", fi), |ui| {
                         let vm_uuids: Vec<String> = layout.folders[fi].vm_uuids.clone();
                         for (vi, uuid) in vm_uuids.iter().enumerate() {
                             render_vm_entry(
@@ -674,38 +756,6 @@ pub fn render_sidebar(
                             );
                         }
                     });
-
-                layout.folders[fi].expanded = header.fully_open();
-
-                // Folder context menu on the header
-                header.header_response.context_menu(|ui| {
-                    ui.label(egui::RichText::new(&folder_name).strong());
-                    ui.separator();
-                    if ui.button("\u{270F} Rename").clicked() {
-                        sidebar_state.rename_folder_idx = Some(fi);
-                        sidebar_state.rename_buffer = folder_name.clone();
-                        ui.close_menu();
-                    }
-                    // Don't allow deleting the last folder
-                    if num_folders > 1 {
-                        if ui.button("\u{1F5D1} Delete Folder").clicked() {
-                            actions.push(SidebarAction::DeleteFolder(fi));
-                            ui.close_menu();
-                        }
-                    }
-                });
-
-                // Drop target: if dragging a VM over this folder header
-                if sidebar_state.dragging_vm.is_some() {
-                    let drop_resp = header.header_response.clone();
-                    if drop_resp.hovered() && ui.input(|i| i.pointer.any_released()) {
-                        if let Some(vm_uuid) = sidebar_state.dragging_vm.take() {
-                            actions.push(SidebarAction::MoveVm {
-                                vm_uuid,
-                                target_folder: Some(fi),
-                            });
-                        }
-                    }
                 }
             }
 

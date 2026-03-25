@@ -12,6 +12,7 @@ use crate::engine::input;
 use crate::engine::platform;
 use crate::engine::diagnostics::{DiagLog, DiagnosticsWindow};
 use crate::ui::dialogs::settings::SettingsDialog;
+use crate::ui::components::expose::{self, ExposeAction, ExposeState, ExposeTile};
 use crate::ui::components::sidebar::{self, SidebarAction, SidebarLayout, SidebarState, VmState};
 use crate::ui::components::statusbar::{self, VmMetrics};
 use crate::ui::theme;
@@ -627,6 +628,7 @@ pub struct CoreVmApp {
     pub vms: Vec<VmEntry>,
     pub layout: SidebarLayout,
     pub selected_vm: Option<String>,  // UUID
+    pub selected_folder: Option<usize>, // folder index for Exposé view
     pub display: DisplayWidget,
     pub settings_dialog: Option<SettingsDialog>,
     pub create_vm_dialog: Option<CreateVmDialog>,
@@ -642,6 +644,7 @@ pub struct CoreVmApp {
     pub file_browser: Option<FileBrowserDialog>,
     pub file_pick_target: Option<FilePickTarget>,
     pub sidebar_state: SidebarState,
+    pub expose_state: ExposeState,
     pub display_focused: bool,
     pub last_key_label: Option<String>,
     pub last_key_time: std::time::Instant,
@@ -684,6 +687,7 @@ impl CoreVmApp {
             vms,
             layout,
             selected_vm: None,
+            selected_folder: None,
             display: DisplayWidget::new(),
             settings_dialog: None,
             create_vm_dialog: None,
@@ -699,6 +703,7 @@ impl CoreVmApp {
             file_browser: None,
             file_pick_target: None,
             sidebar_state: SidebarState::default(),
+            expose_state: ExposeState::default(),
             display_focused: false,
             last_key_label: None,
             last_key_time: std::time::Instant::now(),
@@ -1378,6 +1383,11 @@ impl eframe::App for CoreVmApp {
             Vec::new()
         };
 
+        // When a VM is selected (via sidebar click), clear folder selection
+        if self.selected_vm.is_some() {
+            self.selected_folder = None;
+        }
+
         // Handle sidebar actions
         for action in sidebar_actions {
             match action {
@@ -1445,6 +1455,10 @@ impl eframe::App for CoreVmApp {
                     if let Some(vm) = self.find_vm(&uuid) {
                         self.copy_vm_dialog = Some(CopyVmDialog::new(&vm.config));
                     }
+                }
+                SidebarAction::SelectFolder(idx) => {
+                    self.selected_vm = None;
+                    self.selected_folder = Some(idx);
                 }
                 SidebarAction::DeleteVm(uuid) => {
                     // Only allow deleting stopped VMs
@@ -1515,6 +1529,33 @@ impl eframe::App for CoreVmApp {
                             render_summary(ui, vm, os_icon, &mut deferred_action);
                         }
                     }
+                }
+            } else if let Some(folder_idx) = self.selected_folder {
+                // Exposé view — show all VMs in the selected folder as a thumbnail grid
+                self.display_focused = false;
+                let folder_name = self.layout.folders.get(folder_idx)
+                    .map(|f| f.name.clone())
+                    .unwrap_or_default();
+                let vm_uuids: Vec<String> = self.layout.folders.get(folder_idx)
+                    .map(|f| f.vm_uuids.clone())
+                    .unwrap_or_default();
+                let vm_icons = self.vm_icons();
+                let tiles: Vec<ExposeTile> = vm_uuids.iter().filter_map(|uuid| {
+                    let vm = self.find_vm(uuid)?;
+                    Some(ExposeTile {
+                        uuid: uuid.clone(),
+                        name: vm.config.name.clone(),
+                        state: vm.state,
+                        framebuffer: vm.framebuffer.clone(),
+                        os_icon: vm_icons.get(uuid).copied(),
+                    })
+                }).collect();
+                let expose_action = expose::render_expose(
+                    ui, ctx, &folder_name, &tiles, &mut self.expose_state,
+                );
+                if let Some(ExposeAction::SelectVm(uuid)) = expose_action {
+                    self.selected_vm = Some(uuid);
+                    self.selected_folder = None;
                 }
             } else {
                 self.display_focused = false;
