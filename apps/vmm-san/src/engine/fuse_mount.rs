@@ -717,6 +717,7 @@ impl Filesystem for CoreSanFS {
             ).ok();
 
             if let Some(fid) = file_id {
+                db.execute("DELETE FROM integrity_log WHERE file_id = ?1", rusqlite::params![fid]).ok();
                 db.execute("DELETE FROM file_replicas WHERE file_id = ?1", rusqlite::params![fid]).ok();
                 db.execute("DELETE FROM write_log WHERE file_id = ?1", rusqlite::params![fid]).ok();
             }
