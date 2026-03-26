@@ -3,6 +3,7 @@
 use std::sync::Mutex;
 use dashmap::DashMap;
 use rusqlite::Connection;
+use serde::Serialize;
 use crate::config::CoreSanConfig;
 use crate::engine::push_replicator::WriteSender;
 
@@ -24,6 +25,18 @@ pub enum PeerStatus {
     Offline,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub enum QuorumStatus {
+    /// All peers reachable, full read/write
+    Active,
+    /// Quorum met but some peers unreachable, full read/write
+    Degraded,
+    /// No quorum, no witness — new leases denied, effectively read-only
+    Fenced,
+    /// No peers configured — no quorum required, full read/write
+    Solo,
+}
+
 /// Central CoreSAN state — shared across all request handlers and engine tasks.
 pub struct CoreSanState {
     /// In-memory peer connections indexed by node_id.
@@ -40,4 +53,8 @@ pub struct CoreSanState {
     pub started_at: std::time::Instant,
     /// Channel to push write events for immediate replication to peers.
     pub write_tx: WriteSender,
+    /// Current quorum status — checked on every write.
+    pub quorum_status: std::sync::RwLock<QuorumStatus>,
+    /// Whether this node is the elected leader (lowest node_id among active nodes).
+    pub is_leader: std::sync::atomic::AtomicBool,
 }

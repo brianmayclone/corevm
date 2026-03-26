@@ -134,6 +134,12 @@ async fn main() {
     // The receiver will be consumed by the push replicator task.
     let (write_tx, write_rx) = tokio::sync::mpsc::unbounded_channel();
 
+    let initial_quorum = if peers.is_empty() {
+        crate::state::QuorumStatus::Solo
+    } else {
+        crate::state::QuorumStatus::Active
+    };
+
     let state = Arc::new(CoreSanState {
         peers,
         db: Mutex::new(conn),
@@ -142,6 +148,8 @@ async fn main() {
         hostname,
         started_at: std::time::Instant::now(),
         write_tx,
+        quorum_status: std::sync::RwLock::new(initial_quorum),
+        is_leader: std::sync::atomic::AtomicBool::new(false),
     });
 
     // ── Start background engines ────────────────────────────────────
