@@ -12,6 +12,7 @@ mod api;
 mod services;
 mod engine;
 mod node_client;
+mod san_client;
 mod ws;
 
 use std::sync::{Arc, Mutex};
@@ -107,6 +108,7 @@ async fn main() {
         config,
         started_at: std::time::Instant::now(),
         discovery: discovery_store.clone(),
+        san_health: std::sync::RwLock::new(serde_json::json!({"hosts": []})),
     });
 
     // ── Start background engines ────────────────────────────────────
@@ -120,6 +122,9 @@ async fn main() {
 
     engine::notifier::spawn(Arc::clone(&state));
     tracing::info!("Notification worker started");
+
+    engine::san_health::spawn(Arc::clone(&state));
+    tracing::info!("SAN health monitor started (30s interval)");
 
     // ── Build router ────────────────────────────────────────────────
     let api_router = api::router()

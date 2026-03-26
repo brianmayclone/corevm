@@ -68,6 +68,13 @@ async fn poll_all_nodes(state: &Arc<ClusterState>) {
                     // Sync CoreSAN status into hosts table (auto-discovery)
                     match &status.san {
                         Some(san) if san.running => {
+                            // Check if this is a newly discovered SAN host (was not enabled before)
+                            let was_san_enabled: bool = db.query_row(
+                                "SELECT san_enabled FROM hosts WHERE id = ?1",
+                                rusqlite::params![&node_id],
+                                |row| row.get::<_, i64>(0),
+                            ).map(|v| v == 1).unwrap_or(false);
+
                             let _ = db.execute(
                                 "UPDATE hosts SET san_enabled = 1, san_node_id = ?1,
                                     san_address = ?2, san_volumes = ?3, san_peers = ?4
@@ -78,6 +85,66 @@ async fn poll_all_nodes(state: &Arc<ClusterState>) {
                                     &node_id
                                 ],
                             );
+
+                            // Auto peer registration: if new SAN host or has no peers yet,
+                            // register it with all other SAN hosts
+                            if !was_san_enabled || san.peer_count == 0 {
+                                let other_san_hosts: Vec<(String, String, String)> = {
+                                    let mut stmt = db.prepare(
+                                        "SELECT san_node_id, san_address, hostname FROM hosts
+                                         WHERE san_enabled = 1 AND san_address != '' AND id != ?1"
+                                    ).unwrap();
+                                    stmt.query_map(rusqlite::params![&node_id], |row| {
+                                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                                    }).unwrap().filter_map(|r| r.ok()).collect()
+                                };
+
+                                if !other_san_hosts.is_empty() {
+                                    let new_san_addr = san.address.clone();
+                                    let new_san_node_id = san.node_id.clone();
+                                    let new_hostname = node.hostname.clone();
+                                    let new_node_id = node_id.clone();
+                                    tokio::spawn(async move {
+                                        let client = crate::san_client::SanClient::new(&new_san_addr);
+                                        for (other_node_id, other_addr, other_hostname) in &other_san_hosts {
+                                            // Register the new host on the existing host
+                                            let other_client = crate::san_client::SanClient::new(other_addr);
+                                            let join_body = serde_json::json!({
+                                                "address": new_san_addr,
+                                                "node_id": new_san_node_id,
+                                                "hostname": new_hostname,
+                                            });
+                                            if let Err(e) = other_client.join_peer(&join_body).await {
+                                                tracing::warn!("Auto-peer: failed to register {} on {}: {}",
+                                                    new_hostname, other_hostname, e);
+                                            } else {
+                                                tracing::info!("Auto-peer: registered {} on {}",
+                                                    new_hostname, other_hostname);
+                                            }
+
+                                            // Register the existing host on the new host
+                                            let reverse_body = serde_json::json!({
+                                                "address": other_addr,
+                                                "node_id": other_node_id,
+                                                "hostname": other_hostname,
+                                            });
+                                            if let Err(e) = client.join_peer(&reverse_body).await {
+                                                tracing::warn!("Auto-peer: failed to register {} on {}: {}",
+                                                    other_hostname, new_hostname, e);
+                                            } else {
+                                                tracing::info!("Auto-peer: registered {} on {}",
+                                                    other_hostname, new_hostname);
+                                            }
+                                        }
+                                        tracing::info!("Auto-peer registration complete for {} ({}) with {} peers",
+                                            new_hostname, new_node_id, other_san_hosts.len());
+                                    });
+
+                                    EventService::log(&db, "info", "san",
+                                        &format!("CoreSAN peer auto-registered: {}", node.hostname),
+                                        Some("host"), Some(&node_id), Some(&node_id));
+                                }
+                            }
 
                             // Also update vsan-type datastores with volume capacity
                             for vol in &san.volumes {

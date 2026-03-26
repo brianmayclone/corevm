@@ -22,6 +22,7 @@ pub mod cluster_settings;
 pub mod network;
 pub mod storage_wizard;
 pub mod discovery;
+pub mod san;
 
 pub fn router() -> Router<Arc<ClusterState>> {
     Router::new()
@@ -136,6 +137,21 @@ pub fn router() -> Router<Arc<ClusterState>> {
         .route("/api/discovery/nodes", get(discovery::list_nodes))
         .route("/api/discovery/servers", get(discovery::unmanaged_servers))
         .route("/api/discovery/san", get(discovery::san_nodes))
+
+        // ── CoreSAN (proxied to vmm-san hosts) ───────
+        .route("/api/san/status", get(san::status))
+        .route("/api/san/health", get(san::health))
+        .route("/api/san/volumes", get(san::list_volumes).post(san::create_volume))
+        .route("/api/san/volumes/{id}", get(san::get_volume).put(san::update_volume).delete(san::delete_volume))
+        .route("/api/san/volumes/{id}/backends", get(san::list_backends).post(san::add_backend))
+        .route("/api/san/volumes/{vid}/backends/{bid}", delete(san::remove_backend))
+        .route("/api/san/peers", get(san::list_peers))
+        .route("/api/san/disks", get(san::list_disks))
+        .route("/api/san/disks/claim", post(san::claim_disk))
+        .route("/api/san/disks/release", post(san::release_disk))
+        .route("/api/san/disks/reset", post(san::reset_disk))
+        .route("/api/san/benchmark", get(san::benchmark_matrix))
+        .route("/api/san/benchmark/run", post(san::run_benchmark))
 
         // ── WebSocket ───────────────────────────────────
         .route("/ws/console/{vm_id}", get(crate::ws::console_bridge::handler))

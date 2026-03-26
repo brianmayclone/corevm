@@ -100,45 +100,49 @@ export default function StorageCoresan() {
   const [addHostBackendPath, setAddHostBackendPath] = useState('/vmm/san-data')
   const [addHostError, setAddHostError] = useState('')
 
-  // In cluster mode, use san_address from hosts (known via heartbeat).
-  // In standalone mode, derive from current browser location.
+  // In cluster mode, all SAN operations go through the cluster proxy (/api/san/*).
+  // In standalone mode, talk directly to the local vmm-san instance.
   const localSanBase = `${window.location.protocol}//${window.location.hostname}:7443`
+  const sanApi = (path: string) => isCluster ? `/api/san${path}` : `${localSanBase}${path}`
+  // SAN-enabled hosts (for host selection in dialogs)
   const sanHosts = isCluster ? hosts.filter(h => h.san_enabled && h.san_address) : []
-  // Primary SAN endpoint: first cluster host or local fallback
-  const sanBase = sanHosts[0]?.san_address || localSanBase
-  const sanApi = (path: string) => `${sanBase}${path}`
+
+  /** Fetch wrapper that adds JWT auth when going through the cluster proxy. */
+  const sanFetch = (url: string, init?: RequestInit) => {
+    if (isCluster) {
+      const token = localStorage.getItem('vmm_token')
+      const headers = new Headers(init?.headers)
+      if (token) headers.set('Authorization', `Bearer ${token}`)
+      return fetch(url, { ...init, headers })
+    }
+    return fetch(url, init)
+  }
 
   const refresh = async () => {
     if (isCluster) fetchHosts()
     try {
       const [sRes, vRes, pRes] = await Promise.all([
-        fetch(sanApi('/api/status')),
-        fetch(sanApi('/api/volumes')),
-        fetch(sanApi('/api/peers')),
+        sanFetch(sanApi('/api/status')),
+        sanFetch(sanApi('/api/volumes')),
+        sanFetch(sanApi('/api/peers')),
       ])
       if (!sRes.ok) { setSanAvailable(false); setLoading(false); return }
       setSanAvailable(true)
-      setStatus(await sRes.json())
+      // In cluster mode, /api/san/status returns an array of host statuses
+      const statusData = await sRes.json()
+      if (isCluster && Array.isArray(statusData)) {
+        // Use the first host's status as the "primary" status display
+        setStatus(statusData[0] || null)
+      } else {
+        setStatus(statusData)
+      }
       const vols: CoreSanVolume[] = await vRes.json()
       setVolumes(vols)
       setPeers(await pRes.json())
       if (vols.length > 0 && !selectedVolume) setSelectedVolume(vols[0].id)
 
-      // Load disks from ALL SAN hosts (cluster) or local (standalone)
-      if (isCluster && sanHosts.length > 0) {
-        const diskResults = await Promise.all(
-          sanHosts.map(async (h) => {
-            try {
-              const res = await fetch(`${h.san_address}/api/disks`)
-              const hostDisks: DiscoveredDisk[] = await res.json()
-              return hostDisks.map(d => ({ ...d, _host_id: h.id, _host_name: h.hostname, _san_address: h.san_address }))
-            } catch { return [] }
-          })
-        )
-        setDisks(diskResults.flat())
-      } else {
-        fetch(sanApi('/api/disks')).then(r => r.json()).then(setDisks).catch(() => setDisks([]))
-      }
+      // Disks: in cluster mode, /api/san/disks already aggregates from all hosts
+      sanFetch(sanApi('/api/disks')).then(r => r.json()).then(setDisks).catch(() => setDisks([]))
 
       setLoading(false)
     } catch {
@@ -147,17 +151,17 @@ export default function StorageCoresan() {
     }
   }
 
-  useEffect(() => { refresh() }, [sanBase, sanHosts.length])
+  useEffect(() => { refresh() }, [isCluster, sanHosts.length])
 
   useEffect(() => {
     if (!selectedVolume) return
-    fetch(sanApi(`/api/volumes/${selectedVolume}/backends`))
+    sanFetch(sanApi(`/api/volumes/${selectedVolume}/backends`))
       .then(r => r.json()).then(setBackends).catch(() => setBackends([]))
   }, [selectedVolume])
 
   useEffect(() => {
     if (!sanAvailable) return
-    fetch(sanApi('/api/benchmark/matrix'))
+    sanFetch(sanApi('/api/benchmark/matrix'))
       .then(r => r.json()).then(setBenchmarkMatrix).catch(() => {})
   }, [sanAvailable])
 
@@ -173,7 +177,7 @@ export default function StorageCoresan() {
     }
 
     // 1. Create volume
-    const resp = await fetch(sanApi('/api/volumes'), {
+    const resp = await sanFetch(sanApi('/api/volumes'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -192,41 +196,17 @@ export default function StorageCoresan() {
     // Auto backend path: /vmm/san-data/<volume-name>
     const backendPath = `/vmm/san-data/${newVolName}`
 
-    // 2. Add local backend automatically
-    await fetch(sanApi(`/api/volumes/${volumeId}/backends`), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: backendPath }),
-    })
-
-    // 3. Add backends on selected remote hosts + register as peers
+    // 2. Add backends on all selected hosts (cluster routes to correct host)
+    // In cluster mode, the first SAN host gets a backend automatically via the volume create.
+    // Add backends on additional selected hosts.
     for (const hostId of newVolSelectedHosts) {
-      const host = hosts.find(h => h.id === hostId)
-      if (!host) continue
-      const hostSanAddr = host.san_address || host.address.replace(/:8443/, ':7443')
-
-      // Add backend on remote
-      await fetch(`${hostSanAddr}/api/volumes/${volumeId}/backends`, {
+      await sanFetch(sanApi(`/api/volumes/${volumeId}/backends`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: backendPath }),
+        body: JSON.stringify({ host_id: hostId, path: backendPath }),
       }).catch(() => {})
-
-      // Peer registration (bidirectional)
-      if (status) {
-        const remoteStatus = await fetch(`${hostSanAddr}/api/status`).then(r => r.json()).catch(() => null)
-        if (remoteStatus) {
-          await fetch(sanApi('/api/peers/join'), {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ address: hostSanAddr, node_id: remoteStatus.node_id, hostname: remoteStatus.hostname }),
-          }).catch(() => {})
-          await fetch(`${hostSanAddr}/api/peers/join`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ address: sanBase, node_id: status.node_id, hostname: status.hostname }),
-          }).catch(() => {})
-        }
-      }
     }
+    // Peer registration is handled automatically by the cluster heartbeat engine.
 
     setCreateVolumeOpen(false)
     setNewVolName('')
@@ -239,22 +219,15 @@ export default function StorageCoresan() {
     setAddHostError('')
     if (!addHostId || !selectedVolume || !sel) return
 
-    // Find host address from cluster hosts
-    const host = hosts.find(h => h.id === addHostId)
-    if (!host) { setAddHostError('Host not found'); return }
-
-    // Derive the CoreSAN API address from the vmm-server address (replace port 8443 with 7443)
-    const sanAddr = host.san_address || host.address.replace(/:8443/, ':7443').replace(/:443/, ':7443')
-
-    // Auto backend path based on volume name
     const backendPath = `/vmm/san-data/${sel.name}`
 
     try {
-      // 1. Add backend on the remote CoreSAN instance (directory is auto-created)
-      const backendResp = await fetch(`${sanAddr}/api/volumes/${selectedVolume}/backends`, {
+      // Add backend on the selected host — cluster routes to the correct SAN host.
+      // Peer registration is handled automatically by the cluster heartbeat engine.
+      const backendResp = await sanFetch(sanApi(`/api/volumes/${selectedVolume}/backends`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: backendPath }),
+        body: JSON.stringify({ host_id: addHostId, path: backendPath }),
       })
 
       if (!backendResp.ok) {
@@ -263,34 +236,10 @@ export default function StorageCoresan() {
         return
       }
 
-      // 3. Register as peer (bidirectional)
-      const remoteStatus = await fetch(`${sanAddr}/api/status`).then(r => r.json()).catch(() => null)
-      if (remoteStatus && status) {
-        // Register remote on local
-        await fetch(sanApi('/api/peers/join'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            address: sanAddr, node_id: remoteStatus.node_id,
-            hostname: remoteStatus.hostname,
-          }),
-        })
-        // Register local on remote
-        await fetch(`${sanAddr}/api/peers/join`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            address: sanBase, node_id: status.node_id,
-            hostname: status.hostname,
-          }),
-        })
-      }
-
       setAddHostOpen(false)
       setAddHostId('')
       refresh()
-      // Reload backends
-      fetch(sanApi(`/api/volumes/${selectedVolume}/backends`))
+      sanFetch(sanApi(`/api/volumes/${selectedVolume}/backends`))
         .then(r => r.json()).then(setBackends).catch(() => {})
     } catch (e: any) {
       setAddHostError(e.message || 'Failed to add host')
@@ -299,7 +248,7 @@ export default function StorageCoresan() {
 
   const handleDeleteVolume = async () => {
     if (!deleteVolume) return
-    await fetch(sanApi(`/api/volumes/${deleteVolume.id}`), { method: 'DELETE' })
+    await sanFetch(sanApi(`/api/volumes/${deleteVolume.id}`), { method: 'DELETE' })
     setDeleteVolume(null)
     if (selectedVolume === deleteVolume.id) setSelectedVolume('')
     refresh()
@@ -307,23 +256,27 @@ export default function StorageCoresan() {
 
   const handleDeleteBackend = async () => {
     if (!deleteBackend) return
-    await fetch(sanApi(`/api/volumes/${selectedVolume}/backends/${deleteBackend.id}`), { method: 'DELETE' })
+    await sanFetch(sanApi(`/api/volumes/${selectedVolume}/backends/${deleteBackend.id}`), {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host_id: (deleteBackend as any)._host_id || '' }),
+    })
     setDeleteBackend(null)
-    fetch(sanApi(`/api/volumes/${selectedVolume}/backends`))
+    sanFetch(sanApi(`/api/volumes/${selectedVolume}/backends`))
       .then(r => r.json()).then(setBackends).catch(() => {})
     refresh()
   }
 
   const handleRunBenchmark = async () => {
-    await fetch(sanApi('/api/benchmark/run'), { method: 'POST' })
+    await sanFetch(sanApi('/api/benchmark/run'), { method: 'POST' })
     setTimeout(() => {
-      fetch(sanApi('/api/benchmark/matrix'))
+      sanFetch(sanApi('/api/benchmark/matrix'))
         .then(r => r.json()).then(setBenchmarkMatrix).catch(() => {})
     }, 3000)
   }
 
   /** Unique key for a disk across hosts. */
-  const diskKey = (d: DiscoveredDisk) => d._san_address ? `${d._san_address}:${d.path}` : d.path
+  const diskKey = (d: DiscoveredDisk) => d._host_id ? `${d._host_id}:${d.path}` : d.path
 
   const openAutoClaim = () => {
     // Pre-select all empty (available) disks, leave has_data unchecked
@@ -333,10 +286,6 @@ export default function StorageCoresan() {
     setAutoClaimError('')
     setAutoClaimOpen(true)
   }
-
-  /** Resolve SAN API endpoint for a disk (routes to correct host in cluster mode). */
-  const diskSanUrl = (disk: DiscoveredDisk, path: string) =>
-    disk._san_address ? `${disk._san_address}${path}` : sanApi(path)
 
   const handleAutoClaim = async () => {
     if (autoClaimSelected.size === 0) return
@@ -350,10 +299,11 @@ export default function StorageCoresan() {
     for (const key of keys) {
       const disk = disks.find(d => diskKey(d) === key)
       if (!disk) { fail++; continue }
-      const resp = await fetch(diskSanUrl(disk, '/api/disks/claim'), {
+      const resp = await sanFetch(sanApi('/api/disks/claim'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          host_id: disk._host_id || '',
           device_path: disk.path,
           confirm_format: true,
         }),
@@ -373,12 +323,12 @@ export default function StorageCoresan() {
   const handleClaimDisk = async () => {
     setClaimError('')
     if (!claimDisk || !claimVolumeId) return
-    const resp = await fetch(diskSanUrl(claimDisk, '/api/disks/claim'), {
+    const resp = await sanFetch(sanApi('/api/disks/claim'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        host_id: claimDisk._host_id || '',
         device_path: claimDisk.path,
-        volume_id: claimVolumeId,
         confirm_format: claimConfirm || claimDisk.status === 'available',
       }),
     })
@@ -393,10 +343,10 @@ export default function StorageCoresan() {
 
   const handleResetDisk = async () => {
     if (!resetDisk) return
-    const resp = await fetch(diskSanUrl(resetDisk, '/api/disks/reset'), {
+    const resp = await sanFetch(sanApi('/api/disks/reset'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ device_path: resetDisk.path }),
+      body: JSON.stringify({ host_id: resetDisk._host_id || '', device_path: resetDisk.path }),
     })
     if (!resp.ok) {
       alert(await resp.text() || 'Reset failed')
@@ -407,10 +357,10 @@ export default function StorageCoresan() {
 
   const handleReleaseDisk = async (disk: DiscoveredDisk) => {
     if (!confirm('Release this disk? Data will be drained to other backends.')) return
-    await fetch(diskSanUrl(disk, '/api/disks/release'), {
+    await sanFetch(sanApi('/api/disks/release'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ device_path: disk.path, wipe: false }),
+      body: JSON.stringify({ host_id: disk._host_id || '', device_path: disk.path }),
     })
     refresh()
   }
@@ -544,7 +494,7 @@ export default function StorageCoresan() {
               </thead>
               <tbody>
                 {disks.map(d => (
-                  <tr key={`${d._san_address || ''}:${d.path}`} className="border-b border-vmm-border/50">
+                  <tr key={diskKey(d)} className="border-b border-vmm-border/50">
                     {isCluster && <td className="py-2 px-2 text-vmm-text-dim text-xs">{d._host_name || '—'}</td>}
                     <td className="py-2 px-2 text-vmm-text font-mono flex items-center gap-2">
                       <Disc size={13} className={d.status === 'claimed' ? 'text-vmm-accent' : d.status === 'os_disk' ? 'text-vmm-danger' : 'text-vmm-text-muted'} />
@@ -893,7 +843,7 @@ export default function StorageCoresan() {
               </div>
 
               {/* Other cluster hosts with CoreSAN */}
-              {sanHosts.filter(h => h.san_node_id !== status?.node_id).map(h => {
+              {sanHosts.filter(h => h.san_node_id && h.san_node_id !== status?.node_id).map(h => {
                 const checked = newVolSelectedHosts.includes(h.id)
                 return (
                   <label key={h.id} className={`flex items-center gap-3 p-2.5 rounded-lg border cursor-pointer transition-colors
@@ -1071,7 +1021,7 @@ export default function StorageCoresan() {
               const unclaimedDisks = disks.filter(d => d.status !== 'claimed')
               const groups: Record<string, { label: string; disks: DiscoveredDisk[] }> = {}
               for (const d of unclaimedDisks) {
-                const groupKey = d._san_address || '__local__'
+                const groupKey = d._host_id || '__local__'
                 if (!groups[groupKey]) {
                   groups[groupKey] = {
                     label: d._host_name || status?.hostname || 'This node',
