@@ -89,14 +89,19 @@ return Fenced
 
 1. Query all SAN-enabled hosts and their last heartbeat status
 2. Partition nodes into "reachable from cluster" and "unreachable from cluster"
-3. If the requesting node is in the reachable set AND has more (or equal) reachable peers than the other partition: `{"allowed": true}`
-4. Otherwise: `{"allowed": false}`
+3. If the requesting node is in the reachable set AND has strictly more reachable peers than any other partition: `{"allowed": true}`
+4. If tied (symmetric partition, e.g. 2-2 split): the partition containing the node with the **lowest `node_id`** (lexicographic) wins. `{"allowed": true}` only for that side.
+5. Otherwise: `{"allowed": false}`
 
 **Edge case — total partition (cluster sees no SAN nodes):** Returns `{"allowed": false}` for all. Both nodes fenced. Safe.
+
+**Edge case — 3+ partitions (e.g. 5 nodes split 2-2-1):** Each requesting node is evaluated against all others the witness can see. Only the largest reachable group gets `allowed: true`. If multiple groups are same size, lowest `node_id` tiebreaker applies.
 
 **Edge case — witness unreachable:** Node treats this as "no witness confirmation" → Fenced (if no quorum by majority alone).
 
 **Timeout:** 3 seconds. Must not block the heartbeat cycle.
+
+**Configuration:** SAN nodes discover the witness URL via `witness_url` in `CoreSanConfig` (from `/etc/vmm/vmm-san.toml`). If empty, witness is not used (pure majority quorum only). vmm-cluster auto-peer registration (heartbeat.rs) can push the witness URL to SAN nodes.
 
 ### 4. Soft Fence Mechanism
 
@@ -104,7 +109,7 @@ When quorum status transitions to `Fenced`:
 
 | Component | Behavior |
 |-----------|----------|
-| `acquire_lease()` | Returns `Denied` immediately with reason `"node is fenced"` |
+| `acquire_lease()` | Returns `Denied` immediately with reason `"node is fenced"`. **This applies to both new acquisitions AND renewals** — a lease holder that becomes fenced cannot renew. |
 | Existing leases | Run out naturally (max 30s). No active kill. |
 | FUSE writes | `EACCES` (lease acquisition fails) |
 | FUSE reads | Continue working (local data) |
@@ -123,6 +128,8 @@ When quorum status recovers to `Active` or `Degraded`:
 
 **Key property:** Since fenced nodes do not write, there are no diverged files after recovery. No conflict resolution needed.
 
+**In-flight write race:** A FUSE write that has already passed the lease check but is mid-write when quorum flips to Fenced will complete. This is acceptable — it is a single write in a ~10s hysteresis window, and the ownership ticks ensure it can be identified if needed. The next write attempt will be denied.
+
 ### 5. Leader Election (Bully Algorithm)
 
 **Purpose:** Coordinate repair decisions and membership changes. Not involved in write path.
@@ -133,6 +140,8 @@ When quorum status recovers to `Active` or `Degraded`:
 - No election messages needed — deterministic from peer status
 - Leader status included in heartbeat: `"is_leader": true/false`
 - If leader goes offline, next-lowest node_id automatically becomes leader
+
+**Split-leader scenario:** During a partial partition, two nodes may temporarily compute different leaders (each based on its local view of peer status). This is acceptable because the leader's only responsibility is repair coordination, and repair is idempotent — two nodes repairing the same chunk simultaneously wastes bandwidth but does not corrupt data.
 
 **Leader responsibilities:**
 - **Repair coordination:** Only the leader runs the repair engine. Other nodes skip repair cycles.
@@ -153,7 +162,7 @@ New fields added to prepare for future quorum-write sync mode. The fencing syste
 | Column | Type | Default | Description |
 |--------|------|---------|-------------|
 | `ownership_epoch` | INTEGER | 0 | Incremented when write_owner changes to a different node. Stays same on renewal. |
-| `ownership_tick` | INTEGER | 0 | Incremented on every write. Monotonically increasing per file. |
+| `ownership_tick` | INTEGER | 0 | Incremented on every write (including partial/offset writes). Monotonically increasing per file. |
 
 **New columns in `write_log`:**
 
@@ -170,6 +179,8 @@ New fields added to prepare for future quorum-write sync mode. The fencing syste
 - Same `ownership_epoch` → no conflict, normal sync
 - Different `ownership_epoch` + different `ownership_tick` → higher tick wins (last-writer-wins)
 - Same tick → lower `node_id` wins (deterministic tiebreaker)
+
+**Note on partial writes:** For FUSE offset writes, the tick increments per write syscall, not per "meaningful change." A file with tick 5000 is not necessarily "more complete" than one with tick 100 — it may have received many small writes. The tick is a logical clock for ordering, not a measure of completeness. For true conflict resolution, the `sha256` checksum and `version` fields provide content-level comparison.
 
 ### 7. Volume Sync-Mode Policy (Data Model Only)
 
@@ -212,7 +223,7 @@ ALTER TABLE volumes ADD COLUMN sync_mode TEXT NOT NULL DEFAULT 'async';
 | `vmm-san/src/state.rs` | Add `quorum_status: RwLock<QuorumStatus>`, `is_leader: AtomicBool`, `QuorumStatus` enum |
 | `vmm-san/src/db/mod.rs` | Add migrations for new columns |
 | `vmm-san/src/engine/peer_monitor.rs` | Add quorum calculation after heartbeat cycle, leader determination, witness call |
-| `vmm-san/src/engine/write_lease.rs` | Check `quorum_status` in `acquire_lease()`, increment `ownership_epoch`/`ownership_tick` in `atomic_write()` |
+| `vmm-san/src/engine/write_lease.rs` | Check `quorum_status` in `acquire_lease()` (both Acquired and Renewed paths), increment `ownership_epoch`/`ownership_tick` in `atomic_write()` |
 | `vmm-san/src/engine/fuse_mount.rs` | No change needed (already calls `acquire_lease()` which will deny when fenced) |
 | `vmm-san/src/engine/repair.rs` | Skip cycle if not leader |
 | `vmm-san/src/engine/replication.rs` | Skip cycle if fenced |
@@ -240,7 +251,7 @@ All state transitions are logged via the existing event/tracing system:
 
 | Event | Severity | Message |
 |-------|----------|---------|
-| Quorum → Fenced | `error` | `"Node fenced: no quorum (reachable {}/{}), witness denied"` |
+| Any → Fenced | `error` | `"Node fenced: no quorum (reachable {}/{}), witness denied"` |
 | Fenced → Active | `info` | `"Node recovered from fenced state"` |
 | Active → Degraded | `warning` | `"Quorum degraded: {n} of {total} peers unreachable"` |
 | Degraded → Active | `info` | `"All peers reachable, quorum fully healthy"` |
