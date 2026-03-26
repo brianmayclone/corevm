@@ -16,18 +16,22 @@ import Select from '../components/Select'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { formatBytes } from '../utils/format'
 
-type ResilienceMode = 'none' | 'mirror' | 'erasure'
-
-const resilienceLabels: Record<ResilienceMode, string> = {
-  none: 'No Protection',
-  mirror: 'Mirror (RAID-1)',
-  erasure: 'Erasure Coding (RAID-5/6)',
+const fttLabels: Record<number, string> = {
+  0: 'FTT=0 (No Protection)',
+  1: 'FTT=1 (1 Failure)',
+  2: 'FTT=2 (2 Failures)',
 }
 
-const resilienceColors: Record<ResilienceMode, string> = {
-  none: 'bg-vmm-warning/20 text-vmm-warning border-vmm-warning/30',
-  mirror: 'bg-vmm-success/20 text-vmm-success border-vmm-success/30',
-  erasure: 'bg-vmm-accent/20 text-vmm-accent border-vmm-accent/30',
+const fttColors: Record<number, string> = {
+  0: 'bg-vmm-warning/20 text-vmm-warning border-vmm-warning/30',
+  1: 'bg-vmm-success/20 text-vmm-success border-vmm-success/30',
+  2: 'bg-vmm-accent/20 text-vmm-accent border-vmm-accent/30',
+}
+
+const raidLabels: Record<string, string> = {
+  stripe: 'Stripe (RAID-0)',
+  mirror: 'Mirror (RAID-1)',
+  stripe_mirror: 'Stripe+Mirror (RAID-10)',
 }
 
 const statusColors: Record<string, string> = {
@@ -77,9 +81,8 @@ export default function StorageCoresan() {
 
   // Create volume form
   const [newVolName, setNewVolName] = useState('')
-  const [newVolMode, setNewVolMode] = useState<ResilienceMode>('mirror')
-  const [newVolReplicas, setNewVolReplicas] = useState(2)
-  const [newVolSync, setNewVolSync] = useState('async')
+  const [newVolFtt, setNewVolFtt] = useState(1)
+  const [newVolRaid, setNewVolRaid] = useState('stripe')
   const [newVolBackendPath, setNewVolBackendPath] = useState('/vmm/san-data')
   const [newVolSelectedHosts, setNewVolSelectedHosts] = useState<string[]>([])
   const [newVolError, setNewVolError] = useState('')
@@ -133,10 +136,10 @@ export default function StorageCoresan() {
     setNewVolError('')
 
     // Validate host selection
-    const requiredHosts = newVolMode === 'none' ? 1 : newVolReplicas
+    const requiredHosts = newVolFtt + 1
     const selectedCount = newVolSelectedHosts.length + 1 // +1 for local node
     if (selectedCount < requiredHosts) {
-      setNewVolError(`Mirror with ${newVolReplicas}x replicas needs at least ${requiredHosts} hosts. Select ${requiredHosts - 1} more.`)
+      setNewVolError(`FTT=${newVolFtt} needs at least ${requiredHosts} hosts. Select ${requiredHosts - 1} more.`)
       return
     }
 
@@ -146,9 +149,8 @@ export default function StorageCoresan() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         name: newVolName,
-        resilience_mode: newVolMode,
-        replica_count: newVolMode === 'none' ? 1 : newVolReplicas,
-        sync_mode: newVolSync,
+        ftt: newVolFtt,
+        local_raid: newVolRaid,
       }),
     })
     if (!resp.ok) {
@@ -588,8 +590,8 @@ export default function StorageCoresan() {
           ) : volumes.map(vol => {
             const volUsed = vol.total_bytes - vol.free_bytes
             const volPct = vol.total_bytes > 0 ? (volUsed / vol.total_bytes) * 100 : 0
-            const effectiveCapacity = vol.resilience_mode === 'none' ? vol.total_bytes : Math.floor(vol.total_bytes / vol.replica_count)
-            const needsWarning = vol.resilience_mode === 'mirror' && vol.backend_count === 0
+            const effectiveCapacity = vol.ftt === 0 ? vol.total_bytes : Math.floor(vol.total_bytes / (vol.ftt + 1))
+            const needsWarning = vol.backend_count === 0
             return (
               <Card key={vol.id} className={`cursor-pointer transition-all ${selectedVolume === vol.id ? 'ring-1 ring-vmm-accent' : 'hover:border-vmm-accent/30'}`}
                 padding={false}>
@@ -598,7 +600,7 @@ export default function StorageCoresan() {
                     <span className="text-sm font-bold text-vmm-text">{vol.name}</span>
                     <div className="flex items-center gap-1.5">
                       <Badge label={vol.status} color={statusColors[vol.status] || statusColors.offline} />
-                      <Badge label={vol.resilience_mode} color={resilienceColors[vol.resilience_mode as ResilienceMode] || resilienceColors.none} />
+                      <Badge label={`FTT=${vol.ftt}`} color={fttColors[vol.ftt] || fttColors[0]} />
                     </div>
                   </div>
                   {needsWarning ? (
@@ -635,18 +637,18 @@ export default function StorageCoresan() {
                 </div>
 
                 {/* Warning for mirror volumes without enough nodes/backends */}
-                {sel.resilience_mode === 'mirror' && totalNodes < sel.replica_count && (
+                {sel.ftt > 0 && totalNodes < (sel.ftt + 1) && (
                   <div className="flex items-center gap-2 p-3 mb-4 rounded-lg bg-vmm-warning/10 border border-vmm-warning/30 text-sm text-vmm-warning">
                     <AlertTriangle size={16} />
-                    This volume requires {sel.replica_count} nodes for full redundancy, but only {totalNodes} node{totalNodes !== 1 ? 's are' : ' is'} available.
+                    FTT={sel.ftt} requires {sel.ftt + 1} nodes, but only {totalNodes} available.
                     {isCluster ? ' Add more cluster hosts to CoreSAN.' : ' Add more peers.'}
                   </div>
                 )}
 
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <SpecRow label="Resilience" value={resilienceLabels[sel.resilience_mode as ResilienceMode] || sel.resilience_mode} icon={<Shield size={14} />} />
-                  <SpecRow label="Replicas" value={`${sel.replica_count}x`} />
-                  <SpecRow label="Sync Mode" value={sel.sync_mode === 'sync' ? 'Synchronous' : 'Asynchronous'} icon={<Zap size={14} />} />
+                  <SpecRow label="FTT" value={fttLabels[sel.ftt] || `FTT=${sel.ftt}`} icon={<Shield size={14} />} />
+                  <SpecRow label="Local RAID" value={raidLabels[sel.local_raid] || sel.local_raid} />
+                  <SpecRow label="Chunk Size" value={`${sel.chunk_size_bytes / (1024 * 1024)} MB`} icon={<Zap size={14} />} />
                   <SpecRow label="Backends" value={`${sel.backend_count}`} icon={<HardDrive size={14} />} />
                 </div>
               </Card>
@@ -774,36 +776,25 @@ export default function StorageCoresan() {
           <FormField label="Volume Name">
             <TextInput value={newVolName} onChange={(e) => setNewVolName(e.target.value)} placeholder="e.g. pool-a" />
           </FormField>
-          <FormField label="Resilience Mode">
-            <Select value={newVolMode} onChange={(e) => {
-              const v = e.target.value
-              setNewVolMode(v as ResilienceMode)
-              if (v === 'none') setNewVolReplicas(1)
-              else if (newVolReplicas < 2) setNewVolReplicas(2)
-            }} options={[
-              { value: 'none', label: 'No Protection (RAID-0) — 1 copy, maximum space' },
-              { value: 'mirror', label: 'Mirror (RAID-1) — N copies, maximum safety' },
+          <FormField label="Failures To Tolerate (FTT)">
+            <Select value={String(newVolFtt)} onChange={(e) => setNewVolFtt(Number(e.target.value))} options={[
+              { value: '0', label: 'FTT=0 — No protection (data on 1 host only)' },
+              { value: '1', label: 'FTT=1 — Tolerates 1 host failure (2 copies)' },
+              { value: '2', label: 'FTT=2 — Tolerates 2 host failures (3 copies)' },
             ]} />
           </FormField>
-          {newVolMode === 'mirror' && (
-            <FormField label="Replica Count">
-              <Select value={String(newVolReplicas)} onChange={(e) => setNewVolReplicas(Number(e.target.value))} options={[
-                { value: '2', label: '2 copies — tolerates 1 node failure' },
-                { value: '3', label: '3 copies — tolerates 2 node failures' },
-              ]} />
-            </FormField>
-          )}
-          <FormField label="Sync Mode">
-            <Select value={newVolSync} onChange={(e) => setNewVolSync(e.target.value)} options={[
-              { value: 'async', label: 'Asynchronous — fast writes, background replication' },
-              { value: 'sync', label: 'Synchronous — wait for all replicas (slower, safer)' },
+          <FormField label="Local RAID (per host)">
+            <Select value={newVolRaid} onChange={(e) => setNewVolRaid(e.target.value)} options={[
+              { value: 'stripe', label: 'Stripe (RAID-0) — chunks distributed across local disks' },
+              { value: 'mirror', label: 'Mirror (RAID-1) — every chunk on every local disk' },
+              { value: 'stripe_mirror', label: 'Stripe+Mirror (RAID-10) — striped with local mirror' },
             ]} />
           </FormField>
 
           {/* Host Selection */}
           <div>
             <label className="block text-[11px] font-semibold tracking-widest text-vmm-text-muted uppercase mb-2">
-              Hosts ({1 + newVolSelectedHosts.length} selected — {newVolMode === 'mirror' ? `${newVolReplicas} required` : '1 required'})
+              Hosts ({1 + newVolSelectedHosts.length} selected — {newVolFtt + 1} required for FTT={newVolFtt})
             </label>
 
             {/* This node (always included) */}
@@ -839,10 +830,10 @@ export default function StorageCoresan() {
                 </p>
               )}
 
-              {sanHosts.length <= 1 && peers.length === 0 && newVolMode === 'mirror' && (
+              {newVolFtt > 0 && (1 + newVolSelectedHosts.length) < (newVolFtt + 1) && (
                 <div className="flex items-center gap-2 p-2.5 rounded-lg bg-vmm-warning/10 border border-vmm-warning/30 text-xs text-vmm-warning">
                   <AlertTriangle size={14} />
-                  Mirror requires {newVolReplicas} hosts but only this node has CoreSAN. Add more hosts first.
+                  FTT={newVolFtt} requires {newVolFtt + 1} hosts. Select {newVolFtt - newVolSelectedHosts.length} more.
                 </div>
               )}
             </div>
@@ -855,7 +846,7 @@ export default function StorageCoresan() {
           <div className="flex justify-end gap-2 pt-2">
             <Button variant="ghost" onClick={() => { setCreateVolumeOpen(false); setNewVolError('') }}>Cancel</Button>
             <Button variant="primary" onClick={handleCreateVolume}
-              disabled={!newVolName.trim() || (newVolMode === 'mirror' && (1 + newVolSelectedHosts.length) < newVolReplicas)}>
+              disabled={!newVolName.trim() || (newVolFtt > 0 && (1 + newVolSelectedHosts.length) < (newVolFtt + 1))}>
               Create Volume
             </Button>
           </div>

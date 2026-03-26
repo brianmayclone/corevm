@@ -145,7 +145,7 @@ pub async fn dashboard(
 
 fn query_volume_summaries(db: &rusqlite::Connection) -> Vec<VolumeStatusSummary> {
     let mut stmt = db.prepare(
-        "SELECT v.id, v.name, v.resilience_mode, v.replica_count, v.status,
+        "SELECT v.id, v.name, v.ftt, v.local_raid, v.chunk_size_bytes, v.status,
                 COALESCE(SUM(b.total_bytes), 0) AS total_bytes,
                 COALESCE(SUM(b.free_bytes), 0) AS free_bytes,
                 COUNT(b.id) AS backend_count
@@ -156,18 +156,15 @@ fn query_volume_summaries(db: &rusqlite::Connection) -> Vec<VolumeStatusSummary>
 
     let volumes: Vec<VolumeStatusSummary> = stmt.query_map([], |row| {
         let vol_id: String = row.get(0)?;
-        Ok((vol_id, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?,
-            row.get(5)?, row.get(6)?, row.get::<_, u32>(7)?))
-    }).unwrap().filter_map(|r| r.ok()).map(|(vol_id, name, mode, replica, status, total, free, bcount)| {
-        let (synced, syncing) = query_file_sync_counts(db, &vol_id);
-        let (ftt, local_raid, chunk_size) = query_volume_raid_info(db, &vol_id);
+        let ftt: u32 = row.get(2)?;
+        Ok((vol_id, row.get(1)?, ftt, row.get::<_, String>(3)?, row.get::<_, u64>(4)?,
+            row.get::<_, String>(5)?, row.get::<_, u64>(6)?, row.get::<_, u64>(7)?, row.get::<_, u32>(8)?))
+    }).unwrap().filter_map(|r| r.ok()).map(|(vol_id, name, ftt, local_raid, chunk_size, status, total, free, bcount)| {
         let (total_chunks, synced_chunks, stale_chunks) = query_chunk_counts(db, &vol_id);
         let (protected_files, degraded_files) = query_protection_counts(db, &vol_id, ftt);
         VolumeStatusSummary {
             volume_id: vol_id,
             volume_name: name,
-            resilience_mode: mode,
-            replica_count: replica,
             ftt,
             local_raid,
             chunk_size_bytes: chunk_size,
@@ -175,8 +172,6 @@ fn query_volume_summaries(db: &rusqlite::Connection) -> Vec<VolumeStatusSummary>
             free_bytes: free,
             status,
             backend_count: bcount,
-            files_synced: synced,
-            files_syncing: syncing,
             total_chunks,
             synced_chunks,
             stale_chunks,

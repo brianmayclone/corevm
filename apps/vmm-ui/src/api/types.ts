@@ -396,16 +396,12 @@ export interface Alarm {
 
 // ── CoreSAN (Software-Defined Storage) ──────────────────────────────────
 
-export type ResilienceMode = 'none' | 'mirror' | 'erasure'
-export type SyncMode = 'sync' | 'async'
-
 export interface CoreSanVolume {
   id: string
   name: string
-  resilience_mode: ResilienceMode
-  replica_count: number
-  stripe_width: number
-  sync_mode: SyncMode
+  ftt: number
+  local_raid: 'stripe' | 'mirror' | 'stripe_mirror'
+  chunk_size_bytes: number
   status: 'creating' | 'online' | 'degraded' | 'offline'
   total_bytes: number
   free_bytes: number
@@ -446,14 +442,18 @@ export interface CoreSanStatus {
 export interface CoreSanVolumeStatus {
   volume_id: string
   volume_name: string
-  resilience_mode: string
-  replica_count: number
+  ftt: number
+  local_raid: string
+  chunk_size_bytes: number
   total_bytes: number
   free_bytes: number
   status: string
   backend_count: number
-  files_synced: number
-  files_syncing: number
+  total_chunks: number
+  synced_chunks: number
+  stale_chunks: number
+  protected_files: number
+  degraded_files: number
 }
 
 export interface CoreSanBenchmarkSummary {
