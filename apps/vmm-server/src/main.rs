@@ -12,6 +12,7 @@ mod api;
 mod vm;
 mod ws;
 mod agent;
+mod discovery;
 
 use std::sync::{Arc, Mutex};
 use tower_http::cors::CorsLayer;
@@ -247,6 +248,9 @@ async fn main() {
             std::process::exit(1);
         });
     tracing::info!("Listening on http://{}", bind);
+
+    // Start UDP discovery beacon
+    discovery::spawn(Arc::clone(&state));
 
     // Periodic database backup task (every 30 minutes)
     {

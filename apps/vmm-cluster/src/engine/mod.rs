@@ -11,3 +11,4 @@ pub mod scheduler;
 pub mod notifier;
 pub mod sdn;
 pub mod reconciler;
+pub mod discovery;

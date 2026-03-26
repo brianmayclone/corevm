@@ -488,3 +488,18 @@ export interface CoreSanFile {
   replica_count: number
   synced_count: number
 }
+
+// ── Network Discovery ───────────────────────────────────────────────────
+
+export interface DiscoveredNode {
+  service: 'vmm-server' | 'vmm-san'
+  hostname: string
+  address: string
+  version: string
+  managed: boolean
+  cluster_id: string
+  san_node_id: string
+  san_volumes: number
+  last_seen: string
+  age_secs: number
+}

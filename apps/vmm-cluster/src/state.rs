@@ -3,10 +3,11 @@
 //! Unlike vmm-server which manages local VMs, the cluster state
 //! holds the authoritative view of ALL VMs, hosts, and datastores.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use dashmap::DashMap;
 use rusqlite::Connection;
 use crate::config::ClusterConfig;
+use crate::engine::discovery::DiscoveryStore;
 
 /// Live node connection info, kept in memory alongside the DB record.
 #[derive(Debug, Clone)]
@@ -40,4 +41,6 @@ pub struct ClusterState {
     pub jwt_secret: String,
     /// Server start time for uptime tracking.
     pub started_at: std::time::Instant,
+    /// UDP discovery — auto-discovered nodes on the network.
+    pub discovery: Arc<DiscoveryStore>,
 }

@@ -296,3 +296,35 @@ pub struct CoreSanBenchmarkSummary {
     pub worst_peer: Option<String>,
     pub measured_at: String,
 }
+
+// ── UDP Network Discovery ───────────────────────────────────────────────
+
+/// Magic header for discovery packets: "CVMD" (CoreVM Discovery).
+pub const DISCOVERY_MAGIC: &[u8; 4] = b"CVMD";
+
+/// Default UDP port for discovery broadcasts.
+pub const DISCOVERY_PORT: u16 = 7445;
+
+/// Discovery beacon sent periodically by vmm-server and vmm-san via UDP broadcast.
+/// Allows vmm-cluster to auto-discover unmanaged nodes on the network.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DiscoveryBeacon {
+    /// Service type: "vmm-server" or "vmm-san"
+    pub service: String,
+    /// Hostname of the sending node
+    pub hostname: String,
+    /// HTTP API address (e.g. "http://192.168.1.10:8443")
+    pub address: String,
+    /// Version string
+    pub version: String,
+    /// true if this node is already managed by a cluster
+    pub managed: bool,
+    /// Cluster ID if managed (empty if free)
+    pub cluster_id: String,
+    /// For vmm-san: the CoreSAN node UUID
+    pub san_node_id: String,
+    /// For vmm-san: number of volumes
+    pub san_volumes: u32,
+    /// Timestamp (UTC ISO 8601)
+    pub timestamp: String,
+}

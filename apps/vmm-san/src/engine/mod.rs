@@ -14,3 +14,4 @@ pub mod fuse_mount;
 pub mod backend_refresh;
 pub mod write_lease;
 pub mod push_replicator;
+pub mod discovery;

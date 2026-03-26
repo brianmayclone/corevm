@@ -169,6 +169,9 @@ async fn main() {
     engine::fuse_mount::spawn_all(Arc::clone(&state));
     tracing::info!("FUSE mounts started");
 
+    engine::discovery::spawn(Arc::clone(&state));
+    tracing::info!("Discovery beacon started");
+
     // ── Build router ────────────────────────────────────────────────
     let app = api::router()
         .layer(CorsLayer::permissive())

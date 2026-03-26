@@ -21,6 +21,7 @@ pub mod notifications;
 pub mod cluster_settings;
 pub mod network;
 pub mod storage_wizard;
+pub mod discovery;
 
 pub fn router() -> Router<Arc<ClusterState>> {
     Router::new()
@@ -130,6 +131,11 @@ pub fn router() -> Router<Arc<ClusterState>> {
         .route("/api/ldap", get(cluster_settings::list_ldap).post(cluster_settings::create_ldap))
         .route("/api/ldap/{id}", put(cluster_settings::update_ldap).delete(cluster_settings::delete_ldap))
         .route("/api/ldap/{id}/test", post(cluster_settings::test_ldap))
+
+        // ── Network Discovery ──────────────────────────
+        .route("/api/discovery/nodes", get(discovery::list_nodes))
+        .route("/api/discovery/servers", get(discovery::unmanaged_servers))
+        .route("/api/discovery/san", get(discovery::san_nodes))
 
         // ── WebSocket ───────────────────────────────────
         .route("/ws/console/{vm_id}", get(crate::ws::console_bridge::handler))

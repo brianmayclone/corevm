@@ -98,15 +98,20 @@ async fn main() {
     let bind = config.server.bind.clone();
     let port = config.server.port;
 
+    let discovery_store = std::sync::Arc::new(engine::discovery::DiscoveryStore::new());
+
     let state = Arc::new(ClusterState {
         nodes,
         db: Mutex::new(conn),
         jwt_secret,
         config,
         started_at: std::time::Instant::now(),
+        discovery: discovery_store.clone(),
     });
 
     // ── Start background engines ────────────────────────────────────
+    engine::discovery::spawn(discovery_store);
+
     engine::heartbeat::spawn(Arc::clone(&state));
     tracing::info!("Heartbeat monitor started (10s interval)");
 
