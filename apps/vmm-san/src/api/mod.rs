@@ -44,6 +44,9 @@ pub fn router() -> Router<Arc<CoreSanState>> {
         // ── File Operations ───────────────────────────────
         .route("/api/volumes/{id}/files", get(files::list))
         .route("/api/volumes/{id}/files/{*path}", get(files::read).put(files::write).delete(files::delete))
+        .route("/api/volumes/{id}/mkdir", post(files::mkdir))
+        .route("/api/volumes/{id}/browse/{*path}", get(files::browse))
+        .route("/api/volumes/{id}/browse", get(files::browse_root))
 
         // ── Benchmark ─────────────────────────────────────
         .route("/api/benchmark/results", get(benchmark::results))

@@ -176,3 +176,122 @@ pub async fn delete(
 
     Ok(Json(serde_json::json!({ "success": true })))
 }
+
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+pub struct MkdirRequest {
+    pub path: String,
+}
+
+/// POST /api/volumes/{id}/mkdir — create a directory inside a volume.
+pub async fn mkdir(
+    State(state): State<Arc<CoreSanState>>,
+    Path(volume_id): Path<String>,
+    Json(body): Json<MkdirRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Create the directory on all local backends
+    let backends: Vec<String> = {
+        let db = state.db.lock().unwrap();
+        let mut stmt = db.prepare(
+            "SELECT path FROM backends WHERE node_id = ?1 AND status = 'online'"
+        ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+        let result = stmt.query_map(rusqlite::params![&state.node_id], |row| row.get(0))
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?
+            .filter_map(|r| r.ok()).collect();
+        result
+    };
+
+    for bp in &backends {
+        let dir = std::path::Path::new(bp)
+            .join(".coresan").join(&volume_id).join(&body.path);
+        std::fs::create_dir_all(&dir).ok();
+    }
+
+    tracing::info!("Created directory {}/{}", volume_id, body.path);
+
+    Ok(Json(serde_json::json!({ "success": true, "path": body.path })))
+}
+
+/// GET /api/volumes/{id}/browse/{*path} — list directory contents inside a volume.
+pub async fn browse(
+    State(state): State<Arc<CoreSanState>>,
+    Path((volume_id, dir_path)): Path<(String, String)>,
+) -> Result<Json<Vec<BrowseEntry>>, (StatusCode, String)> {
+    let db = state.db.lock().unwrap();
+
+    // List files in file_map that are direct children of dir_path
+    let prefix = if dir_path.is_empty() || dir_path == "/" {
+        String::new()
+    } else {
+        format!("{}/", dir_path.trim_end_matches('/'))
+    };
+
+    let pattern = format!("{}%", prefix);
+
+    let mut stmt = db.prepare(
+        "SELECT rel_path, size_bytes, updated_at FROM file_map
+         WHERE volume_id = ?1 AND rel_path LIKE ?2"
+    ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+
+    let all_paths: Vec<(String, u64, String)> = stmt.query_map(
+        rusqlite::params![&volume_id, &pattern],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?
+     .filter_map(|r| r.ok()).collect();
+
+    let mut entries = Vec::new();
+    let mut seen_dirs = std::collections::HashSet::new();
+
+    for (path, size, updated) in all_paths {
+        let suffix = if prefix.is_empty() {
+            path.as_str()
+        } else {
+            match path.strip_prefix(&prefix) {
+                Some(s) => s,
+                None => continue,
+            }
+        };
+
+        if let Some(slash) = suffix.find('/') {
+            let dir_name = &suffix[..slash];
+            if seen_dirs.insert(dir_name.to_string()) {
+                entries.push(BrowseEntry {
+                    name: dir_name.to_string(),
+                    is_dir: true,
+                    size_bytes: 0,
+                    updated_at: String::new(),
+                });
+            }
+        } else if !suffix.is_empty() {
+            entries.push(BrowseEntry {
+                name: suffix.to_string(),
+                is_dir: false,
+                size_bytes: size,
+                updated_at: updated,
+            });
+        }
+    }
+
+    entries.sort_by(|a, b| {
+        b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name))
+    });
+
+    Ok(Json(entries))
+}
+
+#[derive(Serialize)]
+pub struct BrowseEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size_bytes: u64,
+    pub updated_at: String,
+}
+
+/// GET /api/volumes/{id}/browse — browse root directory of a volume.
+pub async fn browse_root(
+    State(state): State<Arc<CoreSanState>>,
+    Path(volume_id): Path<String>,
+) -> Result<Json<Vec<BrowseEntry>>, (StatusCode, String)> {
+    browse(State(state), Path((volume_id, String::new()))).await
+}
