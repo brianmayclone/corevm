@@ -11,15 +11,17 @@ const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS volumes (
     id              TEXT PRIMARY KEY,
     name            TEXT NOT NULL UNIQUE,
-    -- Resilience policy (Software-Defined RAID)
-    resilience_mode TEXT NOT NULL DEFAULT 'mirror',  -- 'none', 'mirror', 'erasure'
-    replica_count   INTEGER NOT NULL DEFAULT 2,       -- copies (for mirror mode)
-    -- none:    1 copy, no protection (RAID-0 like, performance mode)
-    -- mirror:  N copies on different nodes (RAID-1/10 like)
-    -- erasure: data+parity chunks (RAID-5/6 like, future Phase 2)
-    stripe_width    INTEGER NOT NULL DEFAULT 0,       -- 0=no striping, >0=stripe across N backends
-    sync_mode       TEXT NOT NULL DEFAULT 'async',    -- 'sync' or 'async'
-    status          TEXT NOT NULL DEFAULT 'creating',  -- creating, online, degraded, offline
+    -- Legacy fields (kept for migration compatibility)
+    resilience_mode TEXT NOT NULL DEFAULT 'mirror',
+    replica_count   INTEGER NOT NULL DEFAULT 2,
+    stripe_width    INTEGER NOT NULL DEFAULT 0,
+    sync_mode       TEXT NOT NULL DEFAULT 'async',
+    -- FTT-based resilience (new model)
+    ftt             INTEGER NOT NULL DEFAULT 1,       -- Failures To Tolerate: 0, 1, 2
+    chunk_size_bytes INTEGER NOT NULL DEFAULT 67108864, -- 64MB default
+    local_raid      TEXT NOT NULL DEFAULT 'stripe',   -- stripe, mirror, stripe_mirror
+    -- Status
+    status          TEXT NOT NULL DEFAULT 'creating',
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -62,17 +64,49 @@ CREATE TABLE IF NOT EXISTS peers (
 CREATE TABLE IF NOT EXISTS file_map (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     volume_id       TEXT NOT NULL REFERENCES volumes(id) ON DELETE CASCADE,
-    rel_path        TEXT NOT NULL,              -- path relative to volume root, e.g. "my-vm/disk.raw"
+    rel_path        TEXT NOT NULL,
     size_bytes      INTEGER NOT NULL DEFAULT 0,
     sha256          TEXT NOT NULL DEFAULT '',
-    -- Write ownership: which node currently holds the write lease
-    write_owner     TEXT NOT NULL DEFAULT '',    -- node_id of current writer, '' = no owner
-    write_lease_until TEXT NOT NULL DEFAULT '',  -- ISO timestamp when lease expires
-    -- Monotonic version counter — incremented on every write, used for conflict detection
+    -- Write ownership
+    write_owner     TEXT NOT NULL DEFAULT '',
+    write_lease_until TEXT NOT NULL DEFAULT '',
+    -- Version tracking
     version         INTEGER NOT NULL DEFAULT 0,
+    -- Chunk tracking
+    chunk_count     INTEGER NOT NULL DEFAULT 0,
+    protection_status TEXT NOT NULL DEFAULT 'unprotected', -- protected, degraded, unprotected
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(volume_id, rel_path)
+);
+
+-- ═══════════════════════════════════════════════════════════════
+-- FILE_CHUNKS: individual chunks of a file, distributed across backends
+-- Each file is split into fixed-size chunks (default 64MB)
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS file_chunks (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id         INTEGER NOT NULL REFERENCES file_map(id) ON DELETE CASCADE,
+    chunk_index     INTEGER NOT NULL,           -- 0, 1, 2, ...
+    offset_bytes    INTEGER NOT NULL,           -- byte offset in the file
+    size_bytes      INTEGER NOT NULL,           -- actual size (last chunk may be smaller)
+    sha256          TEXT NOT NULL DEFAULT '',    -- per-chunk checksum
+    UNIQUE(file_id, chunk_index)
+);
+
+-- ═══════════════════════════════════════════════════════════════
+-- CHUNK_REPLICAS: where each chunk physically lives
+-- Tracks both local disk placement and cross-node replication
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS chunk_replicas (
+    chunk_id        INTEGER NOT NULL REFERENCES file_chunks(id) ON DELETE CASCADE,
+    backend_id      TEXT NOT NULL REFERENCES backends(id) ON DELETE CASCADE,
+    node_id         TEXT NOT NULL,              -- which host holds this replica
+    state           TEXT NOT NULL DEFAULT 'syncing', -- syncing, synced, stale, error
+    synced_at       TEXT,
+    PRIMARY KEY (chunk_id, backend_id)
 );
 
 -- ═══════════════════════════════════════════════════════════════
@@ -169,6 +203,10 @@ CREATE INDEX IF NOT EXISTS idx_benchmark_nodes ON benchmark_results(from_node_id
 CREATE INDEX IF NOT EXISTS idx_write_log_seq ON write_log(seq);
 CREATE INDEX IF NOT EXISTS idx_write_log_volume ON write_log(volume_id);
 CREATE INDEX IF NOT EXISTS idx_claimed_disks_status ON claimed_disks(status);
+CREATE INDEX IF NOT EXISTS idx_file_chunks_file ON file_chunks(file_id);
+CREATE INDEX IF NOT EXISTS idx_chunk_replicas_chunk ON chunk_replicas(chunk_id);
+CREATE INDEX IF NOT EXISTS idx_chunk_replicas_backend ON chunk_replicas(backend_id);
+CREATE INDEX IF NOT EXISTS idx_chunk_replicas_node ON chunk_replicas(node_id);
 "#;
 
 /// Initialize the database: create tables and indexes.
@@ -205,4 +243,11 @@ fn migrate(db: &Connection) {
     db.execute_batch(
         "ALTER TABLE backends ADD COLUMN claimed_disk_id TEXT NOT NULL DEFAULT '';"
     ).ok();
+    // FTT + chunk fields on volumes
+    db.execute_batch("ALTER TABLE volumes ADD COLUMN ftt INTEGER NOT NULL DEFAULT 1;").ok();
+    db.execute_batch("ALTER TABLE volumes ADD COLUMN chunk_size_bytes INTEGER NOT NULL DEFAULT 67108864;").ok();
+    db.execute_batch("ALTER TABLE volumes ADD COLUMN local_raid TEXT NOT NULL DEFAULT 'stripe';").ok();
+    // Chunk tracking on file_map
+    db.execute_batch("ALTER TABLE file_map ADD COLUMN chunk_count INTEGER NOT NULL DEFAULT 0;").ok();
+    db.execute_batch("ALTER TABLE file_map ADD COLUMN protection_status TEXT NOT NULL DEFAULT 'unprotected';").ok();
 }

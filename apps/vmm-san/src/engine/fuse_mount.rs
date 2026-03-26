@@ -97,6 +97,26 @@ impl CoreSanFS {
         CoreSanFS { state, volume_id, inodes, rt }
     }
 
+    /// Get file_id from file_map for a given rel_path.
+    fn get_file_id(&self, rel_path: &str) -> Option<i64> {
+        let db = self.state.db.lock().unwrap();
+        db.query_row(
+            "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
+            rusqlite::params![&self.volume_id, rel_path],
+            |row| row.get(0),
+        ).ok()
+    }
+
+    /// Get volume config (chunk_size, ftt, local_raid).
+    fn volume_config(&self) -> (u64, u32, String) {
+        let db = self.state.db.lock().unwrap();
+        db.query_row(
+            "SELECT chunk_size_bytes, ftt, local_raid FROM volumes WHERE id = ?1",
+            rusqlite::params![&self.volume_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap_or((crate::storage::chunk::DEFAULT_CHUNK_SIZE, 1, "stripe".into()))
+    }
+
     /// Find the local filesystem path for a file, or fetch from peer.
     /// Returns the path to the local file (possibly a cache copy fetched from a peer).
     fn resolve_file(&self, rel_path: &str) -> Option<PathBuf> {
@@ -472,25 +492,23 @@ impl Filesystem for CoreSanFS {
 
         tracing::debug!("FUSE read: '{}' offset={} size={}", entry.rel_path, offset, size);
 
-        match self.resolve_file(&entry.rel_path) {
-            Some(path) => {
-                use std::io::{Read as _, Seek, SeekFrom};
-                match std::fs::File::open(&path) {
-                    Ok(mut file) => {
-                        if file.seek(SeekFrom::Start(offset as u64)).is_err() {
-                            reply.data(&[]);
-                            return;
-                        }
-                        let mut buf = vec![0u8; size as usize];
-                        match file.read(&mut buf) {
-                            Ok(n) => reply.data(&buf[..n]),
-                            Err(_) => reply.error(libc::EIO),
-                        }
-                    }
-                    Err(_) => reply.error(libc::EIO),
-                }
+        let file_id = match self.get_file_id(&entry.rel_path) {
+            Some(id) => id,
+            None => { reply.data(&[]); return; }
+        };
+
+        let (chunk_size, _, _) = self.volume_config();
+        let db = self.state.db.lock().unwrap();
+
+        match crate::storage::chunk::read_chunk_data(
+            &db, file_id, offset as u64, size as u64,
+            &self.volume_id, &self.state.node_id, chunk_size,
+        ) {
+            Ok(data) => reply.data(&data),
+            Err(e) => {
+                tracing::warn!("FUSE read error: {}", e);
+                reply.error(libc::EIO);
             }
-            None => reply.error(libc::ENOENT),
         }
     }
 
@@ -511,52 +529,89 @@ impl Filesystem for CoreSanFS {
 
         tracing::debug!("FUSE write: '{}' offset={} len={}", entry.rel_path, offset, data.len());
 
-        // For existing files: write to the backend that already holds the file.
-        // For new files (no replica yet): pick best backend by free space.
-        let (backend_id, backend_path) = match self.backend_for_existing_file(&entry.rel_path) {
-            Some(b) => b,
-            None => match self.local_backend_for_write() {
-                Some(b) => b,
-                None => { reply.error(libc::ENOSPC); return; }
+        let (chunk_size, ftt, local_raid) = self.volume_config();
+
+        // Ensure file exists in file_map
+        let file_id = {
+            let db = self.state.db.lock().unwrap();
+
+            // Acquire/renew write lease
+            match crate::engine::write_lease::acquire_lease(
+                &db, &self.volume_id, &entry.rel_path, &self.state.node_id,
+            ) {
+                crate::engine::write_lease::LeaseResult::Acquired { .. } |
+                crate::engine::write_lease::LeaseResult::Renewed { .. } => {}
+                crate::engine::write_lease::LeaseResult::Denied { owner_node_id, .. } => {
+                    tracing::warn!("FUSE write denied: owned by {}", owner_node_id);
+                    reply.error(libc::EACCES);
+                    return;
+                }
+            }
+
+            match db.query_row(
+                "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
+                rusqlite::params![&self.volume_id, &entry.rel_path],
+                |row| row.get::<_, i64>(0),
+            ) {
+                Ok(id) => id,
+                Err(_) => {
+                    // Create file_map entry
+                    let now = chrono::Utc::now().to_rfc3339();
+                    db.execute(
+                        "INSERT INTO file_map (volume_id, rel_path, size_bytes, version, created_at, updated_at)
+                         VALUES (?1, ?2, 0, 1, ?3, ?3)",
+                        rusqlite::params![&self.volume_id, &entry.rel_path, &now],
+                    ).ok();
+                    db.query_row(
+                        "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
+                        rusqlite::params![&self.volume_id, &entry.rel_path],
+                        |row| row.get(0),
+                    ).unwrap_or(0)
+                }
             }
         };
 
-        // Atomic write with lease acquisition + write_log
-        let db = self.state.db.lock().unwrap();
-        match crate::engine::write_lease::atomic_write(
-            &db,
-            &self.volume_id,
-            &entry.rel_path,
-            &self.state.node_id,
-            &backend_id,
-            &backend_path,
-            data,
-            Some(offset),
-        ) {
-            Ok(new_version) => {
-                drop(db);
-
-                // Read the full content for push replication
-                let full_path = std::path::Path::new(&backend_path).join(&entry.rel_path);
-                if let Ok(content) = std::fs::read(&full_path) {
-                    // Push to peers immediately via channel (non-blocking)
-                    let _ = self.state.write_tx.send(crate::engine::push_replicator::WriteEvent {
-                        volume_id: self.volume_id.clone(),
-                        rel_path: entry.rel_path.clone(),
-                        version: new_version,
-                        data: std::sync::Arc::new(content),
-                        writer_node_id: self.state.node_id.clone(),
-                    });
-                }
-
-                reply.written(data.len() as u32);
-            }
-            Err(e) => {
-                drop(db);
-                tracing::warn!("FUSE write denied for {}/{}: {}", self.volume_id, entry.rel_path, e);
-                reply.error(libc::EACCES);
-            }
+        if file_id == 0 {
+            reply.error(libc::EIO);
+            return;
         }
+
+        // Write data via chunk manager
+        let changed_chunks = {
+            let db = self.state.db.lock().unwrap();
+            match crate::storage::chunk::write_chunk_data(
+                &db, file_id, offset as u64, data,
+                &self.volume_id, &self.state.node_id, chunk_size, &local_raid,
+            ) {
+                Ok(changed) => {
+                    // Increment version
+                    db.execute(
+                        "UPDATE file_map SET version = version + 1, updated_at = datetime('now')
+                         WHERE id = ?1",
+                        rusqlite::params![file_id],
+                    ).ok();
+                    changed
+                }
+                Err(e) => {
+                    tracing::warn!("FUSE write chunk error: {}", e);
+                    reply.error(libc::EIO);
+                    return;
+                }
+            }
+        };
+
+        // Push changed chunks to peers (non-blocking)
+        if !changed_chunks.is_empty() {
+            let _ = self.state.write_tx.send(crate::engine::push_replicator::WriteEvent {
+                volume_id: self.volume_id.clone(),
+                rel_path: entry.rel_path.clone(),
+                version: 0, // version tracked per-file, not critical here
+                data: std::sync::Arc::new(Vec::new()), // chunks are pushed individually
+                writer_node_id: self.state.node_id.clone(),
+            });
+        }
+
+        reply.written(data.len() as u32);
     }
 
     fn create(
@@ -577,52 +632,18 @@ impl Filesystem for CoreSanFS {
 
         tracing::info!("FUSE create: '{}'", rel_path);
 
-        let (backend_id, backend_path) = match self.local_backend_for_write() {
-            Some(b) => b,
-            None => { tracing::warn!("FUSE create: no backend for volume {}", self.volume_id); reply.error(libc::ENOSPC); return; }
-        };
-
-        let full_path = Path::new(&backend_path).join(&rel_path);
-        if let Some(parent_dir) = full_path.parent() {
-            std::fs::create_dir_all(parent_dir).ok();
-        }
-
-        tracing::debug!("FUSE create: writing to {}", full_path.display());
-
-        // Create empty file
-        if std::fs::write(&full_path, b"").is_err() {
-            reply.error(libc::EIO);
-            return;
-        }
-
-        // Register in DB
-        tracing::debug!("FUSE create: registering '{}' in file_map", rel_path);
+        // Register in file_map only — chunks are created on first write
         let now = chrono::Utc::now().to_rfc3339();
         let db = self.state.db.lock().unwrap();
-        match db.execute(
-            "INSERT OR IGNORE INTO file_map (volume_id, rel_path, size_bytes, sha256, created_at, updated_at)
-             VALUES (?1, ?2, 0, '', ?3, ?3)",
+        db.execute(
+            "INSERT OR IGNORE INTO file_map (volume_id, rel_path, size_bytes, version, created_at, updated_at)
+             VALUES (?1, ?2, 0, 0, ?3, ?3)",
             rusqlite::params![&self.volume_id, &rel_path, &now],
-        ) {
-            Ok(n) => tracing::debug!("FUSE create: file_map insert rows={}", n),
-            Err(e) => tracing::warn!("FUSE create: file_map insert failed: {}", e),
-        }
-
-        if let Ok(file_id) = db.query_row(
-            "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
-            rusqlite::params![&self.volume_id, &rel_path],
-            |row| row.get::<_, i64>(0),
-        ) {
-            db.execute(
-                "INSERT OR REPLACE INTO file_replicas (file_id, backend_id, state, synced_at)
-                 VALUES (?1, ?2, 'synced', ?3)",
-                rusqlite::params![file_id, &backend_id, &now],
-            ).ok();
-        }
+        ).ok();
         drop(db);
 
         let ino = self.inodes.lock().unwrap().get_or_create(&self.volume_id, &rel_path, false);
-        let attr = self.attr_from_path(ino, &full_path, false);
+        let attr = self.attr_from_db(ino, false);
         reply.created(&TTL, &attr, 0, 0, 0);
     }
 

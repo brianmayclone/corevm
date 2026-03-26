@@ -1,0 +1,17 @@
+[server]
+bind = "0.0.0.0"
+port = 8443
+
+[auth]
+jwt_secret = "dev-secret-change-in-production"
+session_timeout_hours = 24
+
+[storage]
+default_pool = "/tmp/vmm/images"
+iso_pool = "/tmp/vmm/isos"
+
+[vms]
+config_dir = "/tmp/vmm/vms"
+
+[logging]
+level = "info"

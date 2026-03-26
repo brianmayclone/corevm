@@ -24,14 +24,18 @@ pub struct StatusResponse {
 pub struct VolumeStatusSummary {
     pub volume_id: String,
     pub volume_name: String,
-    pub resilience_mode: String,
-    pub replica_count: u32,
+    pub ftt: u32,
+    pub local_raid: String,
+    pub chunk_size_bytes: u64,
     pub total_bytes: u64,
     pub free_bytes: u64,
     pub status: String,
     pub backend_count: u32,
-    pub files_synced: u64,
-    pub files_syncing: u64,
+    pub total_chunks: u64,
+    pub synced_chunks: u64,
+    pub stale_chunks: u64,
+    pub protected_files: u64,
+    pub degraded_files: u64,
 }
 
 #[derive(Serialize)]
@@ -156,17 +160,28 @@ fn query_volume_summaries(db: &rusqlite::Connection) -> Vec<VolumeStatusSummary>
             row.get(5)?, row.get(6)?, row.get::<_, u32>(7)?))
     }).unwrap().filter_map(|r| r.ok()).map(|(vol_id, name, mode, replica, status, total, free, bcount)| {
         let (synced, syncing) = query_file_sync_counts(db, &vol_id);
+        let (ftt, local_raid, chunk_size) = query_volume_raid_info(db, &vol_id);
+        let (total_chunks, synced_chunks, stale_chunks) = query_chunk_counts(db, &vol_id);
+        let (protected_files, degraded_files) = query_protection_counts(db, &vol_id, ftt);
         VolumeStatusSummary {
             volume_id: vol_id,
             volume_name: name,
             resilience_mode: mode,
             replica_count: replica,
+            ftt,
+            local_raid,
+            chunk_size_bytes: chunk_size,
             total_bytes: total,
             free_bytes: free,
             status,
             backend_count: bcount,
             files_synced: synced,
             files_syncing: syncing,
+            total_chunks,
+            synced_chunks,
+            stale_chunks,
+            protected_files,
+            degraded_files,
         }
     }).collect();
 
@@ -223,4 +238,58 @@ fn query_benchmark_summary(db: &rusqlite::Connection) -> Option<BenchmarkSummary
         worst_peer,
         measured_at,
     })
+}
+
+fn query_volume_raid_info(db: &rusqlite::Connection, volume_id: &str) -> (u32, String, u64) {
+    db.query_row(
+        "SELECT ftt, local_raid, chunk_size_bytes FROM volumes WHERE id = ?1",
+        rusqlite::params![volume_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).unwrap_or((1, "stripe".into(), 67108864))
+}
+
+fn query_chunk_counts(db: &rusqlite::Connection, volume_id: &str) -> (u64, u64, u64) {
+    let total: u64 = db.query_row(
+        "SELECT COUNT(*) FROM file_chunks fc JOIN file_map fm ON fm.id = fc.file_id WHERE fm.volume_id = ?1",
+        rusqlite::params![volume_id], |row| row.get(0),
+    ).unwrap_or(0);
+
+    let synced: u64 = db.query_row(
+        "SELECT COUNT(DISTINCT fc.id) FROM file_chunks fc
+         JOIN file_map fm ON fm.id = fc.file_id
+         JOIN chunk_replicas cr ON cr.chunk_id = fc.id
+         WHERE fm.volume_id = ?1 AND cr.state = 'synced'",
+        rusqlite::params![volume_id], |row| row.get(0),
+    ).unwrap_or(0);
+
+    let stale: u64 = db.query_row(
+        "SELECT COUNT(DISTINCT fc.id) FROM file_chunks fc
+         JOIN file_map fm ON fm.id = fc.file_id
+         JOIN chunk_replicas cr ON cr.chunk_id = fc.id
+         WHERE fm.volume_id = ?1 AND cr.state IN ('stale', 'syncing')",
+        rusqlite::params![volume_id], |row| row.get(0),
+    ).unwrap_or(0);
+
+    (total, synced, stale)
+}
+
+fn query_protection_counts(db: &rusqlite::Connection, volume_id: &str, ftt: u32) -> (u64, u64) {
+    if ftt == 0 {
+        return (0, 0);
+    }
+    let required = ftt + 1;
+
+    let protected: u64 = db.query_row(
+        "SELECT COUNT(*) FROM file_map fm
+         WHERE fm.volume_id = ?1 AND fm.protection_status = 'protected'",
+        rusqlite::params![volume_id], |row| row.get(0),
+    ).unwrap_or(0);
+
+    let degraded: u64 = db.query_row(
+        "SELECT COUNT(*) FROM file_map fm
+         WHERE fm.volume_id = ?1 AND fm.protection_status = 'degraded'",
+        rusqlite::params![volume_id], |row| row.get(0),
+    ).unwrap_or(0);
+
+    (protected, degraded)
 }

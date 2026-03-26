@@ -65,6 +65,9 @@ async fn main() {
         });
     }
 
+    // ── Try to restore DB from disk backup if primary is missing ─────
+    engine::db_mirror::try_restore_from_disk(data_dir);
+
     // ── Initialize database ─────────────────────────────────────────
     let db_path = data_dir.join("vmm-san.db");
     tracing::info!("Database: {}", db_path.display());
@@ -171,6 +174,9 @@ async fn main() {
 
     engine::rebalancer::spawn(Arc::clone(&state));
     tracing::info!("Rebalancer started (30s interval)");
+
+    engine::db_mirror::spawn(Arc::clone(&state));
+    tracing::info!("DB mirror started (60s interval, replicated to all claimed disks)");
 
     engine::discovery::spawn(Arc::clone(&state));
     tracing::info!("Discovery beacon started");

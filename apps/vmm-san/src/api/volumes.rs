@@ -11,36 +11,31 @@ use crate::state::CoreSanState;
 #[derive(Deserialize)]
 pub struct CreateVolumeRequest {
     pub name: String,
-    #[serde(default = "default_mirror")]
-    pub resilience_mode: String,
-    #[serde(default = "default_replica_count")]
-    pub replica_count: u32,
-    #[serde(default)]
-    pub stripe_width: u32,
-    #[serde(default = "default_async")]
-    pub sync_mode: String,
+    #[serde(default = "default_ftt")]
+    pub ftt: u32,
+    #[serde(default = "default_local_raid")]
+    pub local_raid: String,
+    #[serde(default = "default_chunk_size")]
+    pub chunk_size_bytes: u64,
 }
 
-fn default_mirror() -> String { "mirror".into() }
-fn default_replica_count() -> u32 { 2 }
-fn default_async() -> String { "async".into() }
+fn default_ftt() -> u32 { 1 }
+fn default_local_raid() -> String { "stripe".into() }
+fn default_chunk_size() -> u64 { crate::storage::chunk::DEFAULT_CHUNK_SIZE }
 
 #[derive(Deserialize)]
 pub struct UpdateVolumeRequest {
-    pub resilience_mode: Option<String>,
-    pub replica_count: Option<u32>,
-    pub stripe_width: Option<u32>,
-    pub sync_mode: Option<String>,
+    pub ftt: Option<u32>,
+    pub local_raid: Option<String>,
 }
 
 #[derive(Serialize)]
 pub struct VolumeResponse {
     pub id: String,
     pub name: String,
-    pub resilience_mode: String,
-    pub replica_count: u32,
-    pub stripe_width: u32,
-    pub sync_mode: String,
+    pub ftt: u32,
+    pub local_raid: String,
+    pub chunk_size_bytes: u64,
     pub status: String,
     pub total_bytes: u64,
     pub free_bytes: u64,
@@ -53,65 +48,50 @@ pub async fn create(
     State(state): State<Arc<CoreSanState>>,
     Json(body): Json<CreateVolumeRequest>,
 ) -> Result<(StatusCode, Json<VolumeResponse>), (StatusCode, String)> {
-    // Validate resilience mode
-    if !["none", "mirror", "erasure"].contains(&body.resilience_mode.as_str()) {
-        return Err((StatusCode::BAD_REQUEST,
-            "resilience_mode must be 'none', 'mirror', or 'erasure'".into()));
+    // Validate FTT
+    if body.ftt > 2 {
+        return Err((StatusCode::BAD_REQUEST, "ftt must be 0, 1, or 2".into()));
     }
-    if !["sync", "async"].contains(&body.sync_mode.as_str()) {
+    if !["stripe", "mirror", "stripe_mirror"].contains(&body.local_raid.as_str()) {
         return Err((StatusCode::BAD_REQUEST,
-            "sync_mode must be 'sync' or 'async'".into()));
-    }
-    if body.resilience_mode == "none" && body.replica_count != 1 {
-        return Err((StatusCode::BAD_REQUEST,
-            "resilience_mode 'none' requires replica_count = 1".into()));
-    }
-    if body.resilience_mode == "mirror" && body.replica_count < 2 {
-        return Err((StatusCode::BAD_REQUEST,
-            "resilience_mode 'mirror' requires replica_count >= 2".into()));
+            "local_raid must be 'stripe', 'mirror', or 'stripe_mirror'".into()));
     }
 
-    // Validate that enough nodes exist for the requested replica count.
-    // Total nodes = 1 (self) + online peers.
+    // Validate enough nodes for FTT
     let total_nodes = 1 + state.peers.iter()
         .filter(|p| p.status == crate::state::PeerStatus::Online)
         .count() as u32;
+    let required = body.ftt + 1;
 
-    if body.resilience_mode == "mirror" && body.replica_count > total_nodes {
+    if required > total_nodes {
         return Err((StatusCode::BAD_REQUEST,
-            format!(
-                "replica_count {} requires at least {} nodes, but only {} available (1 local + {} peers). \
-                 Add more peers first, or reduce replica_count.",
-                body.replica_count, body.replica_count, total_nodes, total_nodes - 1
-            )));
+            format!("FTT={} requires {} nodes, but only {} available. Add more peers first.",
+                body.ftt, required, total_nodes)));
     }
 
     let id = Uuid::new_v4().to_string();
     let db = state.db.lock().unwrap();
 
     db.execute(
-        "INSERT INTO volumes (id, name, resilience_mode, replica_count, stripe_width, sync_mode, status)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'online')",
-        rusqlite::params![&id, &body.name, &body.resilience_mode, body.replica_count,
-                          body.stripe_width, &body.sync_mode],
+        "INSERT INTO volumes (id, name, ftt, chunk_size_bytes, local_raid, status)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'online')",
+        rusqlite::params![&id, &body.name, body.ftt, body.chunk_size_bytes, &body.local_raid],
     ).map_err(|e| (StatusCode::CONFLICT, format!("Failed to create volume: {}", e)))?;
 
-    // Create FUSE mount directory
     let fuse_path = state.config.data.fuse_root.join(&body.name);
     if !fuse_path.exists() {
         std::fs::create_dir_all(&fuse_path).ok();
     }
 
-    tracing::info!("Created volume '{}' (id={}, mode={}, replicas={})",
-        body.name, id, body.resilience_mode, body.replica_count);
+    tracing::info!("Created volume '{}' (id={}, ftt={}, local_raid={}, chunk={}MB)",
+        body.name, id, body.ftt, body.local_raid, body.chunk_size_bytes / (1024 * 1024));
 
     Ok((StatusCode::CREATED, Json(VolumeResponse {
         id,
         name: body.name,
-        resilience_mode: body.resilience_mode,
-        replica_count: body.replica_count,
-        stripe_width: body.stripe_width,
-        sync_mode: body.sync_mode,
+        ftt: body.ftt,
+        local_raid: body.local_raid,
+        chunk_size_bytes: body.chunk_size_bytes,
         status: "online".into(),
         total_bytes: 0,
         free_bytes: 0,
@@ -127,8 +107,8 @@ pub async fn list(
     let db = state.db.lock().unwrap();
 
     let mut stmt = db.prepare(
-        "SELECT v.id, v.name, v.resilience_mode, v.replica_count, v.stripe_width,
-                v.sync_mode, v.status, v.created_at,
+        "SELECT v.id, v.name, v.ftt, v.local_raid, v.chunk_size_bytes,
+                v.status, v.created_at,
                 COALESCE(SUM(b.total_bytes), 0),
                 COALESCE(SUM(b.free_bytes), 0),
                 COUNT(b.id)
@@ -142,15 +122,14 @@ pub async fn list(
         Ok(VolumeResponse {
             id: row.get(0)?,
             name: row.get(1)?,
-            resilience_mode: row.get(2)?,
-            replica_count: row.get(3)?,
-            stripe_width: row.get(4)?,
-            sync_mode: row.get(5)?,
-            status: row.get(6)?,
-            created_at: row.get(7)?,
-            total_bytes: row.get(8)?,
-            free_bytes: row.get(9)?,
-            backend_count: row.get(10)?,
+            ftt: row.get(2)?,
+            local_raid: row.get(3)?,
+            chunk_size_bytes: row.get(4)?,
+            status: row.get(5)?,
+            created_at: row.get(6)?,
+            total_bytes: row.get(7)?,
+            free_bytes: row.get(8)?,
+            backend_count: row.get(9)?,
         })
     }).unwrap().filter_map(|r| r.ok()).collect();
 
@@ -165,8 +144,8 @@ pub async fn get(
     let db = state.db.lock().unwrap();
 
     let vol = db.query_row(
-        "SELECT v.id, v.name, v.resilience_mode, v.replica_count, v.stripe_width,
-                v.sync_mode, v.status, v.created_at,
+        "SELECT v.id, v.name, v.ftt, v.local_raid, v.chunk_size_bytes,
+                v.status, v.created_at,
                 COALESCE(SUM(b.total_bytes), 0),
                 COALESCE(SUM(b.free_bytes), 0),
                 COUNT(b.id)
@@ -178,15 +157,14 @@ pub async fn get(
         |row| Ok(VolumeResponse {
             id: row.get(0)?,
             name: row.get(1)?,
-            resilience_mode: row.get(2)?,
-            replica_count: row.get(3)?,
-            stripe_width: row.get(4)?,
-            sync_mode: row.get(5)?,
-            status: row.get(6)?,
-            created_at: row.get(7)?,
-            total_bytes: row.get(8)?,
-            free_bytes: row.get(9)?,
-            backend_count: row.get(10)?,
+            ftt: row.get(2)?,
+            local_raid: row.get(3)?,
+            chunk_size_bytes: row.get(4)?,
+            status: row.get(5)?,
+            created_at: row.get(6)?,
+            total_bytes: row.get(7)?,
+            free_bytes: row.get(8)?,
+            backend_count: row.get(9)?,
         }),
     ).map_err(|_| StatusCode::NOT_FOUND)?;
 
@@ -211,32 +189,23 @@ pub async fn update(
         return Err((StatusCode::NOT_FOUND, "Volume not found".into()));
     }
 
-    if let Some(ref mode) = body.resilience_mode {
-        if !["none", "mirror", "erasure"].contains(&mode.as_str()) {
-            return Err((StatusCode::BAD_REQUEST,
-                "resilience_mode must be 'none', 'mirror', or 'erasure'".into()));
+    if let Some(ftt) = body.ftt {
+        if ftt > 2 {
+            return Err((StatusCode::BAD_REQUEST, "ftt must be 0, 1, or 2".into()));
         }
-        db.execute("UPDATE volumes SET resilience_mode = ?1 WHERE id = ?2",
-            rusqlite::params![mode, &id]).ok();
+        db.execute("UPDATE volumes SET ftt = ?1 WHERE id = ?2",
+            rusqlite::params![ftt, &id]).ok();
     }
-    if let Some(count) = body.replica_count {
-        db.execute("UPDATE volumes SET replica_count = ?1 WHERE id = ?2",
-            rusqlite::params![count, &id]).ok();
-    }
-    if let Some(width) = body.stripe_width {
-        db.execute("UPDATE volumes SET stripe_width = ?1 WHERE id = ?2",
-            rusqlite::params![width, &id]).ok();
-    }
-    if let Some(ref mode) = body.sync_mode {
-        if !["sync", "async"].contains(&mode.as_str()) {
+    if let Some(ref raid) = body.local_raid {
+        if !["stripe", "mirror", "stripe_mirror"].contains(&raid.as_str()) {
             return Err((StatusCode::BAD_REQUEST,
-                "sync_mode must be 'sync' or 'async'".into()));
+                "local_raid must be 'stripe', 'mirror', or 'stripe_mirror'".into()));
         }
-        db.execute("UPDATE volumes SET sync_mode = ?1 WHERE id = ?2",
-            rusqlite::params![mode, &id]).ok();
+        db.execute("UPDATE volumes SET local_raid = ?1 WHERE id = ?2",
+            rusqlite::params![raid, &id]).ok();
     }
 
-    tracing::info!("Updated resilience policy for volume {}", id);
+    tracing::info!("Updated volume {} policy", id);
 
     Ok(Json(serde_json::json!({ "success": true, "rebalance_triggered": true })))
 }

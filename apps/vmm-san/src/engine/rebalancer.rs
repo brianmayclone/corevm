@@ -1,13 +1,14 @@
-//! Local rebalancer — redistributes files across local disks when backends change.
+//! Local rebalancer — redistributes chunks across local disks when backends change.
 //!
-//! Handles three scenarios:
-//! 1. Backend goes offline/degraded → evacuate files to other local backends
-//! 2. New backend added → optionally redistribute files for even usage
-//! 3. Backend draining → move all files off before removal
+//! Handles:
+//! 1. Backend goes offline/degraded → evacuate chunks to other local backends
+//! 2. Backend draining → move all chunks off before removal
+//! 3. Manual rebalance trigger → even out usage across backends
 
 use std::sync::Arc;
 use tokio::time::{interval, Duration};
 use crate::state::CoreSanState;
+use crate::storage::chunk;
 
 const REBALANCE_INTERVAL_SECS: u64 = 30;
 
@@ -25,34 +26,35 @@ pub fn spawn(state: Arc<CoreSanState>) {
 fn run_rebalance(state: &CoreSanState) {
     let db = state.db.lock().unwrap();
 
-    // Find files on offline/degraded/draining backends that need to be moved
-    let files_to_move: Vec<(i64, String, String, String, String)> = {
+    // Find chunk_replicas on offline/degraded/draining backends that need relocation
+    let chunks_to_move: Vec<(i64, i64, u32, String, String, String)> = {
         let mut stmt = db.prepare(
-            "SELECT fr.file_id, fm.volume_id, fm.rel_path, b.id, b.path
-             FROM file_replicas fr
-             JOIN file_map fm ON fm.id = fr.file_id
-             JOIN backends b ON b.id = fr.backend_id
-             WHERE b.node_id = ?1 AND b.status IN ('offline', 'degraded', 'draining')
-               AND fr.state = 'synced'"
+            "SELECT cr.chunk_id, fc.file_id, fc.chunk_index, cr.backend_id, b.path, fm.volume_id
+             FROM chunk_replicas cr
+             JOIN file_chunks fc ON fc.id = cr.chunk_id
+             JOIN file_map fm ON fm.id = fc.file_id
+             JOIN backends b ON b.id = cr.backend_id
+             WHERE cr.node_id = ?1 AND b.status IN ('offline', 'degraded', 'draining')
+               AND cr.state = 'synced'
+             LIMIT 100"
         ).unwrap();
         stmt.query_map(
             rusqlite::params![&state.node_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
         ).unwrap().filter_map(|r| r.ok()).collect()
     };
 
-    if files_to_move.is_empty() {
+    if chunks_to_move.is_empty() {
         return;
     }
 
-    tracing::info!("Rebalancer: {} files to evacuate from degraded/draining backends", files_to_move.len());
+    tracing::info!("Rebalancer: {} chunks to evacuate from degraded/draining backends", chunks_to_move.len());
 
-    for (file_id, volume_id, rel_path, old_backend_id, old_backend_path) in files_to_move {
+    for (chunk_id, file_id, chunk_index, old_backend_id, old_backend_path, volume_id) in chunks_to_move {
         // Find a healthy target backend on this node
         let target = db.query_row(
             "SELECT id, path FROM backends
-             WHERE volume_id = ?1 AND node_id = ?2 AND status = 'online'
-               AND id != ?3
+             WHERE volume_id = ?1 AND node_id = ?2 AND status = 'online' AND id != ?3
              ORDER BY free_bytes DESC LIMIT 1",
             rusqlite::params![&volume_id, &state.node_id, &old_backend_id],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
@@ -61,14 +63,14 @@ fn run_rebalance(state: &CoreSanState) {
         let (target_id, target_path) = match target {
             Ok(t) => t,
             Err(_) => {
-                tracing::warn!("Rebalancer: no target backend for {}/{}", volume_id, rel_path);
+                tracing::warn!("Rebalancer: no target backend for chunk {} in volume {}", chunk_id, volume_id);
                 continue;
             }
         };
 
-        // Copy file from old to new backend
-        let src = std::path::Path::new(&old_backend_path).join(&rel_path);
-        let dst = std::path::Path::new(&target_path).join(&rel_path);
+        // Copy chunk from old to new backend
+        let src = chunk::chunk_path(&old_backend_path, &volume_id, file_id, chunk_index);
+        let dst = chunk::chunk_path(&target_path, &volume_id, file_id, chunk_index);
 
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent).ok();
@@ -76,45 +78,45 @@ fn run_rebalance(state: &CoreSanState) {
 
         match std::fs::copy(&src, &dst) {
             Ok(bytes) => {
-                // Update file_replicas to point to new backend
+                // Update chunk_replicas to point to new backend
                 let now = chrono::Utc::now().to_rfc3339();
                 db.execute(
-                    "INSERT OR REPLACE INTO file_replicas (file_id, backend_id, state, replica_version, synced_at)
-                     VALUES (?1, ?2, 'synced', (SELECT version FROM file_map WHERE id = ?1), ?3)",
-                    rusqlite::params![file_id, &target_id, &now],
+                    "INSERT OR REPLACE INTO chunk_replicas (chunk_id, backend_id, node_id, state, synced_at)
+                     VALUES (?1, ?2, ?3, 'synced', ?4)",
+                    rusqlite::params![chunk_id, &target_id, &state.node_id, &now],
                 ).ok();
 
-                // Remove old replica entry
+                // Remove old replica
                 db.execute(
-                    "DELETE FROM file_replicas WHERE file_id = ?1 AND backend_id = ?2",
-                    rusqlite::params![file_id, &old_backend_id],
+                    "DELETE FROM chunk_replicas WHERE chunk_id = ?1 AND backend_id = ?2",
+                    rusqlite::params![chunk_id, &old_backend_id],
                 ).ok();
 
-                // Remove old file (best effort — disk might be degraded)
+                // Remove old chunk file
                 std::fs::remove_file(&src).ok();
 
-                tracing::debug!("Rebalancer: moved {}/{} ({} bytes) {} → {}",
-                    volume_id, rel_path, bytes, old_backend_id, target_id);
+                tracing::debug!("Rebalancer: moved chunk {} ({} bytes) {} → {}",
+                    chunk_id, bytes, old_backend_id, target_id);
             }
             Err(e) => {
-                tracing::warn!("Rebalancer: failed to copy {}/{}: {}", volume_id, rel_path, e);
+                tracing::warn!("Rebalancer: failed to copy chunk {}: {}", chunk_id, e);
             }
         }
     }
 
-    // Check if any draining backends are now empty and can be removed
+    // Check if any draining backends are now empty
     let drained: Vec<String> = {
         let mut stmt = db.prepare(
             "SELECT b.id FROM backends b
              WHERE b.node_id = ?1 AND b.status = 'draining'
-               AND NOT EXISTS (SELECT 1 FROM file_replicas fr WHERE fr.backend_id = b.id)"
+               AND NOT EXISTS (SELECT 1 FROM chunk_replicas cr WHERE cr.backend_id = b.id)"
         ).unwrap();
         stmt.query_map(rusqlite::params![&state.node_id], |row| row.get(0))
             .unwrap().filter_map(|r| r.ok()).collect()
     };
 
     for backend_id in drained {
-        tracing::info!("Rebalancer: backend {} fully drained, marking offline", backend_id);
+        tracing::info!("Rebalancer: backend {} fully drained", backend_id);
         db.execute(
             "UPDATE backends SET status = 'offline' WHERE id = ?1",
             rusqlite::params![&backend_id],
