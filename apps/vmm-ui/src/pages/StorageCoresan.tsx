@@ -100,7 +100,13 @@ export default function StorageCoresan() {
   const [addHostBackendPath, setAddHostBackendPath] = useState('/vmm/san-data')
   const [addHostError, setAddHostError] = useState('')
 
-  const sanApi = (path: string) => `http://localhost:7443${path}`
+  // In cluster mode, use san_address from hosts (known via heartbeat).
+  // In standalone mode, derive from current browser location.
+  const localSanBase = `${window.location.protocol}//${window.location.hostname}:7443`
+  const sanHosts = isCluster ? hosts.filter(h => h.san_enabled && h.san_address) : []
+  // Primary SAN endpoint: first cluster host or local fallback
+  const sanBase = sanHosts[0]?.san_address || localSanBase
+  const sanApi = (path: string) => `${sanBase}${path}`
 
   const refresh = async () => {
     if (isCluster) fetchHosts()
@@ -117,8 +123,23 @@ export default function StorageCoresan() {
       setVolumes(vols)
       setPeers(await pRes.json())
       if (vols.length > 0 && !selectedVolume) setSelectedVolume(vols[0].id)
-      // Load disks
-      fetch(sanApi('/api/disks')).then(r => r.json()).then(setDisks).catch(() => setDisks([]))
+
+      // Load disks from ALL SAN hosts (cluster) or local (standalone)
+      if (isCluster && sanHosts.length > 0) {
+        const diskResults = await Promise.all(
+          sanHosts.map(async (h) => {
+            try {
+              const res = await fetch(`${h.san_address}/api/disks`)
+              const hostDisks: DiscoveredDisk[] = await res.json()
+              return hostDisks.map(d => ({ ...d, _host_id: h.id, _host_name: h.hostname, _san_address: h.san_address }))
+            } catch { return [] }
+          })
+        )
+        setDisks(diskResults.flat())
+      } else {
+        fetch(sanApi('/api/disks')).then(r => r.json()).then(setDisks).catch(() => setDisks([]))
+      }
+
       setLoading(false)
     } catch {
       setSanAvailable(false)
@@ -126,7 +147,7 @@ export default function StorageCoresan() {
     }
   }
 
-  useEffect(() => { refresh() }, [])
+  useEffect(() => { refresh() }, [sanBase, sanHosts.length])
 
   useEffect(() => {
     if (!selectedVolume) return
@@ -201,7 +222,7 @@ export default function StorageCoresan() {
           }).catch(() => {})
           await fetch(`${hostSanAddr}/api/peers/join`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ address: sanApi(''), node_id: status.node_id, hostname: status.hostname }),
+            body: JSON.stringify({ address: status.address, node_id: status.node_id, hostname: status.hostname }),
           }).catch(() => {})
         }
       }
@@ -259,7 +280,7 @@ export default function StorageCoresan() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            address: `http://localhost:7443`, node_id: status.node_id,
+            address: status.address, node_id: status.node_id,
             hostname: status.hostname,
           }),
         })
@@ -301,31 +322,39 @@ export default function StorageCoresan() {
     }, 3000)
   }
 
+  /** Unique key for a disk across hosts. */
+  const diskKey = (d: DiscoveredDisk) => d._san_address ? `${d._san_address}:${d.path}` : d.path
+
   const openAutoClaim = () => {
     // Pre-select all empty (available) disks, leave has_data unchecked
     const claimable = disks.filter(d => d.status === 'available' || d.status === 'has_data')
-    const preSelected = new Set(claimable.filter(d => d.status === 'available').map(d => d.path))
+    const preSelected = new Set(claimable.filter(d => d.status === 'available').map(diskKey))
     setAutoClaimSelected(preSelected)
     setAutoClaimError('')
     setAutoClaimOpen(true)
   }
+
+  /** Resolve SAN API endpoint for a disk (routes to correct host in cluster mode). */
+  const diskSanUrl = (disk: DiscoveredDisk, path: string) =>
+    disk._san_address ? `${disk._san_address}${path}` : sanApi(path)
 
   const handleAutoClaim = async () => {
     if (autoClaimSelected.size === 0) return
     setAutoClaimRunning(true)
     setAutoClaimError('')
 
-    const paths = Array.from(autoClaimSelected)
+    const keys = Array.from(autoClaimSelected)
     let ok = 0
     let fail = 0
 
-    for (const devicePath of paths) {
-      const disk = disks.find(d => d.path === devicePath)
-      const resp = await fetch(sanApi('/api/disks/claim'), {
+    for (const key of keys) {
+      const disk = disks.find(d => diskKey(d) === key)
+      if (!disk) { fail++; continue }
+      const resp = await fetch(diskSanUrl(disk, '/api/disks/claim'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          device_path: devicePath,
+          device_path: disk.path,
           confirm_format: true,
         }),
       })
@@ -344,7 +373,7 @@ export default function StorageCoresan() {
   const handleClaimDisk = async () => {
     setClaimError('')
     if (!claimDisk || !claimVolumeId) return
-    const resp = await fetch(sanApi('/api/disks/claim'), {
+    const resp = await fetch(diskSanUrl(claimDisk, '/api/disks/claim'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -364,7 +393,7 @@ export default function StorageCoresan() {
 
   const handleResetDisk = async () => {
     if (!resetDisk) return
-    const resp = await fetch(sanApi('/api/disks/reset'), {
+    const resp = await fetch(diskSanUrl(resetDisk, '/api/disks/reset'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ device_path: resetDisk.path }),
@@ -376,12 +405,12 @@ export default function StorageCoresan() {
     refresh()
   }
 
-  const handleReleaseDisk = async (devicePath: string) => {
+  const handleReleaseDisk = async (disk: DiscoveredDisk) => {
     if (!confirm('Release this disk? Data will be drained to other backends.')) return
-    await fetch(sanApi('/api/disks/release'), {
+    await fetch(diskSanUrl(disk, '/api/disks/release'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ device_path: devicePath, wipe: false }),
+      body: JSON.stringify({ device_path: disk.path, wipe: false }),
     })
     refresh()
   }
@@ -506,6 +535,7 @@ export default function StorageCoresan() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="border-b border-vmm-border">
+                  {isCluster && <th className="text-left py-2 px-2 text-vmm-text-muted">Host</th>}
                   <th className="text-left py-2 px-2 text-vmm-text-muted">Device</th>
                   <th className="text-left py-2 px-2 text-vmm-text-muted">Size</th>
                   <th className="text-left py-2 px-2 text-vmm-text-muted">Model</th>
@@ -515,7 +545,8 @@ export default function StorageCoresan() {
               </thead>
               <tbody>
                 {disks.map(d => (
-                  <tr key={d.path} className="border-b border-vmm-border/50">
+                  <tr key={`${d._san_address || ''}:${d.path}`} className="border-b border-vmm-border/50">
+                    {isCluster && <td className="py-2 px-2 text-vmm-text-dim text-xs">{d._host_name || '—'}</td>}
                     <td className="py-2 px-2 text-vmm-text font-mono flex items-center gap-2">
                       <Disc size={13} className={d.status === 'claimed' ? 'text-vmm-accent' : d.status === 'os_disk' ? 'text-vmm-danger' : 'text-vmm-text-muted'} />
                       {d.path}
@@ -545,7 +576,7 @@ export default function StorageCoresan() {
                         </button>
                       )}
                       {d.status === 'claimed' && (
-                        <button onClick={() => handleReleaseDisk(d.path)}
+                        <button onClick={() => handleReleaseDisk(d)}
                           className="px-2 py-1 text-[10px] font-bold text-vmm-danger hover:bg-vmm-danger/10 rounded transition-colors cursor-pointer">
                           RELEASE
                         </button>
@@ -1036,75 +1067,90 @@ export default function StorageCoresan() {
 
           {/* Disks grouped by host */}
           <div className="space-y-4 max-h-[50vh] overflow-y-auto">
-            {/* This node's disks */}
-            <div>
-              <div className="flex items-center gap-2 mb-2">
-                <Server size={14} className="text-vmm-success" />
-                <span className="text-xs font-bold text-vmm-text uppercase tracking-wider">{status?.hostname}</span>
-                <span className="text-[10px] text-vmm-text-muted">(this node)</span>
-              </div>
-              <div className="space-y-1.5 ml-5">
-                {disks.filter(d => d.status !== 'claimed').map(d => {
-                  const isOsDisk = d.status === 'os_disk' || d.status === 'in_use'
-                  const hasData = d.status === 'has_data'
-                  const checked = autoClaimSelected.has(d.path)
-                  return (
-                    <label key={d.path} className={`flex items-center gap-3 p-3 rounded-lg border transition-colors
-                      ${isOsDisk ? 'opacity-40 cursor-not-allowed border-vmm-border' :
-                        checked ? 'bg-vmm-accent/5 border-vmm-accent/30 cursor-pointer' :
-                        'border-vmm-border hover:border-vmm-accent/20 cursor-pointer'}`}>
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        disabled={isOsDisk}
-                        onChange={() => {
-                          setAutoClaimSelected(prev => {
-                            const next = new Set(prev)
-                            if (next.has(d.path)) next.delete(d.path)
-                            else next.add(d.path)
-                            return next
-                          })
-                        }}
-                        className="accent-vmm-accent"
-                      />
-                      <Disc size={16} className={isOsDisk ? 'text-vmm-danger' : checked ? 'text-vmm-accent' : 'text-vmm-text-muted'} />
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-mono font-medium text-vmm-text">{d.path}</span>
-                          <span className="text-xs text-vmm-text-dim">{formatBytes(d.size_bytes)}</span>
-                          {d.model && <span className="text-xs text-vmm-text-muted">{d.model}</span>}
-                        </div>
-                      </div>
-                      <div className="shrink-0">
-                        {isOsDisk && (
-                          <Badge label="OS DISK" color="bg-vmm-danger/20 text-vmm-danger border-vmm-danger/30" />
-                        )}
-                        {d.status === 'in_use' && (
-                          <Badge label="IN USE" color={statusColors.offline} />
-                        )}
-                        {d.status === 'available' && (
-                          <Badge label="EMPTY" color={statusColors.online} />
-                        )}
-                        {hasData && (
-                          <Badge label={`HAS DATA (${d.fs_type || '?'})`} color={statusColors.degraded} />
-                        )}
-                      </div>
-                    </label>
-                  )
-                })}
-                {disks.filter(d => d.status !== 'claimed').length === 0 && (
-                  <p className="text-xs text-vmm-text-muted py-2">No unclaimed disks on this node.</p>
-                )}
-              </div>
-            </div>
-
-            {/* TODO: Remote host disks would go here in multi-node mode */}
+            {/* Group disks by host */}
+            {(() => {
+              const unclaimedDisks = disks.filter(d => d.status !== 'claimed')
+              const groups: Record<string, { label: string; disks: DiscoveredDisk[] }> = {}
+              for (const d of unclaimedDisks) {
+                const groupKey = d._san_address || '__local__'
+                if (!groups[groupKey]) {
+                  groups[groupKey] = {
+                    label: d._host_name || status?.hostname || 'This node',
+                    disks: [],
+                  }
+                }
+                groups[groupKey].disks.push(d)
+              }
+              return Object.entries(groups).map(([groupKey, group]) => (
+                <div key={groupKey}>
+                  <div className="flex items-center gap-2 mb-2">
+                    <Server size={14} className="text-vmm-success" />
+                    <span className="text-xs font-bold text-vmm-text uppercase tracking-wider">{group.label}</span>
+                    {groupKey === '__local__' && <span className="text-[10px] text-vmm-text-muted">(this node)</span>}
+                  </div>
+                  <div className="space-y-1.5 ml-5">
+                    {group.disks.map(d => {
+                      const key = diskKey(d)
+                      const isOsDisk = d.status === 'os_disk' || d.status === 'in_use'
+                      const hasData = d.status === 'has_data'
+                      const checked = autoClaimSelected.has(key)
+                      return (
+                        <label key={key} className={`flex items-center gap-3 p-3 rounded-lg border transition-colors
+                          ${isOsDisk ? 'opacity-40 cursor-not-allowed border-vmm-border' :
+                            checked ? 'bg-vmm-accent/5 border-vmm-accent/30 cursor-pointer' :
+                            'border-vmm-border hover:border-vmm-accent/20 cursor-pointer'}`}>
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            disabled={isOsDisk}
+                            onChange={() => {
+                              setAutoClaimSelected(prev => {
+                                const next = new Set(prev)
+                                if (next.has(key)) next.delete(key)
+                                else next.add(key)
+                                return next
+                              })
+                            }}
+                            className="accent-vmm-accent"
+                          />
+                          <Disc size={16} className={isOsDisk ? 'text-vmm-danger' : checked ? 'text-vmm-accent' : 'text-vmm-text-muted'} />
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm font-mono font-medium text-vmm-text">{d.path}</span>
+                              <span className="text-xs text-vmm-text-dim">{formatBytes(d.size_bytes)}</span>
+                              {d.model && <span className="text-xs text-vmm-text-muted">{d.model}</span>}
+                            </div>
+                          </div>
+                          <div className="shrink-0">
+                            {isOsDisk && (
+                              <Badge label="OS DISK" color="bg-vmm-danger/20 text-vmm-danger border-vmm-danger/30" />
+                            )}
+                            {d.status === 'in_use' && (
+                              <Badge label="IN USE" color={statusColors.offline} />
+                            )}
+                            {d.status === 'available' && (
+                              <Badge label="EMPTY" color={statusColors.online} />
+                            )}
+                            {hasData && (
+                              <Badge label={`HAS DATA (${d.fs_type || '?'})`} color={statusColors.degraded} />
+                            )}
+                          </div>
+                        </label>
+                      )
+                    })}
+                    {group.disks.length === 0 && (
+                      <p className="text-xs text-vmm-text-muted py-2">No unclaimed disks on this node.</p>
+                    )}
+                  </div>
+                </div>
+              ))
+            })()}
           </div>
 
-          {autoClaimSelected.size > 0 && disks.some(d => autoClaimSelected.has(d.path) && d.status === 'has_data') && (
+          {autoClaimSelected.size > 0 && disks.some(d => autoClaimSelected.has(diskKey(d)) && d.status === 'has_data') && (
             <div className="flex items-center gap-2 p-3 rounded-lg bg-vmm-warning/10 border border-vmm-warning/30 text-xs text-vmm-warning">
               <AlertTriangle size={14} />
-              {disks.filter(d => autoClaimSelected.has(d.path) && d.status === 'has_data').length} disk(s)
+              {disks.filter(d => autoClaimSelected.has(diskKey(d)) && d.status === 'has_data').length} disk(s)
               with existing data selected. They will be wiped and formatted!
             </div>
           )}
@@ -1112,7 +1158,7 @@ export default function StorageCoresan() {
           <div className="flex items-center justify-between pt-2 border-t border-vmm-border">
             <span className="text-sm text-vmm-text-dim">
               {autoClaimSelected.size} disk{autoClaimSelected.size !== 1 ? 's' : ''} selected
-              ({formatBytes(disks.filter(d => autoClaimSelected.has(d.path)).reduce((s, d) => s + d.size_bytes, 0))} total)
+              ({formatBytes(disks.filter(d => autoClaimSelected.has(diskKey(d))).reduce((s, d) => s + d.size_bytes, 0))} total)
             </span>
             <div className="flex items-center gap-2">
               <Button variant="ghost" onClick={() => setAutoClaimOpen(false)}>Cancel</Button>

@@ -25,7 +25,7 @@ interface Props {
   onSelect: (fusePath: string) => void
 }
 
-const SAN_API = 'http://localhost:7443'
+const SAN_API = `${window.location.protocol}//${window.location.hostname}:7443`
 
 export default function CoreSanFilePicker({ open, onClose, title, filterExt, onSelect }: Props) {
   const [volumes, setVolumes] = useState<CoreSanVolume[]>([])

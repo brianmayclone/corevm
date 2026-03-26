@@ -52,7 +52,7 @@ export default function Storage() {
     api.get<DiskImage[]>('/api/storage/images').then(({ data }) => setImages(data)).catch(() => {})
     api.get<Iso[]>('/api/storage/isos').then(({ data }) => setIsos(data)).catch(() => {})
     // Try to reach local CoreSAN daemon
-    fetch('http://localhost:7443/api/status').then(r => r.json()).then(setSanStatus).catch(() => setSanStatus(null))
+    fetch(`${window.location.protocol}//${window.location.hostname}:7443/api/status`).then(r => r.json()).then(setSanStatus).catch(() => setSanStatus(null))
   }
   // Refresh when cluster selection changes, or on mount in standalone mode
   useEffect(() => {

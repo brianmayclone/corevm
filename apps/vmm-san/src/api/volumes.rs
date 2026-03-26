@@ -142,7 +142,7 @@ pub async fn list(
 ) -> Json<Vec<VolumeResponse>> {
     let db = state.db.lock().unwrap();
 
-    // Pool-wide capacity (shared across all volumes)
+    // Pool-wide capacity (shared across all volumes on this node)
     let total_bytes: u64 = db.query_row(
         "SELECT COALESCE(SUM(total_bytes), 0) FROM backends WHERE status = 'online'",
         [], |row| row.get(0),

@@ -505,6 +505,10 @@ export interface DiscoveredDisk {
   disk_id?: string
   volume_id?: string
   fs_type_detail?: string
+  /** Set client-side when aggregating disks from multiple SAN hosts. */
+  _host_id?: string
+  _host_name?: string
+  _san_address?: string
 }
 
 // ── Network Discovery ───────────────────────────────────────────────────

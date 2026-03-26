@@ -359,7 +359,7 @@ impl Filesystem for CoreSanFS {
             let paths: Vec<String> = {
                 let db = self.state.db.lock().unwrap();
                 let result = db.prepare(
-                    "SELECT path FROM backends WHERE volume_id = ?1 AND node_id = ?2 AND status = 'online'"
+                    "SELECT path FROM backends WHERE node_id = ?1 AND status = 'online'"
                 );
                 match result {
                     Ok(mut stmt) => {
@@ -667,7 +667,7 @@ impl Filesystem for CoreSanFS {
         let backends: Vec<String> = {
             let db = self.state.db.lock().unwrap();
             let mut stmt = db.prepare(
-                "SELECT path FROM backends WHERE volume_id = ?1 AND node_id = ?2 AND status = 'online'"
+                "SELECT path FROM backends WHERE node_id = ?1 AND status = 'online'"
             ).unwrap();
             stmt.query_map(
                 rusqlite::params![&self.state.node_id],
@@ -733,7 +733,7 @@ impl Filesystem for CoreSanFS {
         let backends: Vec<String> = {
             let db = self.state.db.lock().unwrap();
             let mut stmt = db.prepare(
-                "SELECT path FROM backends WHERE volume_id = ?1 AND node_id = ?2 AND status = 'online'"
+                "SELECT path FROM backends WHERE node_id = ?1 AND status = 'online'"
             ).unwrap();
             stmt.query_map(
                 rusqlite::params![&self.state.node_id],

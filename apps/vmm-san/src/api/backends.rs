@@ -16,13 +16,13 @@ pub struct AddBackendRequest {
 #[derive(Serialize)]
 pub struct BackendResponse {
     pub id: String,
-    pub volume_id: String,
     pub node_id: String,
     pub path: String,
     pub total_bytes: u64,
     pub free_bytes: u64,
     pub status: String,
     pub last_check: Option<String>,
+    pub claimed_disk_id: String,
 }
 
 /// POST /api/volumes/{id}/backends — add a local mountpoint as backend.
@@ -63,49 +63,50 @@ pub async fn add(
 
     let now = chrono::Utc::now().to_rfc3339();
     db.execute(
-        "INSERT INTO backends (id, volume_id, node_id, path, total_bytes, free_bytes, status, last_check)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'online', ?7)",
-        rusqlite::params![&id, &volume_id, &state.node_id, &body.path,
+        "INSERT INTO backends (id, node_id, path, total_bytes, free_bytes, status, last_check)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'online', ?6)",
+        rusqlite::params![&id, &state.node_id, &body.path,
                           total_bytes, free_bytes, &now],
     ).map_err(|e| (StatusCode::CONFLICT, format!("Failed to add backend: {}", e)))?;
 
-    tracing::info!("Added backend '{}' to volume {} ({}B total, {}B free)",
-        body.path, volume_id, total_bytes, free_bytes);
+    tracing::info!("Added backend '{}' ({}B total, {}B free)",
+        body.path, total_bytes, free_bytes);
 
     Ok((StatusCode::CREATED, Json(BackendResponse {
         id,
-        volume_id,
         node_id: state.node_id.clone(),
         path: body.path,
         total_bytes,
         free_bytes,
         status: "online".into(),
         last_check: Some(now),
+        claimed_disk_id: String::new(),
     })))
 }
 
-/// GET /api/volumes/{id}/backends — list all backends for a volume.
+/// GET /api/volumes/{id}/backends — list all backends (node pool).
+/// Backends belong to the node, not a specific volume. All volumes share all backends.
 pub async fn list(
     State(state): State<Arc<CoreSanState>>,
-    Path(volume_id): Path<String>,
+    Path(_volume_id): Path<String>,
 ) -> Json<Vec<BackendResponse>> {
     let db = state.db.lock().unwrap();
 
     let mut stmt = db.prepare(
-        "SELECT id, volume_id, node_id, path, total_bytes, free_bytes, status, last_check
-         FROM backends WHERE volume_id = ?1 ORDER BY path"
+        "SELECT id, node_id, path, total_bytes, free_bytes, status, last_check, claimed_disk_id
+         FROM backends ORDER BY path"
     ).unwrap();
 
-    let backends = stmt.query_map(rusqlite::params![&volume_id], |row| {
+    let backends = stmt.query_map([], |row| {
         Ok(BackendResponse {
             id: row.get(0)?,
-            volume_id: row.get(1)?,
-            node_id: row.get(2)?,
-            path: row.get(3)?,
-            total_bytes: row.get(4)?,
-            free_bytes: row.get(5)?,
-            status: row.get(6)?,
-            last_check: row.get(7)?,
+            node_id: row.get(1)?,
+            path: row.get(2)?,
+            total_bytes: row.get(3)?,
+            free_bytes: row.get(4)?,
+            status: row.get(5)?,
+            last_check: row.get(6)?,
+            claimed_disk_id: row.get(7)?,
         })
     }).unwrap().filter_map(|r| r.ok()).collect();
 
@@ -128,8 +129,8 @@ pub async fn remove(
     if replica_count > 0 {
         // Mark as draining — the repair engine will move data to other backends
         db.execute(
-            "UPDATE backends SET status = 'draining' WHERE id = ?1 AND volume_id = ?2",
-            rusqlite::params![&backend_id, &volume_id],
+            "UPDATE backends SET status = 'draining' WHERE id = ?1",
+            rusqlite::params![&backend_id],
         ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
 
         tracing::info!("Backend {} marked as draining ({} replicas to relocate)",
@@ -143,8 +144,8 @@ pub async fn remove(
     }
 
     db.execute(
-        "DELETE FROM backends WHERE id = ?1 AND volume_id = ?2",
-        rusqlite::params![&backend_id, &volume_id],
+        "DELETE FROM backends WHERE id = ?1",
+        rusqlite::params![&backend_id],
     ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
 
     tracing::info!("Removed backend {} from volume {}", backend_id, volume_id);

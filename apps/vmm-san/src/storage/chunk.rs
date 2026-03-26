@@ -60,7 +60,7 @@ pub fn place_chunk(
     chunk_index: u32,
     local_raid: &str,
 ) -> Vec<(String, String)> {
-    // Backends belong to the node pool, not to a specific volume
+    // Backends are a node-wide pool shared by all volumes
     let backends: Vec<(String, String)> = {
         let mut stmt = db.prepare(
             "SELECT id, path FROM backends
