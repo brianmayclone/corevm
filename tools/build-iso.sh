@@ -252,12 +252,59 @@ RestartSec=5
 WantedBy=multi-user.target
 SAN_SVC
 
+# Configure FUSE for CoreSAN (allow_other needed for VM access to FUSE mounts)
+echo "user_allow_other" > "$ROOTFS_DIR/etc/fuse.conf"
+chmod 644 "$ROOTFS_DIR/etc/fuse.conf"
+
+# Ensure fuse kernel module loads at boot
+echo "fuse" >> "$ROOTFS_DIR/etc/modules-load.d/corevm.conf"
+
+# Create default CoreSAN config
+mkdir -p "$ROOTFS_DIR/etc/vmm"
+tee "$ROOTFS_DIR/etc/vmm/vmm-san.toml" > /dev/null <<'SAN_CONF'
+[server]
+bind = "0.0.0.0"
+port = 7443
+
+[data]
+data_dir = "/var/lib/vmm-san"
+fuse_root = "/vmm/san"
+
+[peer]
+port = 7444
+secret = ""
+
+[replication]
+sync_mode = "async"
+
+[benchmark]
+enabled = true
+interval_secs = 300
+bandwidth_test_size_mb = 64
+
+[integrity]
+enabled = true
+interval_secs = 3600
+repair_interval_secs = 60
+
+[logging]
+level = "info"
+SAN_CONF
+
+# Create CoreSAN data directories
+mkdir -p "$ROOTFS_DIR/var/lib/vmm-san"
+mkdir -p "$ROOTFS_DIR/vmm/san"
+
+# Open UDP discovery port in firewall
+# (will be picked up by nftables if the config supports it)
+
 # Copy GRUB defaults and nftables config
 cp "$SCRIPT_DIR/iso/grub-installed.cfg" "$ROOTFS_DIR/etc/default/grub"
 cp "$SCRIPT_DIR/iso/nftables.conf" "$ROOTFS_DIR/etc/nftables.conf"
 
 # Enable services (use --root= since systemd is not PID 1 in the chroot)
 systemctl --root="$ROOTFS_DIR" enable vmm-dcui.service
+systemctl --root="$ROOTFS_DIR" enable vmm-san.service
 systemctl --root="$ROOTFS_DIR" enable nftables.service
 systemctl --root="$ROOTFS_DIR" enable ssh.service
 
