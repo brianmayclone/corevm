@@ -196,26 +196,24 @@ export default function StorageCoresan() {
 
   const handleAddHost = async () => {
     setAddHostError('')
-    if (!addHostId || !selectedVolume) return
+    if (!addHostId || !selectedVolume || !sel) return
 
     // Find host address from cluster hosts
     const host = hosts.find(h => h.id === addHostId)
     if (!host) { setAddHostError('Host not found'); return }
 
     // Derive the CoreSAN API address from the vmm-server address (replace port 8443 with 7443)
-    const sanAddr = host.address.replace(/:8443/, ':7443').replace(/:443/, ':7443')
+    const sanAddr = host.san_address || host.address.replace(/:8443/, ':7443').replace(/:443/, ':7443')
+
+    // Auto backend path based on volume name
+    const backendPath = `/vmm/san-data/${sel.name}`
 
     try {
-      // 1. Create the backend directory on the remote host via agent
-      await api.post('/api/hosts/' + addHostId + '/exec', {
-        command: `mkdir -p ${addHostBackendPath}`,
-      }).catch(() => {}) // best effort
-
-      // 2. Add backend on the remote CoreSAN instance
+      // 1. Add backend on the remote CoreSAN instance (directory is auto-created)
       const backendResp = await fetch(`${sanAddr}/api/volumes/${selectedVolume}/backends`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: addHostBackendPath }),
+        body: JSON.stringify({ path: backendPath }),
       })
 
       if (!backendResp.ok) {
@@ -746,8 +744,7 @@ export default function StorageCoresan() {
       <Dialog open={addHostOpen} title="Add Host to CoreSAN" onClose={() => { setAddHostOpen(false); setAddHostError('') }}>
         <div className="space-y-4">
           <p className="text-sm text-vmm-text-dim">
-            Select a cluster host to add to this CoreSAN volume. A storage backend will be created
-            on the host, and it will be registered as a peer for data replication.
+            Select a cluster host to add to this volume. Storage will be provisioned automatically.
           </p>
           {addHostError && (
             <div className="bg-vmm-danger/10 border border-vmm-danger/30 text-vmm-danger rounded-lg p-3 text-sm">
@@ -758,13 +755,11 @@ export default function StorageCoresan() {
             <Select value={addHostId} onChange={(e) => setAddHostId(e.target.value)}
               options={availableHosts.map(h => ({ value: h.id, label: `${h.hostname} (${h.address})` }))} />
           </FormField>
-          <FormField label="Backend Storage Path">
-            <TextInput value={addHostBackendPath} onChange={(e) => setAddHostBackendPath(e.target.value)}
-              placeholder="/vmm/san-data" />
-            <p className="text-[10px] text-vmm-text-muted mt-1">
-              Local directory on the host that contributes storage. Must be a mounted filesystem.
+          {sel && (
+            <p className="text-[10px] text-vmm-text-muted">
+              Backend will be created at <code className="text-vmm-accent">/vmm/san-data/{sel.name}</code> on the selected host.
             </p>
-          </FormField>
+          )}
           <div className="flex justify-end gap-2 pt-2">
             <Button variant="ghost" onClick={() => { setAddHostOpen(false); setAddHostError('') }}>Cancel</Button>
             <Button variant="primary" onClick={handleAddHost} disabled={!addHostId}>
