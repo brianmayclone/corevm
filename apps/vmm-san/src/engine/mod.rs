@@ -17,3 +17,4 @@ pub mod push_replicator;
 pub mod discovery;
 pub mod rebalancer;
 pub mod db_mirror;
+pub mod disk_monitor;

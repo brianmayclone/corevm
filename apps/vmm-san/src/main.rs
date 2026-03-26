@@ -178,6 +178,9 @@ async fn main() {
     engine::db_mirror::spawn(Arc::clone(&state));
     tracing::info!("DB mirror started (60s interval, replicated to all claimed disks)");
 
+    engine::disk_monitor::spawn(Arc::clone(&state));
+    tracing::info!("Disk monitor started (hot-add/hot-remove detection, {}s poll)", 5);
+
     engine::discovery::spawn(Arc::clone(&state));
     tracing::info!("Discovery beacon started");
 

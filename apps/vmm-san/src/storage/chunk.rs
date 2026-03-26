@@ -169,45 +169,75 @@ pub fn read_chunk_data(
     let mut result = Vec::with_capacity(size as usize);
 
     for range in ranges {
-        // Find local backend for this chunk
-        let backend_path: Option<String> = db.query_row(
-            "SELECT b.path FROM chunk_replicas cr
-             JOIN backends b ON b.id = cr.backend_id
-             JOIN file_chunks fc ON fc.id = cr.chunk_id
-             WHERE fc.file_id = ?1 AND fc.chunk_index = ?2
-               AND cr.node_id = ?3 AND cr.state = 'synced'
-             LIMIT 1",
-            rusqlite::params![file_id, range.chunk_index, node_id],
-            |row| row.get(0),
-        ).ok();
-
-        let bp = match backend_path {
-            Some(p) => p,
-            None => {
-                // No local replica — fill with zeros (or could fetch from peer)
-                result.extend(std::iter::repeat(0u8).take(range.size as usize));
-                continue;
-            }
+        // Find ALL local replicas for this chunk (multiple backends = local mirror)
+        let replicas: Vec<(String, String)> = {
+            let mut stmt = db.prepare(
+                "SELECT cr.backend_id, b.path FROM chunk_replicas cr
+                 JOIN backends b ON b.id = cr.backend_id
+                 JOIN file_chunks fc ON fc.id = cr.chunk_id
+                 WHERE fc.file_id = ?1 AND fc.chunk_index = ?2
+                   AND cr.node_id = ?3 AND cr.state = 'synced'"
+            ).unwrap();
+            stmt.query_map(
+                rusqlite::params![file_id, range.chunk_index, node_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).unwrap().filter_map(|r| r.ok()).collect()
         };
 
-        let path = chunk_path(&bp, volume_id, file_id, range.chunk_index);
+        let mut read_ok = false;
 
-        match std::fs::File::open(&path) {
-            Ok(mut file) => {
-                file.seek(SeekFrom::Start(range.local_offset))
-                    .map_err(|e| format!("seek: {}", e))?;
-                let mut buf = vec![0u8; range.size as usize];
-                let n = file.read(&mut buf).map_err(|e| format!("read: {}", e))?;
-                result.extend_from_slice(&buf[..n]);
-                // Pad if we read less than expected
-                if (n as u64) < range.size {
-                    result.extend(std::iter::repeat(0u8).take((range.size as usize) - n));
+        // Try each local replica until one succeeds
+        for (backend_id, bp) in &replicas {
+            let path = chunk_path(bp, volume_id, file_id, range.chunk_index);
+
+            match std::fs::File::open(&path) {
+                Ok(mut file) => {
+                    if file.seek(SeekFrom::Start(range.local_offset)).is_err() {
+                        continue; // Try next replica
+                    }
+                    let mut buf = vec![0u8; range.size as usize];
+                    match file.read(&mut buf) {
+                        Ok(n) => {
+                            result.extend_from_slice(&buf[..n]);
+                            if (n as u64) < range.size {
+                                result.extend(std::iter::repeat(0u8).take((range.size as usize) - n));
+                            }
+                            read_ok = true;
+                            break; // Success — don't try other replicas
+                        }
+                        Err(e) => {
+                            // Read error (bad sector, I/O error) — mark this replica as error
+                            tracing::warn!("Chunk read error on backend {}: {} — trying fallback", backend_id, e);
+                            db.execute(
+                                "UPDATE chunk_replicas SET state = 'error'
+                                 WHERE chunk_id = (SELECT id FROM file_chunks WHERE file_id = ?1 AND chunk_index = ?2)
+                                   AND backend_id = ?3",
+                                rusqlite::params![file_id, range.chunk_index, backend_id],
+                            ).ok();
+                            continue; // Try next replica
+                        }
+                    }
+                }
+                Err(_) => {
+                    // File missing — mark replica as error and try next
+                    db.execute(
+                        "UPDATE chunk_replicas SET state = 'error'
+                         WHERE chunk_id = (SELECT id FROM file_chunks WHERE file_id = ?1 AND chunk_index = ?2)
+                           AND backend_id = ?3",
+                        rusqlite::params![file_id, range.chunk_index, backend_id],
+                    ).ok();
+                    continue;
                 }
             }
-            Err(_) => {
-                // Chunk file doesn't exist yet — return zeros
-                result.extend(std::iter::repeat(0u8).take(range.size as usize));
-            }
+        }
+
+        if !read_ok {
+            // No local replica could serve this chunk — fill with zeros
+            // The repair engine will fetch the chunk from a peer later.
+            // TODO: Could do a synchronous peer fetch here for immediate recovery.
+            tracing::warn!("Chunk {}/{} idx {} unreadable on all local replicas",
+                volume_id, file_id, range.chunk_index);
+            result.extend(std::iter::repeat(0u8).take(range.size as usize));
         }
     }
 
