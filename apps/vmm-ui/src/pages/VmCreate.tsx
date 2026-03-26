@@ -15,6 +15,7 @@ import Button from '../components/Button'
 import Card from '../components/Card'
 import PoolBrowser from '../components/PoolBrowser'
 import CreateDiskDialog from '../components/CreateDiskDialog'
+import CoreSanFilePicker from '../components/CoreSanFilePicker'
 
 const tabs = [
   { id: 'general', label: 'General' },
@@ -84,6 +85,8 @@ export default function VmCreate() {
   const [isoBrowserOpen, setIsoBrowserOpen] = useState(false)
   const [diskBrowserOpen, setDiskBrowserOpen] = useState(false)
   const [createDiskOpen, setCreateDiskOpen] = useState(false)
+  const [sanIsoBrowserOpen, setSanIsoBrowserOpen] = useState(false)
+  const [sanDiskBrowserOpen, setSanDiskBrowserOpen] = useState(false)
 
   // Cluster-mode: cluster and host selection
   const [clusters, setClusters] = useState<Cluster[]>([])
@@ -272,7 +275,9 @@ export default function VmCreate() {
                   <TextInput value={form.iso_image} onChange={(e) => set('iso_image', e.target.value)}
                     placeholder="/path/to/image.iso" className="flex-1" />
                   <Button variant="outline" size="md" icon={<Search size={14} />}
-                    onClick={() => setIsoBrowserOpen(true)}>Browse</Button>
+                    onClick={() => setIsoBrowserOpen(true)}>Local</Button>
+                  <Button variant="outline" size="md" icon={<Boxes size={14} />}
+                    onClick={() => setSanIsoBrowserOpen(true)}>SAN</Button>
                 </div>
               </FormField>
             </div>
@@ -402,7 +407,11 @@ export default function VmCreate() {
               </Button>
               <Button variant="outline" size="sm" icon={<Search size={14} />}
                 onClick={() => setDiskBrowserOpen(true)}>
-                Browse Existing
+                Browse Local
+              </Button>
+              <Button variant="outline" size="sm" icon={<Boxes size={14} />}
+                onClick={() => setSanDiskBrowserOpen(true)}>
+                Browse SAN
               </Button>
             </div>
           </div>
@@ -456,6 +465,15 @@ export default function VmCreate() {
         vmName={form.name || 'new-vm'} vmId={form.uuid}
         clusterId={isCluster ? selectedClusterId : undefined}
         onCreated={(path) => set('disk_images', [...form.disk_images, path])} />
+
+      {/* CoreSAN File Pickers */}
+      <CoreSanFilePicker open={sanIsoBrowserOpen} onClose={() => setSanIsoBrowserOpen(false)}
+        title="Select ISO from CoreSAN" filterExt=".iso"
+        onSelect={(path) => set('iso_image', path)} />
+
+      <CoreSanFilePicker open={sanDiskBrowserOpen} onClose={() => setSanDiskBrowserOpen(false)}
+        title="Select Disk from CoreSAN" filterExt=".raw"
+        onSelect={(path) => set('disk_images', [...form.disk_images, path])} />
     </div>
   )
 }
