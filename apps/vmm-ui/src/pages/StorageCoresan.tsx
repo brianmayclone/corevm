@@ -73,6 +73,13 @@ export default function StorageCoresan() {
   const [claimError, setClaimError] = useState('')
   const [resetDisk, setResetDisk] = useState<DiscoveredDisk | null>(null)
 
+  // Auto-claim dialog
+  const [autoClaimOpen, setAutoClaimOpen] = useState(false)
+  const [autoClaimSelected, setAutoClaimSelected] = useState<Set<string>>(new Set())
+  const [autoClaimVolumeId, setAutoClaimVolumeId] = useState('')
+  const [autoClaimRunning, setAutoClaimRunning] = useState(false)
+  const [autoClaimError, setAutoClaimError] = useState('')
+
   // Dialogs
   const [createVolumeOpen, setCreateVolumeOpen] = useState(false)
   const [addHostOpen, setAddHostOpen] = useState(false)
@@ -293,6 +300,48 @@ export default function StorageCoresan() {
     }, 3000)
   }
 
+  const openAutoClaim = () => {
+    // Pre-select all empty (available) disks, leave has_data unchecked
+    const claimable = disks.filter(d => d.status === 'available' || d.status === 'has_data')
+    const preSelected = new Set(claimable.filter(d => d.status === 'available').map(d => d.path))
+    setAutoClaimSelected(preSelected)
+    setAutoClaimVolumeId(volumes[0]?.id || '')
+    setAutoClaimError('')
+    setAutoClaimOpen(true)
+  }
+
+  const handleAutoClaim = async () => {
+    if (autoClaimSelected.size === 0 || !autoClaimVolumeId) return
+    setAutoClaimRunning(true)
+    setAutoClaimError('')
+
+    const paths = Array.from(autoClaimSelected)
+    let ok = 0
+    let fail = 0
+
+    for (const devicePath of paths) {
+      const disk = disks.find(d => d.path === devicePath)
+      const resp = await fetch(sanApi('/api/disks/claim'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          device_path: devicePath,
+          volume_id: autoClaimVolumeId,
+          confirm_format: true,
+        }),
+      })
+      if (resp.ok) { ok++ } else { fail++ }
+    }
+
+    setAutoClaimRunning(false)
+    if (fail > 0) {
+      setAutoClaimError(`${ok} claimed, ${fail} failed`)
+    } else {
+      setAutoClaimOpen(false)
+    }
+    refresh()
+  }
+
   const handleClaimDisk = async () => {
     setClaimError('')
     if (!claimDisk || !claimVolumeId) return
@@ -446,10 +495,17 @@ export default function StorageCoresan() {
         <Card>
           <div className="flex items-center justify-between mb-3">
             <SectionLabel>Physical Disks</SectionLabel>
-            <span className="text-xs text-vmm-text-muted">
-              {disks.filter(d => d.status === 'available' || d.status === 'has_data').length} available,{' '}
-              {disks.filter(d => d.status === 'claimed').length} claimed
-            </span>
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-vmm-text-muted">
+                {disks.filter(d => d.status === 'available' || d.status === 'has_data').length} available,{' '}
+                {disks.filter(d => d.status === 'claimed').length} claimed
+              </span>
+              {disks.some(d => d.status === 'available' || d.status === 'has_data') && volumes.length > 0 && (
+                <Button variant="primary" onClick={openAutoClaim}>
+                  <Plus size={13} /> Auto-Claim
+                </Button>
+              )}
+            </div>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-xs">

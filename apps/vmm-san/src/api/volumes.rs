@@ -57,6 +57,20 @@ pub async fn create(
             "local_raid must be 'stripe', 'mirror', or 'stripe_mirror'".into()));
     }
 
+    // Validate that at least one disk is claimed (backends exist)
+    {
+        let db = state.db.lock().unwrap();
+        let backend_count: i64 = db.query_row(
+            "SELECT COUNT(*) FROM backends WHERE node_id = ?1 AND status = 'online'",
+            rusqlite::params![&state.node_id], |row| row.get(0),
+        ).unwrap_or(0);
+
+        if backend_count == 0 {
+            return Err((StatusCode::BAD_REQUEST,
+                "No disks claimed. Claim at least one disk before creating a volume.".into()));
+        }
+    }
+
     // Validate enough nodes for FTT
     let total_nodes = 1 + state.peers.iter()
         .filter(|p| p.status == crate::state::PeerStatus::Online)
