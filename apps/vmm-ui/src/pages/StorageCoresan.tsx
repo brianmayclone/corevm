@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
-import { Boxes, Plus, Trash2, RefreshCw, Shield, Zap, Wifi, WifiOff, HardDrive, Activity, Server } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { Boxes, Plus, Trash2, RefreshCw, Shield, Zap, WifiOff, HardDrive, Activity, Server, AlertTriangle, Check } from 'lucide-react'
+import type { CoreSanVolume, CoreSanBackend, CoreSanPeer, CoreSanStatus, CoreSanBenchmarkMatrix, Host } from '../api/types'
+import { useClusterStore } from '../stores/clusterStore'
 import api from '../api/client'
-import type { CoreSanVolume, CoreSanBackend, CoreSanPeer, CoreSanStatus, CoreSanBenchmarkMatrix } from '../api/types'
 import Card from '../components/Card'
 import SectionLabel from '../components/SectionLabel'
 import SpecRow from '../components/SpecRow'
@@ -46,6 +48,10 @@ function Badge({ label, color }: { label: string; color: string }) {
 }
 
 export default function StorageCoresan() {
+  const navigate = useNavigate()
+  const { backendMode, hosts, fetchHosts } = useClusterStore()
+  const isCluster = backendMode === 'cluster'
+
   const [status, setStatus] = useState<CoreSanStatus | null>(null)
   const [volumes, setVolumes] = useState<CoreSanVolume[]>([])
   const [selectedVolume, setSelectedVolume] = useState<string>('')
@@ -57,7 +63,7 @@ export default function StorageCoresan() {
 
   // Dialogs
   const [createVolumeOpen, setCreateVolumeOpen] = useState(false)
-  const [addBackendOpen, setAddBackendOpen] = useState(false)
+  const [addHostOpen, setAddHostOpen] = useState(false)
   const [deleteVolume, setDeleteVolume] = useState<CoreSanVolume | null>(null)
   const [deleteBackend, setDeleteBackend] = useState<CoreSanBackend | null>(null)
 
@@ -67,12 +73,15 @@ export default function StorageCoresan() {
   const [newVolReplicas, setNewVolReplicas] = useState(2)
   const [newVolSync, setNewVolSync] = useState('async')
 
-  // Add backend form
-  const [newBackendPath, setNewBackendPath] = useState('')
+  // Add host form
+  const [addHostId, setAddHostId] = useState('')
+  const [addHostBackendPath, setAddHostBackendPath] = useState('/vmm/san-data')
+  const [addHostError, setAddHostError] = useState('')
 
   const sanApi = (path: string) => `http://localhost:7443${path}`
 
   const refresh = async () => {
+    if (isCluster) fetchHosts()
     try {
       const [sRes, vRes, pRes] = await Promise.all([
         fetch(sanApi('/api/status')),
@@ -95,14 +104,12 @@ export default function StorageCoresan() {
 
   useEffect(() => { refresh() }, [])
 
-  // Load backends when volume is selected
   useEffect(() => {
     if (!selectedVolume) return
     fetch(sanApi(`/api/volumes/${selectedVolume}/backends`))
       .then(r => r.json()).then(setBackends).catch(() => setBackends([]))
   }, [selectedVolume])
 
-  // Load benchmark matrix
   useEffect(() => {
     if (!sanAvailable) return
     fetch(sanApi('/api/benchmark/matrix'))
@@ -110,7 +117,7 @@ export default function StorageCoresan() {
   }, [sanAvailable])
 
   const handleCreateVolume = async () => {
-    await fetch(sanApi('/api/volumes'), {
+    const resp = await fetch(sanApi('/api/volumes'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -120,23 +127,78 @@ export default function StorageCoresan() {
         sync_mode: newVolSync,
       }),
     })
+    if (!resp.ok) {
+      const text = await resp.text()
+      alert(text || 'Failed to create volume')
+      return
+    }
     setCreateVolumeOpen(false)
     setNewVolName('')
     refresh()
   }
 
-  const handleAddBackend = async () => {
-    await fetch(sanApi(`/api/volumes/${selectedVolume}/backends`), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: newBackendPath }),
-    })
-    setAddBackendOpen(false)
-    setNewBackendPath('')
-    // Reload backends
-    fetch(sanApi(`/api/volumes/${selectedVolume}/backends`))
-      .then(r => r.json()).then(setBackends).catch(() => {})
-    refresh()
+  const handleAddHost = async () => {
+    setAddHostError('')
+    if (!addHostId || !selectedVolume) return
+
+    // Find host address from cluster hosts
+    const host = hosts.find(h => h.id === addHostId)
+    if (!host) { setAddHostError('Host not found'); return }
+
+    // Derive the CoreSAN API address from the vmm-server address (replace port 8443 with 7443)
+    const sanAddr = host.address.replace(/:8443/, ':7443').replace(/:443/, ':7443')
+
+    try {
+      // 1. Create the backend directory on the remote host via agent
+      await api.post('/api/hosts/' + addHostId + '/exec', {
+        command: `mkdir -p ${addHostBackendPath}`,
+      }).catch(() => {}) // best effort
+
+      // 2. Add backend on the remote CoreSAN instance
+      const backendResp = await fetch(`${sanAddr}/api/volumes/${selectedVolume}/backends`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: addHostBackendPath }),
+      })
+
+      if (!backendResp.ok) {
+        const text = await backendResp.text()
+        setAddHostError(`Failed to add backend: ${text}`)
+        return
+      }
+
+      // 3. Register as peer (bidirectional)
+      const remoteStatus = await fetch(`${sanAddr}/api/status`).then(r => r.json()).catch(() => null)
+      if (remoteStatus && status) {
+        // Register remote on local
+        await fetch(sanApi('/api/peers/join'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            address: sanAddr, node_id: remoteStatus.node_id,
+            hostname: remoteStatus.hostname,
+          }),
+        })
+        // Register local on remote
+        await fetch(`${sanAddr}/api/peers/join`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            address: `http://localhost:7443`, node_id: status.node_id,
+            hostname: status.hostname,
+          }),
+        })
+      }
+
+      setAddHostOpen(false)
+      setAddHostId('')
+      refresh()
+      // Reload backends
+      fetch(sanApi(`/api/volumes/${selectedVolume}/backends`))
+        .then(r => r.json()).then(setBackends).catch(() => {})
+    } catch (e: any) {
+      setAddHostError(e.message || 'Failed to add host')
+    }
   }
 
   const handleDeleteVolume = async () => {
@@ -166,6 +228,22 @@ export default function StorageCoresan() {
 
   const sel = volumes.find(v => v.id === selectedVolume)
 
+  // Group backends by node
+  const backendsByNode = backends.reduce<Record<string, CoreSanBackend[]>>((acc, b) => {
+    const key = b.node_id
+    if (!acc[key]) acc[key] = []
+    acc[key].push(b)
+    return acc
+  }, {})
+
+  // Total node count = 1 (self) + peers
+  const totalNodes = 1 + peers.length
+  const onlineNodes = 1 + peers.filter(p => p.status === 'online').length
+
+  // Cluster hosts with/without CoreSAN (auto-discovered via heartbeat)
+  const sanHosts = hosts.filter(h => h.san_enabled)
+  const availableHosts = hosts.filter(h => h.status === 'online' && !h.san_enabled)
+
   if (loading) {
     return <div className="p-6 text-vmm-text-dim">Loading CoreSAN status...</div>
   }
@@ -181,9 +259,15 @@ export default function StorageCoresan() {
             <h2 className="text-lg font-bold text-vmm-text">CoreSAN Not Available</h2>
             <p className="text-sm text-vmm-text-dim text-center max-w-md">
               The CoreSAN daemon (vmm-san) is not running on this host.
-              Start it with <code className="text-vmm-accent">./tools/build-vmm-san.sh --run</code> or
-              enable it via the Cluster Storage Wizard.
+              {isCluster
+                ? ' Use the Storage Wizard to set up CoreSAN across your cluster.'
+                : ' Start it with the build script or enable it via the Cluster Storage Wizard.'}
             </p>
+            {isCluster && (
+              <Button variant="primary" onClick={() => navigate('/storage/wizard')}>
+                Open Storage Wizard
+              </Button>
+            )}
           </div>
         </Card>
       </div>
@@ -232,18 +316,73 @@ export default function StorageCoresan() {
           </div>
         </Card>
         <Card>
-          <div className="text-xs text-vmm-text-muted mb-1">Peers</div>
-          <div className="text-xl font-bold text-vmm-text">{peers.length}</div>
+          <div className="text-xs text-vmm-text-muted mb-1">Nodes</div>
+          <div className="text-xl font-bold text-vmm-text">{totalNodes}</div>
           <div className="text-xs text-vmm-text-muted mt-1">
-            {peers.filter(p => p.status === 'online').length} online
+            {onlineNodes} online
           </div>
         </Card>
         <Card>
-          <div className="text-xs text-vmm-text-muted mb-1">Node</div>
+          <div className="text-xs text-vmm-text-muted mb-1">This Node</div>
           <div className="text-sm font-bold text-vmm-text truncate">{status?.hostname}</div>
           <div className="text-xs text-vmm-text-muted mt-1 font-mono">{status?.node_id?.slice(0, 8)}...</div>
         </Card>
       </div>
+
+      {/* Participating Nodes */}
+      <Card>
+        <div className="flex items-center justify-between mb-3">
+          <SectionLabel>Participating Nodes</SectionLabel>
+          {isCluster && availableHosts.length > 0 && (
+            <Button variant="primary" onClick={() => { setAddHostOpen(true); setAddHostId(availableHosts[0]?.id || '') }}>
+              <Plus size={13} /> Add Host to CoreSAN
+            </Button>
+          )}
+        </div>
+        <div className="space-y-2">
+          {/* This node */}
+          <div className="flex items-center gap-3 p-3 rounded-lg bg-vmm-bg/50 border border-vmm-border">
+            <Server size={16} className="text-vmm-success shrink-0" />
+            <div className="flex-1">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-vmm-text">{status?.hostname}</span>
+                <Badge label="online" color={statusColors.online} />
+                <span className="text-[10px] text-vmm-text-muted">(this node)</span>
+              </div>
+              <div className="text-xs text-vmm-text-muted font-mono">{status?.node_id?.slice(0, 12)}...</div>
+            </div>
+            <span className="text-xs text-vmm-text-muted">
+              {backendsByNode[status?.node_id || '']?.length || 0} backend{(backendsByNode[status?.node_id || '']?.length || 0) !== 1 ? 's' : ''}
+            </span>
+          </div>
+          {/* Peers */}
+          {peers.map(p => (
+            <div key={p.node_id} className="flex items-center gap-3 p-3 rounded-lg bg-vmm-bg/50 border border-vmm-border">
+              <Server size={16} className={p.status === 'online' ? 'text-vmm-success' : 'text-vmm-danger'} />
+              <div className="flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-vmm-text">{p.hostname}</span>
+                  <Badge label={p.status} color={statusColors[p.status] || statusColors.offline} />
+                </div>
+                <div className="text-xs text-vmm-text-muted">{p.address}</div>
+              </div>
+              <span className="text-xs text-vmm-text-muted">
+                {backendsByNode[p.node_id]?.length || 0} backend{(backendsByNode[p.node_id]?.length || 0) !== 1 ? 's' : ''}
+              </span>
+              {p.last_heartbeat && (
+                <span className="text-xs text-vmm-text-muted">
+                  {new Date(p.last_heartbeat).toLocaleTimeString()}
+                </span>
+              )}
+            </div>
+          ))}
+          {peers.length === 0 && (
+            <p className="text-xs text-vmm-text-muted py-2 px-3">
+              Single-node mode — {isCluster ? 'add cluster hosts above for redundancy.' : 'add peers for redundancy.'}
+            </p>
+          )}
+        </div>
+      </Card>
 
       {/* Benchmark Summary */}
       {status?.benchmark_summary && (
@@ -255,7 +394,7 @@ export default function StorageCoresan() {
           <div className="grid grid-cols-3 gap-4">
             <SpecRow label="Avg Bandwidth" value={`${status.benchmark_summary.avg_bandwidth_mbps.toFixed(0)} Mbit/s`} />
             <SpecRow label="Avg Latency" value={`${status.benchmark_summary.avg_latency_us.toFixed(0)} μs`} />
-            <SpecRow label="Worst Peer" value={status.benchmark_summary.worst_peer || 'N/A'} />
+            <SpecRow label="Worst Peer" value={status.benchmark_summary.worst_peer?.slice(0, 8) || 'N/A'} />
           </div>
         </Card>
       )}
@@ -273,6 +412,7 @@ export default function StorageCoresan() {
             const volUsed = vol.total_bytes - vol.free_bytes
             const volPct = vol.total_bytes > 0 ? (volUsed / vol.total_bytes) * 100 : 0
             const effectiveCapacity = vol.resilience_mode === 'none' ? vol.total_bytes : Math.floor(vol.total_bytes / vol.replica_count)
+            const needsWarning = vol.resilience_mode === 'mirror' && vol.backend_count === 0
             return (
               <Card key={vol.id} className={`cursor-pointer transition-all ${selectedVolume === vol.id ? 'ring-1 ring-vmm-accent' : 'hover:border-vmm-accent/30'}`}
                 padding={false}>
@@ -284,12 +424,20 @@ export default function StorageCoresan() {
                       <Badge label={vol.resilience_mode} color={resilienceColors[vol.resilience_mode as ResilienceMode] || resilienceColors.none} />
                     </div>
                   </div>
-                  <ProgressBar value={volPct} detail={`${formatBytes(volUsed)} / ${formatBytes(vol.total_bytes)}`}
-                    color={volPct > 80 ? 'bg-vmm-danger' : 'bg-vmm-accent'} />
-                  <div className="flex items-center justify-between mt-2 text-xs text-vmm-text-muted">
-                    <span>{vol.backend_count} backend{vol.backend_count !== 1 ? 's' : ''}</span>
-                    <span>Effective: {formatBytes(effectiveCapacity)}</span>
-                  </div>
+                  {needsWarning ? (
+                    <div className="flex items-center gap-2 py-1 text-xs text-vmm-warning">
+                      <AlertTriangle size={12} /> No backends — add hosts to provide storage
+                    </div>
+                  ) : (
+                    <>
+                      <ProgressBar value={volPct} detail={`${formatBytes(volUsed)} / ${formatBytes(vol.total_bytes)}`}
+                        color={volPct > 80 ? 'bg-vmm-danger' : 'bg-vmm-accent'} />
+                      <div className="flex items-center justify-between mt-2 text-xs text-vmm-text-muted">
+                        <span>{vol.backend_count} backend{vol.backend_count !== 1 ? 's' : ''}</span>
+                        <span>Effective: {formatBytes(effectiveCapacity)}</span>
+                      </div>
+                    </>
+                  )}
                 </div>
               </Card>
             )
@@ -308,46 +456,79 @@ export default function StorageCoresan() {
                     <Trash2 size={13} /> Delete
                   </Button>
                 </div>
+
+                {/* Warning for mirror volumes without enough nodes/backends */}
+                {sel.resilience_mode === 'mirror' && totalNodes < sel.replica_count && (
+                  <div className="flex items-center gap-2 p-3 mb-4 rounded-lg bg-vmm-warning/10 border border-vmm-warning/30 text-sm text-vmm-warning">
+                    <AlertTriangle size={16} />
+                    This volume requires {sel.replica_count} nodes for full redundancy, but only {totalNodes} node{totalNodes !== 1 ? 's are' : ' is'} available.
+                    {isCluster ? ' Add more cluster hosts to CoreSAN.' : ' Add more peers.'}
+                  </div>
+                )}
+
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <SpecRow label="Resilience" value={resilienceLabels[sel.resilience_mode as ResilienceMode] || sel.resilience_mode} icon={Shield} />
+                  <SpecRow label="Resilience" value={resilienceLabels[sel.resilience_mode as ResilienceMode] || sel.resilience_mode} icon={<Shield size={14} />} />
                   <SpecRow label="Replicas" value={`${sel.replica_count}x`} />
-                  <SpecRow label="Sync Mode" value={sel.sync_mode === 'sync' ? 'Synchronous' : 'Asynchronous'} icon={Zap} />
-                  <SpecRow label="Backends" value={`${sel.backend_count}`} icon={HardDrive} />
+                  <SpecRow label="Sync Mode" value={sel.sync_mode === 'sync' ? 'Synchronous' : 'Asynchronous'} icon={<Zap size={14} />} />
+                  <SpecRow label="Backends" value={`${sel.backend_count}`} icon={<HardDrive size={14} />} />
                 </div>
               </Card>
 
-              {/* Backends */}
+              {/* Backends grouped by node */}
               <Card>
                 <div className="flex items-center justify-between mb-3">
-                  <SectionLabel>Backends (Mountpoints)</SectionLabel>
-                  <Button variant="primary" onClick={() => setAddBackendOpen(true)}>
-                    <Plus size={13} /> Add Backend
-                  </Button>
+                  <SectionLabel>Storage Backends</SectionLabel>
+                  {isCluster && availableHosts.length > 0 && (
+                    <Button variant="primary" onClick={() => { setAddHostOpen(true); setAddHostId(availableHosts[0]?.id || '') }}>
+                      <Plus size={13} /> Add Host
+                    </Button>
+                  )}
                 </div>
                 {backends.length === 0 ? (
-                  <p className="text-sm text-vmm-text-dim text-center py-4">
-                    No backends configured. Add a local mountpoint to provide storage.
-                  </p>
+                  <div className="text-center py-6">
+                    <p className="text-sm text-vmm-text-dim">
+                      No backends configured.
+                    </p>
+                    <p className="text-xs text-vmm-text-muted mt-1">
+                      {isCluster
+                        ? 'Add cluster hosts to contribute storage to this volume.'
+                        : 'Add a local mountpoint to provide storage.'}
+                    </p>
+                  </div>
                 ) : (
-                  <div className="space-y-2">
-                    {backends.map(b => {
-                      const bUsed = b.total_bytes - b.free_bytes
-                      const bPct = b.total_bytes > 0 ? (bUsed / b.total_bytes) * 100 : 0
+                  <div className="space-y-3">
+                    {Object.entries(backendsByNode).map(([nodeId, nodeBackends]) => {
+                      const isLocal = nodeId === status?.node_id
+                      const peer = peers.find(p => p.node_id === nodeId)
+                      const nodeName = isLocal ? status?.hostname : peer?.hostname || nodeId.slice(0, 8)
                       return (
-                        <div key={b.id} className="flex items-center gap-3 p-3 rounded-lg bg-vmm-bg/50 border border-vmm-border">
-                          <HardDrive size={16} className="text-vmm-text-muted shrink-0" />
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 mb-1">
-                              <span className="text-sm font-medium text-vmm-text truncate">{b.path}</span>
-                              <Badge label={b.status} color={statusColors[b.status] || statusColors.offline} />
-                            </div>
-                            <ProgressBar value={bPct} detail={`${formatBytes(bUsed)} / ${formatBytes(b.total_bytes)}`}
-                              color={bPct > 80 ? 'bg-vmm-danger' : 'bg-vmm-accent'} />
+                        <div key={nodeId}>
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <Server size={12} className={isLocal || peer?.status === 'online' ? 'text-vmm-success' : 'text-vmm-danger'} />
+                            <span className="text-xs font-semibold text-vmm-text-muted uppercase tracking-wider">{nodeName}</span>
+                            {isLocal && <span className="text-[9px] text-vmm-text-muted">(local)</span>}
                           </div>
-                          <button onClick={() => setDeleteBackend(b)}
-                            className="p-1.5 rounded hover:bg-vmm-danger/10 text-vmm-text-muted hover:text-vmm-danger transition-colors">
-                            <Trash2 size={14} />
-                          </button>
+                          {nodeBackends.map(b => {
+                            const bUsed = b.total_bytes - b.free_bytes
+                            const bPct = b.total_bytes > 0 ? (bUsed / b.total_bytes) * 100 : 0
+                            return (
+                              <div key={b.id} className="flex items-center gap-3 p-3 ml-4 rounded-lg bg-vmm-bg/50 border border-vmm-border mb-1.5">
+                                <HardDrive size={14} className="text-vmm-text-muted shrink-0" />
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center gap-2 mb-1">
+                                    <span className="text-xs font-medium text-vmm-text truncate">{b.path}</span>
+                                    <Badge label={b.status} color={statusColors[b.status] || statusColors.offline} />
+                                  </div>
+                                  <ProgressBar value={bPct} detail={`${formatBytes(bUsed)} / ${formatBytes(b.total_bytes)}`}
+                                    color={bPct > 80 ? 'bg-vmm-danger' : 'bg-vmm-accent'} />
+                                </div>
+                                <button onClick={() => setDeleteBackend(b)}
+                                  className="p-1.5 rounded hover:bg-vmm-danger/10 text-vmm-text-muted hover:text-vmm-danger transition-colors cursor-pointer">
+                                  <Trash2 size={14} />
+                                </button>
+                              </div>
+                            )
+                          })}
                         </div>
                       )
                     })}
@@ -362,36 +543,6 @@ export default function StorageCoresan() {
               </p>
             </Card>
           )}
-
-          {/* Peers */}
-          <Card>
-            <SectionLabel>Peers</SectionLabel>
-            {peers.length === 0 ? (
-              <p className="text-sm text-vmm-text-dim text-center py-4">
-                No peers connected. CoreSAN is running in single-node mode.
-              </p>
-            ) : (
-              <div className="space-y-2 mt-3">
-                {peers.map(p => (
-                  <div key={p.node_id} className="flex items-center gap-3 p-3 rounded-lg bg-vmm-bg/50 border border-vmm-border">
-                    <Server size={16} className={p.status === 'online' ? 'text-vmm-success' : 'text-vmm-danger'} />
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-vmm-text">{p.hostname}</span>
-                        <Badge label={p.status} color={statusColors[p.status] || statusColors.offline} />
-                      </div>
-                      <div className="text-xs text-vmm-text-muted">{p.address}</div>
-                    </div>
-                    {p.last_heartbeat && (
-                      <span className="text-xs text-vmm-text-muted">
-                        {new Date(p.last_heartbeat).toLocaleTimeString()}
-                      </span>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </Card>
 
           {/* Benchmark Matrix */}
           {benchmarkMatrix && benchmarkMatrix.entries.length > 0 && (
@@ -436,93 +587,107 @@ export default function StorageCoresan() {
       </div>
 
       {/* Create Volume Dialog */}
-      {createVolumeOpen && (
-        <Dialog title="Create Volume" onClose={() => setCreateVolumeOpen(false)}>
-          <div className="space-y-4">
-            <FormField label="Volume Name">
-              <TextInput value={newVolName} onChange={setNewVolName} placeholder="e.g. pool-a" />
-            </FormField>
-            <FormField label="Resilience Mode">
-              <Select value={newVolMode} onChange={(v) => {
-                setNewVolMode(v as ResilienceMode)
-                if (v === 'none') setNewVolReplicas(1)
-                else if (newVolReplicas < 2) setNewVolReplicas(2)
-              }} options={[
-                { value: 'none', label: 'No Protection (RAID-0) — 1 copy, maximum space' },
-                { value: 'mirror', label: 'Mirror (RAID-1) — N copies, maximum safety' },
-                { value: 'erasure', label: 'Erasure Coding (RAID-5/6) — balanced (coming soon)' },
-              ]} />
-            </FormField>
-            {newVolMode === 'mirror' && (
+      <Dialog open={createVolumeOpen} title="Create Volume" onClose={() => setCreateVolumeOpen(false)}>
+        <div className="space-y-4">
+          <FormField label="Volume Name">
+            <TextInput value={newVolName} onChange={(e) => setNewVolName(e.target.value)} placeholder="e.g. pool-a" />
+          </FormField>
+          <FormField label="Resilience Mode">
+            <Select value={newVolMode} onChange={(e) => {
+              const v = e.target.value
+              setNewVolMode(v as ResilienceMode)
+              if (v === 'none') setNewVolReplicas(1)
+              else if (newVolReplicas < 2) setNewVolReplicas(2)
+            }} options={[
+              { value: 'none', label: 'No Protection (RAID-0) — 1 copy, maximum space' },
+              { value: 'mirror', label: 'Mirror (RAID-1) — N copies, maximum safety' },
+            ]} />
+          </FormField>
+          {newVolMode === 'mirror' && (
+            <>
               <FormField label="Replica Count">
-                <Select value={String(newVolReplicas)} onChange={(v) => setNewVolReplicas(Number(v))} options={[
+                <Select value={String(newVolReplicas)} onChange={(e) => setNewVolReplicas(Number(e.target.value))} options={[
                   { value: '2', label: '2 copies — tolerates 1 node failure' },
                   { value: '3', label: '3 copies — tolerates 2 node failures' },
-                  { value: '4', label: '4 copies — maximum redundancy' },
                 ]} />
               </FormField>
-            )}
-            <FormField label="Sync Mode">
-              <Select value={newVolSync} onChange={setNewVolSync} options={[
-                { value: 'async', label: 'Asynchronous — fast writes, background replication' },
-                { value: 'sync', label: 'Synchronous — wait for all replicas (slower, safer)' },
-              ]} />
-            </FormField>
-            <div className="flex justify-end gap-2 pt-2">
-              <Button variant="ghost" onClick={() => setCreateVolumeOpen(false)}>Cancel</Button>
-              <Button variant="primary" onClick={handleCreateVolume} disabled={!newVolName.trim()}>
-                Create Volume
-              </Button>
-            </div>
+              {newVolReplicas > totalNodes && (
+                <div className="flex items-center gap-2 p-3 rounded-lg bg-vmm-warning/10 border border-vmm-warning/30 text-xs text-vmm-warning">
+                  <AlertTriangle size={14} />
+                  {newVolReplicas} replicas requires {newVolReplicas} nodes, but only {totalNodes} available. Add more hosts first.
+                </div>
+              )}
+            </>
+          )}
+          <FormField label="Sync Mode">
+            <Select value={newVolSync} onChange={(e) => setNewVolSync(e.target.value)} options={[
+              { value: 'async', label: 'Asynchronous — fast writes, background replication' },
+              { value: 'sync', label: 'Synchronous — wait for all replicas (slower, safer)' },
+            ]} />
+          </FormField>
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="ghost" onClick={() => setCreateVolumeOpen(false)}>Cancel</Button>
+            <Button variant="primary" onClick={handleCreateVolume}
+              disabled={!newVolName.trim() || (newVolMode === 'mirror' && newVolReplicas > totalNodes)}>
+              Create Volume
+            </Button>
           </div>
-        </Dialog>
-      )}
+        </div>
+      </Dialog>
 
-      {/* Add Backend Dialog */}
-      {addBackendOpen && (
-        <Dialog title="Add Backend" onClose={() => setAddBackendOpen(false)}>
-          <div className="space-y-4">
-            <p className="text-sm text-vmm-text-dim">
-              Add a local directory as storage backend for this volume.
-              The directory must exist and be writable.
-            </p>
-            <FormField label="Directory Path">
-              <TextInput value={newBackendPath} onChange={setNewBackendPath}
-                placeholder="e.g. /mnt/data1" />
-            </FormField>
-            <div className="flex justify-end gap-2 pt-2">
-              <Button variant="ghost" onClick={() => setAddBackendOpen(false)}>Cancel</Button>
-              <Button variant="primary" onClick={handleAddBackend} disabled={!newBackendPath.trim()}>
-                Add Backend
-              </Button>
+      {/* Add Host to CoreSAN Dialog */}
+      <Dialog open={addHostOpen} title="Add Host to CoreSAN" onClose={() => { setAddHostOpen(false); setAddHostError('') }}>
+        <div className="space-y-4">
+          <p className="text-sm text-vmm-text-dim">
+            Select a cluster host to add to this CoreSAN volume. A storage backend will be created
+            on the host, and it will be registered as a peer for data replication.
+          </p>
+          {addHostError && (
+            <div className="bg-vmm-danger/10 border border-vmm-danger/30 text-vmm-danger rounded-lg p-3 text-sm">
+              {addHostError}
             </div>
+          )}
+          <FormField label="Host">
+            <Select value={addHostId} onChange={(e) => setAddHostId(e.target.value)}
+              options={availableHosts.map(h => ({ value: h.id, label: `${h.hostname} (${h.address})` }))} />
+          </FormField>
+          <FormField label="Backend Storage Path">
+            <TextInput value={addHostBackendPath} onChange={(e) => setAddHostBackendPath(e.target.value)}
+              placeholder="/vmm/san-data" />
+            <p className="text-[10px] text-vmm-text-muted mt-1">
+              Local directory on the host that contributes storage. Must be a mounted filesystem.
+            </p>
+          </FormField>
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="ghost" onClick={() => { setAddHostOpen(false); setAddHostError('') }}>Cancel</Button>
+            <Button variant="primary" onClick={handleAddHost} disabled={!addHostId}>
+              Add Host
+            </Button>
           </div>
-        </Dialog>
-      )}
+        </div>
+      </Dialog>
 
       {/* Delete Volume Confirm */}
-      {deleteVolume && (
-        <ConfirmDialog
-          title="Delete Volume"
-          message={`Are you sure you want to delete volume "${deleteVolume.name}"? This cannot be undone. The volume must be empty.`}
-          confirmLabel="Delete"
-          variant="danger"
-          onConfirm={handleDeleteVolume}
-          onCancel={() => setDeleteVolume(null)}
-        />
-      )}
+      <ConfirmDialog
+        open={!!deleteVolume}
+        title="Delete Volume"
+        message={deleteVolume ? `Are you sure you want to delete volume "${deleteVolume.name}"? This cannot be undone. The volume must be empty.` : ''}
+        confirmLabel="Delete"
+        danger
+        onConfirm={handleDeleteVolume}
+        onCancel={() => setDeleteVolume(null)}
+      />
 
       {/* Delete Backend Confirm */}
-      {deleteBackend && (
-        <ConfirmDialog
-          title="Remove Backend"
-          message={`Remove backend "${deleteBackend.path}"? If it contains data, it will be drained to other backends first.`}
-          confirmLabel="Remove"
-          variant="danger"
-          onConfirm={handleDeleteBackend}
-          onCancel={() => setDeleteBackend(null)}
-        />
-      )}
+      <ConfirmDialog
+        open={!!deleteBackend}
+        title="Remove Backend"
+        message={deleteBackend ? `Remove backend "${deleteBackend.path}"? If it contains data, it will be drained to other backends first.` : ''}
+        confirmLabel="Remove"
+        danger
+        onConfirm={handleDeleteBackend}
+        onCancel={() => setDeleteBackend(null)}
+      />
     </div>
   )
 }

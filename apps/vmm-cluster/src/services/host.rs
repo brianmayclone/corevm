@@ -28,6 +28,12 @@ pub struct HostInfo {
     pub version: String,
     pub vm_count: i64,
     pub registered_at: String,
+    // CoreSAN auto-discovery (populated via heartbeat)
+    pub san_enabled: bool,
+    pub san_node_id: String,
+    pub san_address: String,
+    pub san_volumes: i64,
+    pub san_peers: i64,
 }
 
 impl HostService {
@@ -38,7 +44,8 @@ impl HostService {
                     h.free_ram_mb, h.cpu_usage_pct, h.hw_virtualization,
                     h.status, h.maintenance_mode, h.connection_state,
                     h.last_heartbeat, h.version, h.registered_at,
-                    (SELECT COUNT(*) FROM vms v WHERE v.host_id = h.id) as vm_count
+                    (SELECT COUNT(*) FROM vms v WHERE v.host_id = h.id) as vm_count,
+                    h.san_enabled, h.san_node_id, h.san_address, h.san_volumes, h.san_peers
              FROM hosts h ORDER BY h.hostname"
         ).map_err(|e| e.to_string())?;
 
@@ -53,6 +60,11 @@ impl HostService {
                 connection_state: row.get(13)?, last_heartbeat: row.get(14)?,
                 version: row.get(15)?, registered_at: row.get(16)?,
                 vm_count: row.get(17)?,
+                san_enabled: row.get::<_, i32>(18)? != 0,
+                san_node_id: row.get(19)?,
+                san_address: row.get(20)?,
+                san_volumes: row.get(21)?,
+                san_peers: row.get(22)?,
             })
         }).map_err(|e| e.to_string())?
         .filter_map(|r| r.ok()).collect();
@@ -66,7 +78,8 @@ impl HostService {
                     h.free_ram_mb, h.cpu_usage_pct, h.hw_virtualization,
                     h.status, h.maintenance_mode, h.connection_state,
                     h.last_heartbeat, h.version, h.registered_at,
-                    (SELECT COUNT(*) FROM vms v WHERE v.host_id = h.id)
+                    (SELECT COUNT(*) FROM vms v WHERE v.host_id = h.id),
+                    h.san_enabled, h.san_node_id, h.san_address, h.san_volumes, h.san_peers
              FROM hosts h WHERE h.id = ?1",
             rusqlite::params![id],
             |row| {
@@ -80,6 +93,11 @@ impl HostService {
                     connection_state: row.get(13)?, last_heartbeat: row.get(14)?,
                     version: row.get(15)?, registered_at: row.get(16)?,
                     vm_count: row.get(17)?,
+                    san_enabled: row.get::<_, i32>(18)? != 0,
+                    san_node_id: row.get(19)?,
+                    san_address: row.get(20)?,
+                    san_volumes: row.get(21)?,
+                    san_peers: row.get(22)?,
                 })
             },
         ).map_err(|_| "Host not found".to_string())

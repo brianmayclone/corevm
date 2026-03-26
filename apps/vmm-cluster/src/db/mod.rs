@@ -49,7 +49,13 @@ CREATE TABLE IF NOT EXISTS hosts (
     connection_state TEXT NOT NULL DEFAULT 'disconnected',
     last_heartbeat  TEXT,
     version         TEXT NOT NULL DEFAULT '',
-    registered_at   TEXT NOT NULL DEFAULT (datetime('now'))
+    registered_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    -- CoreSAN status (updated via heartbeat, auto-discovered)
+    san_enabled     INTEGER NOT NULL DEFAULT 0,      -- 1 if vmm-san is running on this host
+    san_node_id     TEXT NOT NULL DEFAULT '',         -- CoreSAN node UUID
+    san_address     TEXT NOT NULL DEFAULT '',         -- CoreSAN API address (e.g. http://host:7443)
+    san_volumes     INTEGER NOT NULL DEFAULT 0,       -- number of CoreSAN volumes
+    san_peers       INTEGER NOT NULL DEFAULT 0        -- number of CoreSAN peers
 );
 
 -- ═══════════════════════════════════════════════════════════════
@@ -462,11 +468,24 @@ CREATE TABLE IF NOT EXISTS ldap_configs (
 
 /// Initialize the database: create tables and seed default data.
 pub fn init(db: &Connection) -> Result<(), String> {
+    // Migrate existing databases before creating schema
+    migrate(db);
+
     db.execute_batch(SCHEMA)
         .map_err(|e| format!("Failed to create schema: {}", e))?;
 
     seed_defaults(db)?;
     Ok(())
+}
+
+/// Apply schema migrations for existing databases.
+fn migrate(db: &Connection) {
+    // CoreSAN host fields (added in CoreSAN integration)
+    db.execute_batch("ALTER TABLE hosts ADD COLUMN san_enabled INTEGER NOT NULL DEFAULT 0;").ok();
+    db.execute_batch("ALTER TABLE hosts ADD COLUMN san_node_id TEXT NOT NULL DEFAULT '';").ok();
+    db.execute_batch("ALTER TABLE hosts ADD COLUMN san_address TEXT NOT NULL DEFAULT '';").ok();
+    db.execute_batch("ALTER TABLE hosts ADD COLUMN san_volumes INTEGER NOT NULL DEFAULT 0;").ok();
+    db.execute_batch("ALTER TABLE hosts ADD COLUMN san_peers INTEGER NOT NULL DEFAULT 0;").ok();
 }
 
 /// Seed default admin user and default resource group.

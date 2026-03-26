@@ -156,26 +156,57 @@ export default function StorageWizard() {
       {/* ── Step 1: Choose Type ──────────────────────────────────── */}
       {step === 1 && (
         <div className="space-y-4">
-          <h2 className="text-lg font-semibold text-vmm-text">Choose Filesystem Type</h2>
-          <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+          <h2 className="text-lg font-semibold text-vmm-text">Choose Storage Type</h2>
+
+          {/* CoreSAN — featured recommendation */}
+          <Card>
+            <div onClick={() => setFsType('coresan')}
+              className={`p-6 cursor-pointer rounded-xl transition-colors relative ${fsType === 'coresan' ? 'ring-2 ring-vmm-accent bg-vmm-accent/5' : 'hover:bg-vmm-surface-hover'}`}>
+              <span className="absolute top-3 right-3 inline-flex items-center gap-1 px-2.5 py-1 rounded text-[10px] font-bold bg-vmm-success/20 text-vmm-success border border-vmm-success/30">
+                <Star size={10} /> RECOMMENDED
+              </span>
+              <div className="flex items-center gap-5">
+                <div className="w-14 h-14 rounded-2xl bg-vmm-accent/10 flex items-center justify-center shrink-0">
+                  <Boxes size={28} className={fsType === 'coresan' ? 'text-vmm-accent' : 'text-vmm-success'} />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-vmm-text">CoreSAN — Software-Defined Storage</h3>
+                  <p className="text-sm text-vmm-text-dim mt-1">
+                    Built-in distributed storage with per-volume RAID levels, automatic replication,
+                    self-healing, write ownership, and network benchmarking. Works with 1 or more nodes.
+                    No external software required.
+                  </p>
+                  <div className="flex items-center gap-4 mt-2.5 text-xs text-vmm-text-muted">
+                    <span className="flex items-center gap-1"><Check size={12} className="text-vmm-success" /> RAID-0/1 per volume</span>
+                    <span className="flex items-center gap-1"><Check size={12} className="text-vmm-success" /> Auto-replication</span>
+                    <span className="flex items-center gap-1"><Check size={12} className="text-vmm-success" /> Self-healing</span>
+                    <span className="flex items-center gap-1"><Check size={12} className="text-vmm-success" /> FUSE-based</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </Card>
+
+          {/* Separator */}
+          <div className="flex items-center gap-3 pt-1">
+            <div className="flex-1 h-px bg-vmm-border" />
+            <span className="text-[10px] font-semibold tracking-widest text-vmm-text-muted uppercase">Other Options</span>
+            <div className="flex-1 h-px bg-vmm-border" />
+          </div>
+
+          {/* Other filesystem options */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             {([
-              { id: 'coresan', icon: Boxes, title: 'CoreSAN', desc: 'Software-Defined Storage', detail: 'Built-in distributed storage with per-volume RAID levels, automatic replication, self-healing, and network benchmarking. No external software required.', recommended: true },
-              { id: 'nfs', icon: Server, title: 'NFS', desc: 'Network File Share', detail: 'Sets up one host as NFS server and mounts the share on all others. Simple and reliable.', recommended: false },
-              { id: 'glusterfs', icon: Database, title: 'GlusterFS', desc: 'Distributed Replicated', detail: 'Installs GlusterFS on all hosts and creates a replicated volume. No external server needed.', recommended: false },
-              { id: 'cephfs', icon: HardDrive, title: 'CephFS', desc: 'Enterprise Scale-Out', detail: 'Installs Ceph across your hosts with CephFS. Maximum scalability and fault tolerance.', recommended: false },
+              { id: 'nfs', icon: Server, title: 'NFS', desc: 'Sets up one host as NFS server and mounts the share on all others. Simple and reliable.' },
+              { id: 'glusterfs', icon: Database, title: 'GlusterFS', desc: 'Installs GlusterFS on all hosts and creates a replicated volume. No external server needed.' },
+              { id: 'cephfs', icon: HardDrive, title: 'CephFS', desc: 'Installs Ceph across your hosts with CephFS. Maximum scalability and fault tolerance.' },
             ] as const).map(opt => (
               <Card key={opt.id}>
                 <div onClick={() => setFsType(opt.id)}
-                  className={`p-5 cursor-pointer rounded-xl transition-colors text-center relative ${fsType === opt.id ? 'ring-2 ring-vmm-accent bg-vmm-accent/5' : 'hover:bg-vmm-surface-hover'}`}>
-                  {opt.recommended && (
-                    <span className="absolute top-2 right-2 inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-vmm-success/20 text-vmm-success border border-vmm-success/30">
-                      <Star size={10} /> RECOMMENDED
-                    </span>
-                  )}
-                  <opt.icon size={32} className={`mx-auto mb-3 ${fsType === opt.id ? 'text-vmm-accent' : opt.recommended ? 'text-vmm-success' : 'text-vmm-text-muted'}`} />
-                  <h3 className="text-base font-semibold text-vmm-text">{opt.title}</h3>
-                  <p className="text-xs text-vmm-accent mt-1">{opt.desc}</p>
-                  <p className="text-xs text-vmm-text-muted mt-2">{opt.detail}</p>
+                  className={`p-4 cursor-pointer rounded-xl transition-colors text-center ${fsType === opt.id ? 'ring-2 ring-vmm-accent bg-vmm-accent/5' : 'hover:bg-vmm-surface-hover'}`}>
+                  <opt.icon size={24} className={`mx-auto mb-2 ${fsType === opt.id ? 'text-vmm-accent' : 'text-vmm-text-muted'}`} />
+                  <h3 className="text-sm font-semibold text-vmm-text">{opt.title}</h3>
+                  <p className="text-xs text-vmm-text-muted mt-1.5">{opt.desc}</p>
                 </div>
               </Card>
             ))}

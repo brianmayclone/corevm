@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { HardDrive, Plus, Settings, CheckCircle, AlertTriangle, Trash2, Link, Workflow } from 'lucide-react'
+import { HardDrive, Plus, Settings, CheckCircle, AlertTriangle, Trash2, Link, Workflow, Boxes, ArrowRight } from 'lucide-react'
 import api from '../api/client'
-import type { StoragePool, StorageStats, DiskImage, Iso, Cluster } from '../api/types'
+import type { StoragePool, StorageStats, DiskImage, Iso, Cluster, CoreSanStatus } from '../api/types'
 import { useClusterStore } from '../stores/clusterStore'
 import Card from '../components/Card'
 import SectionLabel from '../components/SectionLabel'
@@ -28,6 +28,7 @@ export default function Storage() {
   const [deleteImage, setDeleteImage] = useState<DiskImage | null>(null)
   const [orphanedOpen, setOrphanedOpen] = useState(false)
   const [filter, setFilter] = useState<'all' | 'orphaned'>('all')
+  const [sanStatus, setSanStatus] = useState<CoreSanStatus | null>(null)
 
   // Cluster-mode: cluster selector
   const [clusters, setClusters] = useState<Cluster[]>([])
@@ -50,6 +51,8 @@ export default function Storage() {
     api.get<StorageStats>('/api/storage/stats').then(({ data }) => setStats(data)).catch(() => {})
     api.get<DiskImage[]>('/api/storage/images').then(({ data }) => setImages(data)).catch(() => {})
     api.get<Iso[]>('/api/storage/isos').then(({ data }) => setIsos(data)).catch(() => {})
+    // Try to reach local CoreSAN daemon
+    fetch('http://localhost:7443/api/status').then(r => r.json()).then(setSanStatus).catch(() => setSanStatus(null))
   }
   // Refresh when cluster selection changes, or on mount in standalone mode
   useEffect(() => {
@@ -173,6 +176,62 @@ export default function Storage() {
           </div>
         </Card>
       </div>
+
+      {/* ── CoreSAN Status ────────────────────────────────────────── */}
+      {sanStatus && sanStatus.running && (
+        <Card>
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-lg bg-vmm-accent/10 flex items-center justify-center">
+                <Boxes size={16} className="text-vmm-accent" />
+              </div>
+              <div>
+                <h2 className="text-sm font-bold text-vmm-text">CoreSAN</h2>
+                <p className="text-[10px] text-vmm-text-muted">
+                  {sanStatus.volumes.length} volume{sanStatus.volumes.length !== 1 ? 's' : ''} &middot; {sanStatus.peer_count} peer{sanStatus.peer_count !== 1 ? 's' : ''} &middot; {sanStatus.hostname}
+                </p>
+              </div>
+            </div>
+            <button onClick={() => navigate('/storage/coresan')}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-vmm-accent hover:text-vmm-accent-hover transition-colors cursor-pointer">
+              Manage <ArrowRight size={12} />
+            </button>
+          </div>
+          {sanStatus.volumes.length > 0 && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+              {sanStatus.volumes.map(vol => {
+                const used = vol.total_bytes - vol.free_bytes
+                const pct = vol.total_bytes > 0 ? Math.round((used / vol.total_bytes) * 100) : 0
+                return (
+                  <div key={vol.volume_id} className="flex items-center gap-3 p-3 rounded-lg bg-vmm-bg/50 border border-vmm-border">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-xs font-medium text-vmm-text truncate">{vol.volume_name}</span>
+                        <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold border tracking-wider uppercase ${
+                          vol.status === 'online' ? 'bg-vmm-success/20 text-vmm-success border-vmm-success/30' :
+                          vol.status === 'degraded' ? 'bg-vmm-warning/20 text-vmm-warning border-vmm-warning/30' :
+                          'bg-vmm-danger/20 text-vmm-danger border-vmm-danger/30'
+                        }`}>{vol.status}</span>
+                        <span className="px-1.5 py-0.5 rounded text-[9px] font-bold border tracking-wider uppercase bg-vmm-surface text-vmm-text-muted border-vmm-border">
+                          {vol.resilience_mode === 'mirror' ? `${vol.replica_count}x mirror` : vol.resilience_mode}
+                        </span>
+                      </div>
+                      <div className="w-full h-1 bg-vmm-border rounded-full overflow-hidden">
+                        <div className={`h-full rounded-full ${pct > 80 ? 'bg-vmm-danger' : 'bg-vmm-accent'}`}
+                          style={{ width: `${pct}%` }} />
+                      </div>
+                      <div className="flex justify-between mt-1 text-[10px] text-vmm-text-muted">
+                        <span>{formatBytes(used)} / {formatBytes(vol.total_bytes)}</span>
+                        <span>{vol.files_syncing > 0 ? `${vol.files_syncing} syncing` : `${vol.files_synced} synced`}</span>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </Card>
+      )}
 
       {/* ── Storage Pools ─────────────────────────────────────────── */}
       <div>

@@ -65,20 +65,42 @@ async fn poll_all_nodes(state: &Arc<ClusterState>) {
                         );
                     }
 
-                    // Sync CoreSAN status — update vsan-type datastores with SAN volume capacity
-                    if let Some(ref san) = status.san {
-                        for vol in &san.volumes {
-                            // Find matching datastore with store_type "vsan" and matching mount path
+                    // Sync CoreSAN status into hosts table (auto-discovery)
+                    match &status.san {
+                        Some(san) if san.running => {
                             let _ = db.execute(
-                                "UPDATE datastores SET total_bytes = ?1, free_bytes = ?2,
-                                    status = CASE WHEN ?3 = 'online' THEN 'online'
-                                                  WHEN ?3 = 'degraded' THEN 'degraded'
-                                                  ELSE 'offline' END
-                                 WHERE store_type = 'vsan' AND name = ?4",
+                                "UPDATE hosts SET san_enabled = 1, san_node_id = ?1,
+                                    san_address = ?2, san_volumes = ?3, san_peers = ?4
+                                 WHERE id = ?5",
                                 rusqlite::params![
-                                    vol.total_bytes as i64, vol.free_bytes as i64,
-                                    &vol.status, &vol.volume_name
+                                    &san.node_id, &san.address,
+                                    san.volumes.len() as i64, san.peer_count as i64,
+                                    &node_id
                                 ],
+                            );
+
+                            // Also update vsan-type datastores with volume capacity
+                            for vol in &san.volumes {
+                                let _ = db.execute(
+                                    "UPDATE datastores SET total_bytes = ?1, free_bytes = ?2,
+                                        status = CASE WHEN ?3 = 'online' THEN 'online'
+                                                      WHEN ?3 = 'degraded' THEN 'degraded'
+                                                      ELSE 'offline' END
+                                     WHERE store_type = 'vsan' AND name = ?4",
+                                    rusqlite::params![
+                                        vol.total_bytes as i64, vol.free_bytes as i64,
+                                        &vol.status, &vol.volume_name
+                                    ],
+                                );
+                            }
+                        }
+                        _ => {
+                            // CoreSAN not running on this host
+                            let _ = db.execute(
+                                "UPDATE hosts SET san_enabled = 0, san_node_id = '',
+                                    san_address = '', san_volumes = 0, san_peers = 0
+                                 WHERE id = ?1",
+                                rusqlite::params![&node_id],
                             );
                         }
                     }

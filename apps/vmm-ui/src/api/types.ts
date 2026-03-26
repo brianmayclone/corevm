@@ -268,6 +268,12 @@ export interface Host {
   version: string
   vm_count: number
   registered_at: string
+  // CoreSAN auto-discovery (populated via heartbeat)
+  san_enabled: boolean
+  san_node_id: string
+  san_address: string
+  san_volumes: number
+  san_peers: number
 }
 
 export interface Cluster {

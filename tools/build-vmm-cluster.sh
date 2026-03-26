@@ -23,6 +23,22 @@ CYAN='\033[0;36m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+# ── Ensure cargo is in PATH (when called via sudo) ────────────────────
+
+if ! command -v cargo >/dev/null 2>&1; then
+    for CARGO_HOME in "$HOME/.cargo" "/home/${SUDO_USER:-$USER}/.cargo" "/root/.cargo"; do
+        if [ -f "$CARGO_HOME/env" ]; then
+            . "$CARGO_HOME/env"
+            break
+        fi
+    done
+    if ! command -v cargo >/dev/null 2>&1; then
+        echo -e "${RED}ERROR: cargo not found in PATH.${NC}"
+        echo -e "If running with sudo, use: ${CYAN}sudo -E env \"PATH=\$PATH\" $0 $*${NC}"
+        exit 1
+    fi
+fi
+
 # ── Build vmm-cluster ────────────────────────────────────────────────────
 
 echo -e "${CYAN}=== Building vmm-cluster (Rust) ===${NC}"

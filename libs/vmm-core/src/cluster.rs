@@ -283,6 +283,8 @@ pub struct CoreSanNodeStatus {
     pub address: String,
     pub node_id: String,
     pub volumes: Vec<CoreSanVolumeStatus>,
+    #[serde(default)]
+    pub peer_count: u32,
     pub benchmark_summary: Option<CoreSanBenchmarkSummary>,
 }
 

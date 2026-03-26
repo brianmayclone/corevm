@@ -71,6 +71,21 @@ pub async fn create(
             "resilience_mode 'mirror' requires replica_count >= 2".into()));
     }
 
+    // Validate that enough nodes exist for the requested replica count.
+    // Total nodes = 1 (self) + online peers.
+    let total_nodes = 1 + state.peers.iter()
+        .filter(|p| p.status == crate::state::PeerStatus::Online)
+        .count() as u32;
+
+    if body.resilience_mode == "mirror" && body.replica_count > total_nodes {
+        return Err((StatusCode::BAD_REQUEST,
+            format!(
+                "replica_count {} requires at least {} nodes, but only {} available (1 local + {} peers). \
+                 Add more peers first, or reduce replica_count.",
+                body.replica_count, body.replica_count, total_nodes, total_nodes - 1
+            )));
+    }
+
     let id = Uuid::new_v4().to_string();
     let db = state.db.lock().unwrap();
 

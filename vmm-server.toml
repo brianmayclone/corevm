@@ -8,7 +8,7 @@ session_timeout_hours = 24
 
 [storage]
 default_pool = ".vmm/images"
-iso_pool = ".vmm/isos"|
+iso_pool = ".vmm/isos"
 
 [vms]
 config_dir = ".vmm/vms"
