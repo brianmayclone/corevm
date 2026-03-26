@@ -33,10 +33,12 @@ pub async fn add(
 ) -> Result<(StatusCode, Json<BackendResponse>), (StatusCode, String)> {
     let path = std::path::Path::new(&body.path);
 
-    // Validate the path exists and is a directory
+    // Create the directory if it doesn't exist
     if !path.exists() {
-        return Err((StatusCode::BAD_REQUEST,
-            format!("Path does not exist: {}", body.path)));
+        std::fs::create_dir_all(path)
+            .map_err(|e| (StatusCode::BAD_REQUEST,
+                format!("Cannot create directory {}: {}", body.path, e)))?;
+        tracing::info!("Created backend directory: {}", body.path);
     }
     if !path.is_dir() {
         return Err((StatusCode::BAD_REQUEST,

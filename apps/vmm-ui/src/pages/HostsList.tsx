@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Server, Plus, Circle, Cpu, MemoryStick, Wrench } from 'lucide-react'
+import { Server, Plus, Circle, Cpu, MemoryStick, Wrench, Boxes } from 'lucide-react'
 import { useClusterStore } from '../stores/clusterStore'
 import Card from '../components/Card'
 import { formatRam } from '../utils/format'
@@ -9,7 +9,11 @@ export default function HostsList() {
   const { hosts, fetchHosts } = useClusterStore()
   const navigate = useNavigate()
 
-  useEffect(() => { fetchHosts() }, [])
+  useEffect(() => {
+    fetchHosts()
+    const timer = setInterval(fetchHosts, 5000)
+    return () => clearInterval(timer)
+  }, [])
 
   const statusColor = (status: string) => {
     switch (status) {
@@ -79,7 +83,14 @@ export default function HostsList() {
                     />
                   </div>
                   <div className="flex items-center justify-between text-xs text-vmm-text-muted">
-                    <span>{host.vm_count} VMs</span>
+                    <span className="flex items-center gap-2">
+                      {host.vm_count} VMs
+                      {host.san_enabled && (
+                        <span className="inline-flex items-center gap-0.5 text-[10px] text-vmm-accent bg-vmm-accent/10 px-1.5 py-0.5 rounded font-bold">
+                          <Boxes size={8} /> SAN
+                        </span>
+                      )}
+                    </span>
                     <span>v{host.version}</span>
                   </div>
                 </div>

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Server, Cpu, MemoryStick, HardDrive, Circle, Wrench, ArrowLeft, Trash2 } from 'lucide-react'
+import { Server, Cpu, MemoryStick, HardDrive, Circle, Wrench, ArrowLeft, Trash2, Boxes, Check, X } from 'lucide-react'
 import { useClusterStore } from '../stores/clusterStore'
 import { useVmStore } from '../stores/vmStore'
 import api from '../api/client'
@@ -106,6 +106,37 @@ export default function HostDetail() {
           </div>
         </Card>
       </div>
+
+      {/* CoreSAN Status */}
+      <Card>
+        <div className="p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <Boxes size={16} className={host.san_enabled ? 'text-vmm-accent' : 'text-vmm-text-muted'} />
+            <h3 className="text-sm font-semibold text-vmm-text">CoreSAN</h3>
+            {host.san_enabled ? (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-vmm-success/20 text-vmm-success border border-vmm-success/30">
+                <Check size={8} /> ACTIVE
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-vmm-text-muted/20 text-vmm-text-muted border border-vmm-border">
+                <X size={8} /> NOT RUNNING
+              </span>
+            )}
+          </div>
+          {host.san_enabled ? (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <SpecRow label="Node ID" value={host.san_node_id?.slice(0, 12) + '...'} />
+              <SpecRow label="API Address" value={host.san_address || 'N/A'} />
+              <SpecRow label="Volumes" value={`${host.san_volumes}`} />
+              <SpecRow label="Peers" value={`${host.san_peers}`} />
+            </div>
+          ) : (
+            <p className="text-xs text-vmm-text-muted">
+              CoreSAN (vmm-san) is not running on this host. Start it to enable software-defined storage.
+            </p>
+          )}
+        </div>
+      </Card>
 
       {hostVms.length > 0 && (
         <div>

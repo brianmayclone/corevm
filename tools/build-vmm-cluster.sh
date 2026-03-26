@@ -83,7 +83,38 @@ echo -e "${GREEN}✓ vmm-ui built → apps/vmm-ui/dist/${NC}"
 
 # ── Run mode ─────────────────────────────────────────────────────────────
 
-if [ "$1" = "--run" ]; then
+# ── Handle --reset flag ───────────────────────────────────────────────────
+
+for arg in "$@"; do
+    if [ "$arg" = "--reset" ]; then
+        echo -e "${YELLOW}=== Resetting all data ===${NC}"
+        # Kill running services first
+        pkill -f "vmm-san" 2>/dev/null || true
+        pkill -f "vmm-server.*config" 2>/dev/null || true
+        pkill -f "vmm-cluster.*config" 2>/dev/null || true
+        sleep 1
+        # Force-unmount ALL FUSE mounts under /tmp/vmm-san
+        if [ -d /tmp/vmm-san/mnt ]; then
+            find /tmp/vmm-san/mnt -maxdepth 1 -mindepth 1 -type d 2>/dev/null | while read mnt; do
+                fusermount3 -u "$mnt" 2>/dev/null || true
+                umount -l "$mnt" 2>/dev/null || true
+                umount -f "$mnt" 2>/dev/null || true
+            done
+        fi
+        sleep 1
+        # Remove data and configs
+        rm -rf /tmp/vmm-cluster /tmp/vmm /tmp/vmm-san 2>/dev/null || true
+        # If rm failed on FUSE dirs, lazy-unmount and retry
+        if [ -d /tmp/vmm-san ]; then
+            umount -l /tmp/vmm-san/mnt/* 2>/dev/null || true
+            rm -rf /tmp/vmm-san 2>/dev/null || true
+        fi
+        rm -f "$ROOT/vmm-cluster.toml" "$ROOT/vmm-server.toml" "$ROOT/vmm-san.toml"
+        echo -e "${GREEN}All configs, data, and running services removed.${NC}"
+    fi
+done
+
+if [[ " $* " == *" --run "* ]]; then
     echo ""
     echo -e "${CYAN}=== Starting VMM-Cluster Stack ===${NC}"
 

@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ArrowLeft, Server, Plus, Loader } from 'lucide-react'
+import { ArrowLeft, Server, Plus, Loader, Wifi, Boxes, Workflow } from 'lucide-react'
 import { useClusterStore } from '../stores/clusterStore'
+import api from '../api/client'
+import type { DiscoveredNode } from '../api/types'
 import Card from '../components/Card'
 
 export default function AddHost() {
@@ -15,53 +17,54 @@ export default function AddHost() {
   const [loading, setLoading] = useState(false)
   const [probeStatus, setProbeStatus] = useState('')
 
+  // Cluster creation (when no clusters exist)
+  const [newClusterName, setNewClusterName] = useState('Default Cluster')
+  const [creatingCluster, setCreatingCluster] = useState(false)
+
+  // Auto-discovered nodes
+  const [discovered, setDiscovered] = useState<DiscoveredNode[]>([])
+
   useEffect(() => {
     fetchClusters()
+    // Poll for discovered nodes
+    const load = () => {
+      api.get<DiscoveredNode[]>('/api/discovery/servers')
+        .then(({ data }) => setDiscovered(data))
+        .catch(() => {})
+    }
+    load()
+    const timer = setInterval(load, 5000)
+    return () => clearInterval(timer)
   }, [])
 
   useEffect(() => {
     if (clusters.length > 0 && !clusterId) setClusterId(clusters[0].id)
   }, [clusters])
 
-  /**
-   * Resolve the user input (IP, hostname, or full URL) into a reachable vmm-server address.
-   * Tries https first, then http, on port 8443.
-   */
   const resolveAddress = async (input: string): Promise<string> => {
-    // If user already provided a full URL, use it directly
     if (input.startsWith('http://') || input.startsWith('https://')) {
       return input.replace(/\/+$/, '')
     }
-
-    // Strip any trailing port/slashes from raw input
     const host = input.replace(/[:/].*$/, '').trim()
     if (!host) throw new Error('Please enter an IP address or hostname')
 
-    // Try https first (production), then http (development)
     const candidates = [
       `https://${host}:8443`,
       `http://${host}:8443`,
     ]
-
     for (const url of candidates) {
       setProbeStatus(`Trying ${url}...`)
       try {
         const controller = new AbortController()
         const timeout = setTimeout(() => controller.abort(), 3000)
-        const resp = await fetch(`${url}/api/system/info`, {
-          signal: controller.signal,
-          // Skip TLS validation for self-signed certs in dev
-        }).catch(() => null)
+        const resp = await fetch(`${url}/api/system/info`, { signal: controller.signal }).catch(() => null)
         clearTimeout(timeout)
         if (resp && resp.ok) {
           setProbeStatus(`Connected via ${url}`)
           return url
         }
-      } catch {
-        // Try next candidate
-      }
+      } catch { /* next */ }
     }
-
     throw new Error(`Cannot reach vmm-server at ${host}:8443 (tried https and http)`)
   }
 
@@ -83,6 +86,10 @@ export default function AddHost() {
     }
   }
 
+  const selectDiscovered = (node: DiscoveredNode) => {
+    setAddress(node.address)
+  }
+
   return (
     <div className="space-y-5 max-w-2xl">
       <div className="flex items-center gap-3">
@@ -92,11 +99,55 @@ export default function AddHost() {
         <h1 className="text-2xl font-bold text-vmm-text">Add Host to Cluster</h1>
       </div>
 
+      {/* Auto-discovered nodes */}
+      {discovered.length > 0 && (
+        <Card>
+          <div className="flex items-center gap-2 mb-3">
+            <Wifi size={14} className="text-vmm-success" />
+            <span className="text-xs font-semibold tracking-widest text-vmm-text-muted uppercase">
+              Discovered on Network
+            </span>
+            <span className="text-[10px] text-vmm-success bg-vmm-success/10 px-2 py-0.5 rounded-full font-bold">
+              {discovered.length} found
+            </span>
+          </div>
+          <div className="space-y-2">
+            {discovered.map(node => (
+              <button
+                key={node.address}
+                onClick={() => selectDiscovered(node)}
+                className={`w-full flex items-center gap-3 p-3 rounded-lg border text-left transition-colors cursor-pointer
+                  ${address === node.address
+                    ? 'border-vmm-accent bg-vmm-accent/5'
+                    : 'border-vmm-border hover:border-vmm-accent/30 hover:bg-vmm-surface-hover'}`}
+              >
+                <Server size={16} className={address === node.address ? 'text-vmm-accent' : 'text-vmm-text-muted'} />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-vmm-text">{node.hostname}</span>
+                    <span className="text-[10px] text-vmm-text-muted">v{node.version}</span>
+                    {node.san_volumes > 0 && (
+                      <span className="inline-flex items-center gap-0.5 text-[10px] text-vmm-accent bg-vmm-accent/10 px-1.5 py-0.5 rounded font-bold">
+                        <Boxes size={8} /> SAN
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-xs text-vmm-text-muted truncate">{node.address}</div>
+                </div>
+                <span className="text-xs text-vmm-text-muted">{node.age_secs}s ago</span>
+              </button>
+            ))}
+          </div>
+        </Card>
+      )}
+
       <Card>
         <form onSubmit={handleSubmit} className="p-6 space-y-5">
           <p className="text-sm text-vmm-text-muted">
-            Register a vmm-server instance as a managed host. Enter the IP address or hostname —
-            the connection will be detected automatically.
+            Register a vmm-server instance as a managed host.
+            {discovered.length > 0
+              ? ' Select a discovered node above, or enter an address manually.'
+              : ' Enter the IP address or hostname — the connection will be detected automatically.'}
           </p>
 
           {error && (
@@ -116,7 +167,7 @@ export default function AddHost() {
                 required
               />
               <p className="text-xs text-vmm-text-muted mt-1">
-                IP address or hostname of the vmm-server. Port 8443 is used automatically (https first, then http).
+                IP, hostname, or full URL. Port 8443 with https/http auto-detection.
               </p>
               {probeStatus && (
                 <p className="text-xs text-vmm-accent mt-1 flex items-center gap-1.5">
@@ -128,15 +179,53 @@ export default function AddHost() {
 
             <div>
               <label className="block text-sm font-medium text-vmm-text mb-1">Cluster</label>
-              <select
-                value={clusterId} onChange={e => setClusterId(e.target.value)}
-                className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm"
-                required
-              >
-                {clusters.map(c => (
-                  <option key={c.id} value={c.id}>{c.name}</option>
-                ))}
-              </select>
+              {clusters.length > 0 ? (
+                <select
+                  value={clusterId} onChange={e => setClusterId(e.target.value)}
+                  className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm"
+                  required
+                >
+                  {clusters.map(c => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2 p-3 rounded-lg bg-vmm-warning/5 border border-vmm-warning/20">
+                    <Workflow size={14} className="text-vmm-warning shrink-0" />
+                    <p className="text-xs text-vmm-text-dim">
+                      No cluster exists yet. Create one to register hosts.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text" value={newClusterName} onChange={e => setNewClusterName(e.target.value)}
+                      placeholder="Cluster name"
+                      className="flex-1 px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm"
+                    />
+                    <button
+                      type="button"
+                      disabled={creatingCluster || !newClusterName.trim()}
+                      onClick={async () => {
+                        setCreatingCluster(true)
+                        try {
+                          const { data } = await api.post('/api/clusters', { name: newClusterName })
+                          setClusterId(data.id)
+                          fetchClusters()
+                        } catch (err: any) {
+                          setError(err.response?.data?.error || 'Failed to create cluster')
+                        } finally {
+                          setCreatingCluster(false)
+                        }
+                      }}
+                      className="flex items-center gap-1.5 px-4 py-2 bg-vmm-accent hover:bg-vmm-accent-hover text-white
+                        rounded-lg text-sm font-medium transition-colors disabled:opacity-50 cursor-pointer whitespace-nowrap"
+                    >
+                      <Plus size={14} /> {creatingCluster ? 'Creating...' : 'Create Cluster'}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="border-t border-vmm-border pt-4">
@@ -144,12 +233,12 @@ export default function AddHost() {
                 <Server size={14} /> Host Admin Credentials
               </h3>
               <p className="text-xs text-vmm-text-muted mb-3">
-                These credentials are used once to verify access and register the host. They are not stored.
+                Used once to verify access and register the host. Not stored.
               </p>
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-vmm-text mb-1">Admin Username</label>
+                  <label className="block text-sm font-medium text-vmm-text mb-1">Username</label>
                   <input
                     type="text" value={adminUser} onChange={e => setAdminUser(e.target.value)}
                     className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm"
@@ -157,7 +246,7 @@ export default function AddHost() {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-vmm-text mb-1">Admin Password</label>
+                  <label className="block text-sm font-medium text-vmm-text mb-1">Password</label>
                   <input
                     type="password" value={adminPass} onChange={e => setAdminPass(e.target.value)}
                     className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm"
@@ -170,7 +259,7 @@ export default function AddHost() {
 
           <div className="flex justify-end pt-2">
             <button
-              type="submit" disabled={loading}
+              type="submit" disabled={loading || !clusterId}
               className="flex items-center gap-2 px-6 py-2.5 bg-vmm-accent hover:bg-vmm-accent-hover text-white
                 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 cursor-pointer"
             >

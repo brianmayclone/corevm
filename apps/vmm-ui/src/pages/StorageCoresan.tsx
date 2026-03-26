@@ -72,6 +72,9 @@ export default function StorageCoresan() {
   const [newVolMode, setNewVolMode] = useState<ResilienceMode>('mirror')
   const [newVolReplicas, setNewVolReplicas] = useState(2)
   const [newVolSync, setNewVolSync] = useState('async')
+  const [newVolBackendPath, setNewVolBackendPath] = useState('/vmm/san-data')
+  const [newVolSelectedHosts, setNewVolSelectedHosts] = useState<string[]>([])
+  const [newVolError, setNewVolError] = useState('')
 
   // Add host form
   const [addHostId, setAddHostId] = useState('')
@@ -117,6 +120,17 @@ export default function StorageCoresan() {
   }, [sanAvailable])
 
   const handleCreateVolume = async () => {
+    setNewVolError('')
+
+    // Validate host selection
+    const requiredHosts = newVolMode === 'none' ? 1 : newVolReplicas
+    const selectedCount = newVolSelectedHosts.length + 1 // +1 for local node
+    if (selectedCount < requiredHosts) {
+      setNewVolError(`Mirror with ${newVolReplicas}x replicas needs at least ${requiredHosts} hosts. Select ${requiredHosts - 1} more.`)
+      return
+    }
+
+    // 1. Create volume
     const resp = await fetch(sanApi('/api/volumes'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -128,12 +142,55 @@ export default function StorageCoresan() {
       }),
     })
     if (!resp.ok) {
-      const text = await resp.text()
-      alert(text || 'Failed to create volume')
+      setNewVolError(await resp.text() || 'Failed to create volume')
       return
     }
+    const volData = await resp.json()
+    const volumeId = volData.id
+
+    // Auto backend path: /vmm/san-data/<volume-name>
+    const backendPath = `/vmm/san-data/${newVolName}`
+
+    // 2. Add local backend automatically
+    await fetch(sanApi(`/api/volumes/${volumeId}/backends`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: backendPath }),
+    })
+
+    // 3. Add backends on selected remote hosts + register as peers
+    for (const hostId of newVolSelectedHosts) {
+      const host = hosts.find(h => h.id === hostId)
+      if (!host) continue
+      const hostSanAddr = host.san_address || host.address.replace(/:8443/, ':7443')
+
+      // Add backend on remote
+      await fetch(`${hostSanAddr}/api/volumes/${volumeId}/backends`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: backendPath }),
+      }).catch(() => {})
+
+      // Peer registration (bidirectional)
+      if (status) {
+        const remoteStatus = await fetch(`${hostSanAddr}/api/status`).then(r => r.json()).catch(() => null)
+        if (remoteStatus) {
+          await fetch(sanApi('/api/peers/join'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ address: hostSanAddr, node_id: remoteStatus.node_id, hostname: remoteStatus.hostname }),
+          }).catch(() => {})
+          await fetch(`${hostSanAddr}/api/peers/join`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ address: sanApi(''), node_id: status.node_id, hostname: status.hostname }),
+          }).catch(() => {})
+        }
+      }
+    }
+
     setCreateVolumeOpen(false)
     setNewVolName('')
+    setNewVolSelectedHosts([])
+    setNewVolError('')
     refresh()
   }
 
@@ -587,8 +644,13 @@ export default function StorageCoresan() {
       </div>
 
       {/* Create Volume Dialog */}
-      <Dialog open={createVolumeOpen} title="Create Volume" onClose={() => setCreateVolumeOpen(false)}>
+      <Dialog open={createVolumeOpen} title="Create Volume" onClose={() => { setCreateVolumeOpen(false); setNewVolError('') }} width="max-w-xl">
         <div className="space-y-4">
+          {newVolError && (
+            <div className="bg-vmm-danger/10 border border-vmm-danger/30 text-vmm-danger rounded-lg p-3 text-sm">
+              {newVolError}
+            </div>
+          )}
           <FormField label="Volume Name">
             <TextInput value={newVolName} onChange={(e) => setNewVolName(e.target.value)} placeholder="e.g. pool-a" />
           </FormField>
@@ -604,20 +666,12 @@ export default function StorageCoresan() {
             ]} />
           </FormField>
           {newVolMode === 'mirror' && (
-            <>
-              <FormField label="Replica Count">
-                <Select value={String(newVolReplicas)} onChange={(e) => setNewVolReplicas(Number(e.target.value))} options={[
-                  { value: '2', label: '2 copies — tolerates 1 node failure' },
-                  { value: '3', label: '3 copies — tolerates 2 node failures' },
-                ]} />
-              </FormField>
-              {newVolReplicas > totalNodes && (
-                <div className="flex items-center gap-2 p-3 rounded-lg bg-vmm-warning/10 border border-vmm-warning/30 text-xs text-vmm-warning">
-                  <AlertTriangle size={14} />
-                  {newVolReplicas} replicas requires {newVolReplicas} nodes, but only {totalNodes} available. Add more hosts first.
-                </div>
-              )}
-            </>
+            <FormField label="Replica Count">
+              <Select value={String(newVolReplicas)} onChange={(e) => setNewVolReplicas(Number(e.target.value))} options={[
+                { value: '2', label: '2 copies — tolerates 1 node failure' },
+                { value: '3', label: '3 copies — tolerates 2 node failures' },
+              ]} />
+            </FormField>
           )}
           <FormField label="Sync Mode">
             <Select value={newVolSync} onChange={(e) => setNewVolSync(e.target.value)} options={[
@@ -625,10 +679,63 @@ export default function StorageCoresan() {
               { value: 'sync', label: 'Synchronous — wait for all replicas (slower, safer)' },
             ]} />
           </FormField>
+
+          {/* Host Selection */}
+          <div>
+            <label className="block text-[11px] font-semibold tracking-widest text-vmm-text-muted uppercase mb-2">
+              Hosts ({1 + newVolSelectedHosts.length} selected — {newVolMode === 'mirror' ? `${newVolReplicas} required` : '1 required'})
+            </label>
+
+            {/* This node (always included) */}
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-3 p-2.5 rounded-lg bg-vmm-accent/5 border border-vmm-accent/30">
+                <input type="checkbox" checked disabled className="accent-vmm-accent" />
+                <Server size={14} className="text-vmm-success" />
+                <span className="text-sm text-vmm-text">{status?.hostname}</span>
+                <span className="text-[10px] text-vmm-text-muted">(this node — always included)</span>
+              </div>
+
+              {/* Other cluster hosts with CoreSAN */}
+              {sanHosts.filter(h => h.san_node_id !== status?.node_id).map(h => {
+                const checked = newVolSelectedHosts.includes(h.id)
+                return (
+                  <label key={h.id} className={`flex items-center gap-3 p-2.5 rounded-lg border cursor-pointer transition-colors
+                    ${checked ? 'bg-vmm-accent/5 border-vmm-accent/30' : 'border-vmm-border hover:border-vmm-accent/20'}`}>
+                    <input type="checkbox" checked={checked} onChange={() => {
+                      setNewVolSelectedHosts(prev => checked ? prev.filter(id => id !== h.id) : [...prev, h.id])
+                    }} className="accent-vmm-accent" />
+                    <Server size={14} className={h.status === 'online' ? 'text-vmm-success' : 'text-vmm-text-muted'} />
+                    <span className="text-sm text-vmm-text">{h.hostname}</span>
+                    <span className="text-[10px] text-vmm-text-muted">{h.address}</span>
+                  </label>
+                )
+              })}
+
+              {/* Cluster hosts without CoreSAN */}
+              {availableHosts.length > 0 && (
+                <p className="text-[10px] text-vmm-text-muted pt-1">
+                  {availableHosts.length} host{availableHosts.length !== 1 ? 's' : ''} without CoreSAN not shown.
+                  Enable CoreSAN on them first.
+                </p>
+              )}
+
+              {sanHosts.length <= 1 && peers.length === 0 && newVolMode === 'mirror' && (
+                <div className="flex items-center gap-2 p-2.5 rounded-lg bg-vmm-warning/10 border border-vmm-warning/30 text-xs text-vmm-warning">
+                  <AlertTriangle size={14} />
+                  Mirror requires {newVolReplicas} hosts but only this node has CoreSAN. Add more hosts first.
+                </div>
+              )}
+            </div>
+          </div>
+
+          <p className="text-[10px] text-vmm-text-muted">
+            Storage will be automatically provisioned at <code className="text-vmm-accent">/vmm/san-data/{newVolName || '<name>'}</code> on each host.
+          </p>
+
           <div className="flex justify-end gap-2 pt-2">
-            <Button variant="ghost" onClick={() => setCreateVolumeOpen(false)}>Cancel</Button>
+            <Button variant="ghost" onClick={() => { setCreateVolumeOpen(false); setNewVolError('') }}>Cancel</Button>
             <Button variant="primary" onClick={handleCreateVolume}
-              disabled={!newVolName.trim() || (newVolMode === 'mirror' && newVolReplicas > totalNodes)}>
+              disabled={!newVolName.trim() || (newVolMode === 'mirror' && (1 + newVolSelectedHosts.length) < newVolReplicas)}>
               Create Volume
             </Button>
           </div>
