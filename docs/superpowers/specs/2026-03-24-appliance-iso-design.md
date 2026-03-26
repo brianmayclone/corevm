@@ -53,7 +53,7 @@ Single Rust binary (`vmm-appliance --mode installer`), linear screen flow:
   - `/boot/efi` — 256 MB (FAT32, UEFI)
   - `/boot` — 512 MB (ext4)
   - `swap` — min(RAM size, 8 GB)
-  - `/` — 50 GB (ext4, system)
+  - `/` — 8 GB (ext4, system)
   - `/var/lib/vmm` — remainder (ext4, VM data — isolated so full disks don't brick the OS)
 
 ### Screen 3 — Network

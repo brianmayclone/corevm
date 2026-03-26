@@ -92,7 +92,7 @@ pub struct CoreSanFS {
 }
 
 impl CoreSanFS {
-    fn new(state: Arc<CoreSanState>, volume_id: String, rt: tokio::runtime::Handle) -> Self {
+    pub fn new(state: Arc<CoreSanState>, volume_id: String, rt: tokio::runtime::Handle) -> Self {
         let inodes = Mutex::new(InodeMap::new(&volume_id));
         CoreSanFS { state, volume_id, inodes, rt }
     }

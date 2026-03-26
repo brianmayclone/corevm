@@ -140,8 +140,8 @@ pub fn partition_disk(disk: &Path, efi: bool) -> Result<()> {
     .context("Failed to create swap partition")?;
     offset_mib = swap_end;
 
-    // root (50 GiB)
-    let root_end = offset_mib + 50 * 1024;
+    // root (8 GiB)
+    let root_end = offset_mib + 8 * 1024;
     run_cmd("parted", &[
         "-s", disk_str,
         "mkpart", "root", "ext4",

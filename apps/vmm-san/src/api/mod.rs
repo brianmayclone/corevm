@@ -29,6 +29,7 @@ pub fn router() -> Router<Arc<CoreSanState>> {
 
         // ── Volumes (CRUD + resilience policy) ────────────
         .route("/api/volumes", get(volumes::list).post(volumes::create))
+        .route("/api/volumes/sync", post(volumes::sync))
         .route("/api/volumes/{id}", get(volumes::get).put(volumes::update).delete(volumes::delete))
 
         // ── Backends (mountpoints per volume) ─────────────

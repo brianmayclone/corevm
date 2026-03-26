@@ -40,7 +40,7 @@ fn build_partition_preview(disk_path: &str, efi: bool) -> String {
     }
     lines.push("  /boot      — 512 MB".to_string());
     lines.push(format!("  swap       — {} GB", swap_gb));
-    lines.push("  /          — 50 GB".to_string());
+    lines.push("  /          — 8 GB".to_string());
     lines.push("  /var/lib/vmm — remainder".to_string());
 
     format!(

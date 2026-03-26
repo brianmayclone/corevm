@@ -80,6 +80,35 @@ pub async fn join(
 
     tracing::info!("Peer joined: {} ({}) at {}", body.hostname, body.node_id, body.address);
 
+    // Sync all existing volumes to the new peer
+    let volumes: Vec<serde_json::Value> = {
+        let mut stmt = db.prepare(
+            "SELECT id, name, ftt, chunk_size_bytes, local_raid FROM volumes WHERE status = 'online'"
+        ).unwrap();
+        stmt.query_map([], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "name": row.get::<_, String>(1)?,
+                "ftt": row.get::<_, u32>(2)?,
+                "chunk_size_bytes": row.get::<_, u64>(3)?,
+                "local_raid": row.get::<_, String>(4)?,
+            }))
+        }).unwrap().filter_map(|r| r.ok()).collect()
+    };
+
+    if !volumes.is_empty() {
+        let peer_addr = body.address.clone();
+        let secret = state.config.peer.secret.clone();
+        let vol_count = volumes.len();
+        tokio::spawn(async move {
+            let client = crate::peer::client::PeerClient::new(&secret);
+            for vol in &volumes {
+                client.sync_volume(&peer_addr, vol).await.ok();
+            }
+            tracing::info!("Synced {} volumes to new peer {}", vol_count, peer_addr);
+        });
+    }
+
     Ok((StatusCode::CREATED, Json(PeerResponse {
         node_id: body.node_id,
         address: body.address,

@@ -319,7 +319,7 @@ pub fn partition_disk(disk: &Path, efi: bool) -> anyhow::Result<()> {
     // - EFI partition (256MB, fat32) if efi=true
     // - /boot (512MB, ext4)
     // - swap (min(RAM, 8GB))
-    // - / (50GB, ext4)
+    // - / (8GB, ext4)
     // - /var/lib/vmm (remainder, ext4)
 }
 
@@ -848,8 +848,8 @@ impl DiskState {
                 }
                 msg.push_str(&format!("  /boot      — 512 MB (ext4)\n"));
                 msg.push_str(&format!("  swap       — {} GB\n", swap_gb));
-                msg.push_str(&format!("  /          — 50 GB (ext4)\n"));
-                let data_gb = gb.saturating_sub(if efi { 1 } else { 0 } + 1 + swap_gb + 50);
+                msg.push_str(&format!("  /          — 8 GB (ext4)\n"));
+                let data_gb = gb.saturating_sub(if efi { 1 } else { 0 } + 1 + swap_gb + 8);
                 msg.push_str(&format!("  /var/lib/vmm — {} GB (ext4)\n", data_gb));
 
                 self.confirm = Some(ConfirmDialog::new("Confirm", &msg));

@@ -100,6 +100,28 @@ pub async fn create(
     tracing::info!("Created volume '{}' (id={}, ftt={}, local_raid={}, chunk={}MB)",
         body.name, id, body.ftt, body.local_raid, body.chunk_size_bytes / (1024 * 1024));
 
+    drop(db);
+
+    // Sync volume to all peers so they mount it too
+    let vol_json = serde_json::json!({
+        "id": &id, "name": &body.name, "ftt": body.ftt,
+        "chunk_size_bytes": body.chunk_size_bytes, "local_raid": &body.local_raid,
+    });
+    let peers: Vec<String> = state.peers.iter()
+        .filter(|p| p.status == crate::state::PeerStatus::Online)
+        .map(|p| p.address.clone())
+        .collect();
+
+    let secret = state.config.peer.secret.clone();
+    tokio::spawn(async move {
+        let client = crate::peer::client::PeerClient::new(&secret);
+        for addr in peers {
+            if let Err(e) = client.sync_volume(&addr, &vol_json).await {
+                tracing::warn!("Failed to sync volume to {}: {}", addr, e);
+            }
+        }
+    });
+
     Ok((StatusCode::CREATED, Json(VolumeResponse {
         id,
         name: body.name,
@@ -265,11 +287,114 @@ pub async fn delete(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Delete failed: {}", e)))?;
 
     // Clean up FUSE mount directory
-    if let Some(name) = name {
-        let fuse_path = state.config.data.fuse_root.join(&name);
+    if let Some(ref name) = name {
+        let fuse_path = state.config.data.fuse_root.join(name);
+        // Unmount FUSE first
+        std::process::Command::new("fusermount3")
+            .args(["-u", &fuse_path.to_string_lossy()])
+            .output().ok();
         std::fs::remove_dir(&fuse_path).ok();
         tracing::info!("Deleted volume '{}'", name);
     }
 
+    drop(db);
+
+    // Notify peers to delete this volume too
+    let vol_id = id.clone();
+    let peers: Vec<String> = state.peers.iter()
+        .filter(|p| p.status == crate::state::PeerStatus::Online)
+        .map(|p| p.address.clone())
+        .collect();
+    let secret = state.config.peer.secret.clone();
+
+    tokio::spawn(async move {
+        let client = crate::peer::client::PeerClient::new(&secret);
+        for addr in peers {
+            client.delete_volume(&addr, &vol_id).await.ok();
+        }
+    });
+
     Ok(Json(serde_json::json!({ "success": true })))
+}
+
+/// Receive a volume definition from a peer (sync).
+#[derive(Deserialize)]
+pub struct SyncVolumeRequest {
+    pub id: String,
+    pub name: String,
+    #[serde(default = "default_ftt")]
+    pub ftt: u32,
+    #[serde(default = "default_chunk_size")]
+    pub chunk_size_bytes: u64,
+    #[serde(default = "default_local_raid")]
+    pub local_raid: String,
+}
+
+/// POST /api/volumes/sync — receive a volume definition from a peer.
+/// Creates the volume locally if it doesn't exist and mounts the FUSE endpoint.
+pub async fn sync(
+    State(state): State<Arc<CoreSanState>>,
+    Json(body): Json<SyncVolumeRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let db = state.db.lock().unwrap();
+
+    // Check if volume already exists
+    let exists: bool = db.query_row(
+        "SELECT COUNT(*) FROM volumes WHERE id = ?1",
+        rusqlite::params![&body.id], |row| row.get::<_, i64>(0),
+    ).map(|c| c > 0).unwrap_or(false);
+
+    if exists {
+        // Already synced
+        return Ok(Json(serde_json::json!({ "synced": true, "already_exists": true })));
+    }
+
+    // Create the volume locally
+    db.execute(
+        "INSERT INTO volumes (id, name, ftt, chunk_size_bytes, local_raid, status)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'online')",
+        rusqlite::params![&body.id, &body.name, body.ftt, body.chunk_size_bytes, &body.local_raid],
+    ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)))?;
+
+    // Create FUSE mount directory
+    let fuse_path = state.config.data.fuse_root.join(&body.name);
+    std::fs::create_dir_all(&fuse_path).ok();
+
+    drop(db);
+
+    // Mount FUSE for this new volume
+    let rt = tokio::runtime::Handle::current();
+    let state_clone = Arc::clone(&state);
+    let vol_id = body.id.clone();
+    let vol_name = body.name.clone();
+
+    std::thread::spawn(move || {
+        let fuse_path_clone = state_clone.config.data.fuse_root.join(&vol_name);
+
+        let allow_other = std::fs::read_to_string("/etc/fuse.conf")
+            .map(|c| c.lines().any(|l| l.trim() == "user_allow_other" && !l.starts_with('#')))
+            .unwrap_or(false) || unsafe { libc::getuid() } == 0;
+
+        let fs_name = format!("coresan:{}", vol_name);
+        let mut options = vec![
+            fuser::MountOption::FSName(fs_name),
+        ];
+        if allow_other {
+            options.push(fuser::MountOption::AllowOther);
+            options.push(fuser::MountOption::AutoUnmount);
+        }
+
+        match fuser::mount2(
+            crate::engine::fuse_mount::CoreSanFS::new(state_clone, vol_id, rt),
+            &fuse_path_clone, &options,
+        ) {
+            Ok(_) => tracing::info!("FUSE unmounted (synced volume): {}", fuse_path_clone.display()),
+            Err(e) => tracing::error!("FUSE mount failed for synced volume {}: {}", fuse_path_clone.display(), e),
+        }
+    });
+
+    tracing::info!("Synced volume '{}' from peer (id={}, ftt={}, raid={})",
+        body.name, body.id, body.ftt, body.local_raid);
+
+    Ok(Json(serde_json::json!({ "synced": true, "already_exists": false })))
 }

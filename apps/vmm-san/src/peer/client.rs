@@ -140,4 +140,43 @@ impl PeerClient {
             Err(format!("Announce returned status {}", resp.status()))
         }
     }
+
+    /// Sync a volume definition to a peer (create if missing).
+    pub async fn sync_volume(
+        &self,
+        peer_address: &str,
+        volume: &serde_json::Value,
+    ) -> Result<(), String> {
+        let url = format!("{}/api/volumes/sync", peer_address);
+        let resp = self.http.post(&url)
+            .header(PEER_SECRET_HEADER, &self.secret)
+            .json(volume)
+            .send().await
+            .map_err(|e| format!("Volume sync failed: {}", e))?;
+
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!("Volume sync returned status {}", resp.status()))
+        }
+    }
+
+    /// Notify a peer to delete a volume.
+    pub async fn delete_volume(
+        &self,
+        peer_address: &str,
+        volume_id: &str,
+    ) -> Result<(), String> {
+        let url = format!("{}/api/volumes/{}", peer_address, volume_id);
+        let resp = self.http.delete(&url)
+            .header(PEER_SECRET_HEADER, &self.secret)
+            .send().await
+            .map_err(|e| format!("Volume delete sync failed: {}", e))?;
+
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!("Volume delete sync returned status {}", resp.status()))
+        }
+    }
 }
