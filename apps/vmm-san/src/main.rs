@@ -13,6 +13,7 @@ mod api;
 mod engine;
 mod storage;
 mod peer;
+mod services;
 
 use std::sync::{Arc, Mutex};
 use config::CoreSanConfig;
