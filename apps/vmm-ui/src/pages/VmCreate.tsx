@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { Info, Monitor, Zap, SlidersHorizontal, HardDrive, Cpu, MemoryStick, Clock, Search, Plus, Server, Workflow } from 'lucide-react'
+import { Info, Monitor, Zap, SlidersHorizontal, HardDrive, Cpu, MemoryStick, Clock, Search, Plus, Server, Workflow, Boxes } from 'lucide-react'
 import api from '../api/client'
 import type { VmConfig, VmDetail, Cluster, Host } from '../api/types'
 import { useClusterStore } from '../stores/clusterStore'
