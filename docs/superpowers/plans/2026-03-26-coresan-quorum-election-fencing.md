@@ -29,7 +29,8 @@ None — all changes go into existing files.
 | `apps/vmm-san/src/engine/repair.rs` | Skip cycle if not leader |
 | `apps/vmm-san/src/engine/replication.rs` | Skip cycle if fenced |
 | `apps/vmm-san/src/engine/push_replicator.rs` | Skip push if fenced |
-| `apps/vmm-san/src/api/files.rs` | Return 503 if fenced |
+| `apps/vmm-san/src/engine/fuse_mount.rs` | Pass quorum to `acquire_lease()` calls |
+| `apps/vmm-san/src/api/files.rs` | Return 503 if fenced, guard sync_mode |
 | `apps/vmm-san/src/services/file.rs` | Add quorum gate to duplicate `acquire_lease` wrapper |
 | `apps/vmm-san/src/api/status.rs` | Include quorum_status and is_leader in response |
 | `apps/vmm-san/src/peer/client.rs` | Add `witness_check()` method, add `is_leader` to heartbeat |
@@ -547,15 +548,15 @@ pub fn acquire_lease(db: &Connection, volume_id: &str, rel_path: &str, node_id: 
 
 Update any callers of `services::file::FileService::acquire_lease` similarly (grep to confirm — may be unused).
 
-- [ ] **Step 5: Verify compilation**
+- [ ] **Step 6: Verify compilation**
 
 Run: `cargo check -p vmm-san --target-dir /tmp/cargo-check-san 2>&1 | grep -E "^error"`
 Expected: No errors
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add apps/vmm-san/src/engine/write_lease.rs apps/vmm-san/src/engine/fuse_mount.rs
+git add apps/vmm-san/src/engine/write_lease.rs apps/vmm-san/src/engine/fuse_mount.rs apps/vmm-san/src/services/file.rs
 git commit -m "feat(san): add quorum gate in acquire_lease and ownership tick/epoch tracking"
 ```
 
