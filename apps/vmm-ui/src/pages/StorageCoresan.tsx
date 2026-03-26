@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Boxes, Plus, Trash2, RefreshCw, Shield, Zap, WifiOff, HardDrive, Activity, Server, AlertTriangle, Check, Disc, RotateCcw } from 'lucide-react'
+import { Boxes, Plus, Trash2, RefreshCw, Shield, Zap, WifiOff, HardDrive, Activity, Server, AlertTriangle, Check, Disc, RotateCcw, FolderOpen } from 'lucide-react'
 import type { CoreSanVolume, CoreSanBackend, CoreSanPeer, CoreSanStatus, CoreSanBenchmarkMatrix, Host, DiscoveredDisk } from '../api/types'
 import { useClusterStore } from '../stores/clusterStore'
 import api from '../api/client'
@@ -14,6 +14,7 @@ import FormField from '../components/FormField'
 import TextInput from '../components/TextInput'
 import Select from '../components/Select'
 import ConfirmDialog from '../components/ConfirmDialog'
+import VolumeBrowser from '../components/VolumeBrowser'
 import { formatBytes } from '../utils/format'
 
 const fttLabels: Record<number, string> = {
@@ -72,6 +73,7 @@ export default function StorageCoresan() {
   const [claimConfirm, setClaimConfirm] = useState(false)
   const [claimError, setClaimError] = useState('')
   const [resetDisk, setResetDisk] = useState<DiscoveredDisk | null>(null)
+  const [browseVolume, setBrowseVolume] = useState<CoreSanVolume | null>(null)
 
   // Auto-claim dialog
   const [autoClaimOpen, setAutoClaimOpen] = useState(false)
@@ -680,9 +682,14 @@ export default function StorageCoresan() {
               <Card>
                 <div className="flex items-center justify-between mb-4">
                   <SectionLabel>Volume: {sel.name}</SectionLabel>
-                  <Button variant="danger" onClick={() => setDeleteVolume(sel)}>
-                    <Trash2 size={13} /> Delete
-                  </Button>
+                  <div className="flex items-center gap-2">
+                    <Button variant="outline" onClick={() => setBrowseVolume(sel)}>
+                      <FolderOpen size={13} /> Browse
+                    </Button>
+                    <Button variant="danger" onClick={() => setDeleteVolume(sel)}>
+                      <Trash2 size={13} /> Delete
+                    </Button>
+                  </div>
                 </div>
 
                 {/* Warning for mirror volumes without enough nodes/backends */}

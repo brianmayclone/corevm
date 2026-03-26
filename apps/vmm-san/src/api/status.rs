@@ -11,6 +11,7 @@ use crate::state::CoreSanState;
 pub struct StatusResponse {
     pub running: bool,
     pub node_id: String,
+    pub address: String,
     pub hostname: String,
     pub uptime_secs: u64,
     pub volumes: Vec<VolumeStatusSummary>,
@@ -74,9 +75,13 @@ pub async fn status(
         crate::storage::disk::DiskStatus::Claimed { .. }
     )).count() as u32;
 
+    let local_addr = format!("http://{}:{}",
+        crate::engine::discovery::get_local_ip_cached(), state.config.server.port);
+
     Json(StatusResponse {
         running: true,
         node_id: state.node_id.clone(),
+        address: local_addr,
         hostname: state.hostname.clone(),
         uptime_secs: state.started_at.elapsed().as_secs(),
         volumes,
@@ -117,9 +122,12 @@ pub async fn dashboard(
     ).unwrap_or(0);
 
     let disks = crate::storage::disk::discover_disks(&db);
+    let local_addr2 = format!("http://{}:{}",
+        crate::engine::discovery::get_local_ip_cached(), state.config.server.port);
     let status = StatusResponse {
         running: true,
         node_id: state.node_id.clone(),
+        address: local_addr2,
         hostname: state.hostname.clone(),
         uptime_secs: state.started_at.elapsed().as_secs(),
         volumes,

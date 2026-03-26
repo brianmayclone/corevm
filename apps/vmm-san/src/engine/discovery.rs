@@ -79,3 +79,8 @@ fn get_local_ip() -> Option<String> {
     socket.connect("8.8.8.8:80").ok()?;
     Some(socket.local_addr().ok()?.ip().to_string())
 }
+
+/// Public helper: get local IP or fallback to 127.0.0.1.
+pub fn get_local_ip_cached() -> String {
+    get_local_ip().unwrap_or_else(|| "127.0.0.1".to_string())
+}
