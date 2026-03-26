@@ -18,6 +18,7 @@ import StorageLocal from './pages/StorageLocal'
 import StorageShared from './pages/StorageShared'
 import StorageDisks from './pages/StorageDisks'
 import StorageQos from './pages/StorageQos'
+import StorageCoresan from './pages/StorageCoresan'
 import Networks from './pages/Networks'
 import NetworkOverview from './pages/NetworkOverview'
 import NetworkNat from './pages/NetworkNat'
@@ -99,6 +100,7 @@ export default function App() {
             <Route path="shared" element={<StorageShared />} />
             <Route path="disks" element={<StorageDisks />} />
             <Route path="qos" element={<StorageQos />} />
+            <Route path="coresan" element={<StorageCoresan />} />
           </Route>
           <Route path="storage/wizard" element={<StorageWizard />} />
           {/* Standalone mode: traditional network pages */}

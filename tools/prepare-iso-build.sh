@@ -41,6 +41,9 @@ case "$DISTRO" in
             e2fsprogs \
             parted \
             live-boot \
+            pkg-config \
+            libfuse3-dev \
+            fuse3 \
             ca-certificates \
             curl \
             tar \

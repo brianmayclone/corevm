@@ -15,7 +15,7 @@ pub struct StorageWizardService;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WizardConfig {
-    pub fs_type: String,       // nfs, glusterfs, cephfs
+    pub fs_type: String,       // nfs, glusterfs, cephfs, coresan
     pub cluster_id: String,
     pub datastore_name: String,
     pub host_ids: Vec<String>,
@@ -37,6 +37,11 @@ pub struct WizardConfig {
     /// true = install Ceph from scratch on all hosts
     #[serde(default)]
     pub ceph_create_new: bool,
+    // CoreSAN-specific
+    pub coresan_volume_name: Option<String>,
+    pub coresan_resilience_mode: Option<String>,  // none, mirror, erasure
+    pub coresan_replica_count: Option<u32>,
+    pub coresan_backend_paths: Option<Vec<String>>,  // backend paths per host
     // Credentials — per-host sudo passwords (host_id → password)
     #[serde(default)]
     pub sudo_passwords: std::collections::HashMap<String, String>,
@@ -66,6 +71,7 @@ impl StorageWizardService {
             "nfs" => vec!["nfs-common".into(), "nfs-kernel-server".into()],
             "glusterfs" => vec!["glusterfs-server".into(), "glusterfs-client".into()],
             "cephfs" => vec!["ceph-common".into(), "ceph-fuse".into()],
+            "coresan" => vec!["fuse3".into(), "libfuse3-dev".into(), "pkg-config".into()],
             _ => Vec::new(),
         }
     }
@@ -192,6 +198,7 @@ impl StorageWizardService {
             "glusterfs" => Self::setup_glusterfs(state, config, &mut steps).await?,
             "nfs" => Self::setup_nfs(state, config, &mut steps).await?,
             "cephfs" => Self::setup_cephfs(state, config, &mut steps).await?,
+            "coresan" => Self::setup_coresan(state, config, &mut steps).await?,
             _ => return Err(format!("Unknown filesystem type: {}", config.fs_type)),
         }
 
@@ -200,6 +207,7 @@ impl StorageWizardService {
             "nfs" => format!("{}:{}", config.nfs_server.as_deref().unwrap_or(""), config.nfs_export.as_deref().unwrap_or("")),
             "glusterfs" => format!("localhost:{}", config.gluster_volume.as_deref().unwrap_or("vol")),
             "cephfs" => config.ceph_monitors.clone().unwrap_or_default(),
+            "coresan" => "coresan://localhost:7443".into(),
             _ => String::new(),
         };
 
@@ -444,6 +452,196 @@ impl StorageWizardService {
             }
         }
         steps.push(WizardStep { label: "CephFS mounted on all hosts".into(), status: "done".into(), error: None });
+
+        Ok(())
+    }
+
+    /// Setup CoreSAN — install vmm-san, configure volumes and peers, start FUSE mounts.
+    async fn setup_coresan(state: &Arc<ClusterState>, config: &WizardConfig, steps: &mut Vec<WizardStep>) -> Result<(), String> {
+        let volume_name = config.coresan_volume_name.as_deref().unwrap_or(&config.datastore_name);
+        let resilience = config.coresan_resilience_mode.as_deref().unwrap_or("mirror");
+        let replicas = config.coresan_replica_count.unwrap_or(2);
+        let backend_paths = config.coresan_backend_paths.as_deref().unwrap_or(&[]);
+
+        // Step 1: Install CoreSAN (vmm-san) on all hosts
+        steps.push(WizardStep { label: "Installing CoreSAN packages".into(), status: "running".into(), error: None });
+
+        for host_id in &config.host_ids {
+            let sudo = Self::sudo_for(config, host_id);
+
+            // Install FUSE3 packages
+            let (code, _, stderr) = Self::exec_on_host(state, host_id,
+                "apt-get install -y fuse3 libfuse3-dev pkg-config 2>/dev/null || dnf install -y fuse3-devel fuse3 2>/dev/null || true",
+                sudo).await?;
+            if code != 0 {
+                tracing::warn!("CoreSAN package install warning on {}: {}", host_id, stderr);
+            }
+        }
+        if let Some(s) = steps.last_mut() { s.status = "done".into(); }
+
+        // Step 2: Ensure vmm-san binary is deployed on all hosts
+        steps.push(WizardStep { label: "Verifying CoreSAN daemon".into(), status: "running".into(), error: None });
+
+        for host_id in &config.host_ids {
+            // Check if vmm-san is already running
+            let node = match state.nodes.get(host_id) {
+                Some(n) => n.clone(),
+                None => continue,
+            };
+
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(3))
+                .build().unwrap_or_else(|_| reqwest::Client::new());
+
+            // Try to reach the local CoreSAN daemon on the agent host
+            let san_url = node.address.replace(":8443", ":7443");
+            let resp = client.get(format!("{}/api/health", san_url))
+                .send().await;
+
+            if resp.is_err() || !resp.unwrap().status().is_success() {
+                // CoreSAN not running — try to start it via agent exec
+                let sudo = Self::sudo_for(config, host_id);
+                Self::exec_on_host(state, host_id,
+                    "systemctl start vmm-san 2>/dev/null || /opt/vmm/vmm-san &",
+                    sudo).await.ok();
+
+                // Wait a moment for it to start
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+        if let Some(s) = steps.last_mut() { s.status = "done".into(); }
+
+        // Step 3: Create volume on the first host's CoreSAN
+        steps.push(WizardStep { label: format!("Creating volume '{}'", volume_name), status: "running".into(), error: None });
+
+        let first_host = config.host_ids.first().ok_or("No hosts selected")?;
+        let first_node = state.nodes.get(first_host)
+            .map(|n| n.clone())
+            .ok_or("First host not found")?;
+        let san_url = first_node.address.replace(":8443", ":7443");
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build().unwrap_or_else(|_| reqwest::Client::new());
+
+        let resp = client.post(format!("{}/api/volumes", san_url))
+            .json(&serde_json::json!({
+                "name": volume_name,
+                "resilience_mode": resilience,
+                "replica_count": replicas,
+                "sync_mode": "async",
+            }))
+            .send().await
+            .map_err(|e| format!("Failed to create CoreSAN volume: {}", e))?;
+
+        if !resp.status().is_success() {
+            let err = resp.text().await.unwrap_or_default();
+            return Err(format!("CoreSAN volume creation failed: {}", err));
+        }
+
+        let vol_data: serde_json::Value = resp.json().await.unwrap_or_default();
+        let volume_id = vol_data.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+        if let Some(s) = steps.last_mut() { s.status = "done".into(); }
+
+        // Step 4: Add backends on each host
+        steps.push(WizardStep { label: "Adding storage backends".into(), status: "running".into(), error: None });
+
+        let default_backend = vec![config.mount_path.replace("/vmm/san/", "/vmm/san-data/")];
+        let paths_to_add = if backend_paths.is_empty() { &default_backend } else { backend_paths };
+
+        for host_id in &config.host_ids {
+            let node = match state.nodes.get(host_id) {
+                Some(n) => n.clone(),
+                None => continue,
+            };
+            let host_san_url = node.address.replace(":8443", ":7443");
+
+            // Create backend directories
+            let sudo = Self::sudo_for(config, host_id);
+            for bp in paths_to_add {
+                Self::exec_on_host(state, host_id, &format!("mkdir -p {}", bp), sudo).await.ok();
+            }
+
+            // Add backends via CoreSAN API
+            for bp in paths_to_add {
+                client.post(format!("{}/api/volumes/{}/backends", host_san_url, volume_id))
+                    .json(&serde_json::json!({ "path": bp }))
+                    .send().await.ok();
+            }
+        }
+        if let Some(s) = steps.last_mut() { s.status = "done".into(); }
+
+        // Step 5: Peer all hosts together
+        if config.host_ids.len() > 1 {
+            steps.push(WizardStep { label: "Connecting peers".into(), status: "running".into(), error: None });
+
+            let first_san = first_node.address.replace(":8443", ":7443");
+
+            for host_id in config.host_ids.iter().skip(1) {
+                let node = match state.nodes.get(host_id) {
+                    Some(n) => n.clone(),
+                    None => continue,
+                };
+                let peer_san = node.address.replace(":8443", ":7443");
+
+                // Get the peer's node_id
+                let peer_status = client.get(format!("{}/api/status", peer_san))
+                    .send().await.ok()
+                    .and_then(|r| futures::executor::block_on(r.json::<serde_json::Value>()).ok());
+
+                if let Some(ps) = peer_status {
+                    let peer_node_id = ps.get("node_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let peer_hostname = ps.get("hostname").and_then(|v| v.as_str()).unwrap_or("");
+
+                    // Register on first host
+                    client.post(format!("{}/api/peers/join", first_san))
+                        .json(&serde_json::json!({
+                            "address": peer_san,
+                            "node_id": peer_node_id,
+                            "hostname": peer_hostname,
+                        }))
+                        .send().await.ok();
+
+                    // Register first host on peer
+                    let first_status = client.get(format!("{}/api/status", first_san))
+                        .send().await.ok()
+                        .and_then(|r| futures::executor::block_on(r.json::<serde_json::Value>()).ok());
+
+                    if let Some(fs) = first_status {
+                        let first_node_id = fs.get("node_id").and_then(|v| v.as_str()).unwrap_or("");
+                        let first_hostname = fs.get("hostname").and_then(|v| v.as_str()).unwrap_or("");
+                        client.post(format!("{}/api/peers/join", peer_san))
+                            .json(&serde_json::json!({
+                                "address": first_san,
+                                "node_id": first_node_id,
+                                "hostname": first_hostname,
+                            }))
+                            .send().await.ok();
+                    }
+                }
+            }
+            if let Some(s) = steps.last_mut() { s.status = "done".into(); }
+        }
+
+        // Step 6: Create FUSE mount directories
+        steps.push(WizardStep { label: "Setting up FUSE mounts".into(), status: "running".into(), error: None });
+
+        for host_id in &config.host_ids {
+            let sudo = Self::sudo_for(config, host_id);
+            Self::exec_on_host(state, host_id,
+                &format!("mkdir -p {}", config.mount_path), sudo).await.ok();
+            // Enable user_allow_other for FUSE
+            Self::exec_on_host(state, host_id,
+                "grep -q user_allow_other /etc/fuse.conf || echo user_allow_other >> /etc/fuse.conf",
+                sudo).await.ok();
+        }
+        if let Some(s) = steps.last_mut() { s.status = "done".into(); }
+
+        steps.push(WizardStep {
+            label: format!("CoreSAN volume '{}' ready ({}, {}x replicas)", volume_name, resilience, replicas),
+            status: "done".into(), error: None,
+        });
 
         Ok(())
     }

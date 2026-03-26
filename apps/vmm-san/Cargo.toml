@@ -1,0 +1,45 @@
+[package]
+name = "vmm-san"
+version.workspace = true
+edition = "2021"
+description = "CoreSAN — Software-Defined Storage for CoreVM"
+
+[[bin]]
+name = "vmm-san"
+path = "src/main.rs"
+
+[dependencies]
+# Shared models
+vmm-core = { path = "../../libs/vmm-core" }
+
+# Web framework (management API)
+axum = { version = "0.8" }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client (peer communication)
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
+
+# Database
+rusqlite = { version = "0.33", features = ["bundled"] }
+
+# FUSE filesystem
+fuser = "0.15"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Crypto (checksums for integrity)
+sha2 = "0.10"
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dashmap = "6"
+libc = "0.2"
+rand = "0.8"
+gethostname = "0.5"

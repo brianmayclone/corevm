@@ -52,8 +52,8 @@ pub async fn create_datastore(
     require_operator(&user)?;
 
     // Validate store type
-    if !["nfs", "cephfs", "glusterfs"].contains(&body.store_type.as_str()) {
-        return Err(AppError(StatusCode::BAD_REQUEST, "Invalid store type (must be nfs, cephfs, glusterfs)".into()));
+    if !["nfs", "cephfs", "glusterfs", "vsan"].contains(&body.store_type.as_str()) {
+        return Err(AppError(StatusCode::BAD_REQUEST, "Invalid store type (must be nfs, cephfs, glusterfs, vsan)".into()));
     }
 
     let ds_id = {

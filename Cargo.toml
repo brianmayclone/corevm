@@ -4,6 +4,7 @@ members = [
   "apps/vmmanager",
   "apps/vmm-server",
   "apps/vmm-cluster",
+  "apps/vmm-san",
   "apps/vmm-appliance",
   "libs/vmm-core",
   "tests/hosttests",

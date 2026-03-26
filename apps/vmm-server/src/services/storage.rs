@@ -45,12 +45,12 @@ impl StorageService {
         db: &Connection, name: &str, path: &str, pool_type: &str,
         mount_source: Option<&str>, mount_opts: Option<&str>,
     ) -> Result<i64, String> {
-        let valid_types = ["local", "nfs", "cephfs", "glusterfs"];
+        let valid_types = ["local", "nfs", "cephfs", "glusterfs", "vsan"];
         if !valid_types.contains(&pool_type) {
             return Err(format!("Invalid pool_type. Must be one of: {}", valid_types.join(", ")));
         }
         let shared = pool_type != "local";
-        if shared && mount_source.is_none() {
+        if shared && pool_type != "vsan" && mount_source.is_none() {
             return Err("mount_source is required for shared storage".into());
         }
         let p = Path::new(path);

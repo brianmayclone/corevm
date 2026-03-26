@@ -70,6 +70,10 @@ pub struct HostStatus {
     pub vms: Vec<AgentVmStatus>,
     /// Status of all mounted datastores on this host.
     pub datastores: Vec<AgentDatastoreStatus>,
+    /// CoreSAN status (if vmm-san daemon is running on this host).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub san: Option<CoreSanNodeStatus>,
 }
 
 /// Runtime status of a single VM on the agent.
@@ -253,4 +257,40 @@ pub struct MigrationProgress {
     pub bytes_total: u64,
     pub status: String,  // "transferring", "completed", "failed"
     pub error: Option<String>,
+}
+
+// ── CoreSAN (Software-Defined Storage) ──────────────────────────────────
+
+/// CoreSAN volume status reported by the vmm-san daemon.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CoreSanVolumeStatus {
+    pub volume_id: String,
+    pub volume_name: String,
+    pub resilience_mode: String,    // none, mirror, erasure
+    pub replica_count: u32,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub status: String,             // online, degraded, offline
+    pub backend_count: u32,
+    pub files_synced: u64,
+    pub files_syncing: u64,
+}
+
+/// CoreSAN node status, included in HostStatus heartbeat.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CoreSanNodeStatus {
+    pub running: bool,
+    pub address: String,
+    pub node_id: String,
+    pub volumes: Vec<CoreSanVolumeStatus>,
+    pub benchmark_summary: Option<CoreSanBenchmarkSummary>,
+}
+
+/// Aggregated benchmark metrics from the CoreSAN benchmark engine.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CoreSanBenchmarkSummary {
+    pub avg_bandwidth_mbps: f64,
+    pub avg_latency_us: f64,
+    pub worst_peer: Option<String>,
+    pub measured_at: String,
 }

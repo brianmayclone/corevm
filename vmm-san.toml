@@ -1,0 +1,27 @@
+[server]
+bind = "0.0.0.0"
+port = 7443
+
+[data]
+data_dir = "/tmp/vmm-san"
+fuse_root = "/tmp/vmm-san/mnt"
+
+[peer]
+port = 7444
+secret = ""
+
+[replication]
+sync_mode = "async"
+
+[benchmark]
+enabled = true
+interval_secs = 300
+bandwidth_test_size_mb = 64
+
+[integrity]
+enabled = true
+interval_secs = 3600
+repair_interval_secs = 60
+
+[logging]
+level = "info"

@@ -16,9 +16,11 @@ pub async fn status(
     State(state): State<Arc<AppState>>,
     _agent: AgentAuth,
 ) -> Result<Json<HostStatus>, AppError> {
-    let managed = state.managed_config.lock()
-        .map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "Lock error".into()))?;
-    let node_id = managed.as_ref().map(|c| c.node_id.clone()).unwrap_or_default();
+    let node_id = {
+        let managed = state.managed_config.lock()
+            .map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "Lock error".into()))?;
+        managed.as_ref().map(|c| c.node_id.clone()).unwrap_or_default()
+    };
 
     let hostname = gethostname::gethostname().to_string_lossy().to_string();
     let (total_ram, free_ram) = get_memory_mb();
@@ -55,7 +57,24 @@ pub async fn status(
         cpu_usage_pct: cpu_usage,
         vms,
         datastores,
+        san: query_coresan_status().await,
     }))
+}
+
+/// Query local CoreSAN daemon for status (if running).
+async fn query_coresan_status() -> Option<vmm_core::cluster::CoreSanNodeStatus> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build().ok()?;
+
+    let resp = client.get("http://127.0.0.1:7443/api/status")
+        .send().await.ok()?;
+
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    resp.json().await.ok()
 }
 
 /// GET /agent/hardware — Static hardware info.

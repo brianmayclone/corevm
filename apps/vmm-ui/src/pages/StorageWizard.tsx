@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { HardDrive, Server, Database, ArrowRight, ArrowLeft, Check, X, Circle, Loader, ChevronDown, ChevronUp } from 'lucide-react'
+import { HardDrive, Server, Database, ArrowRight, ArrowLeft, Check, X, Circle, Loader, ChevronDown, ChevronUp, Boxes, Star } from 'lucide-react'
 import api from '../api/client'
 import { useClusterStore } from '../stores/clusterStore'
 import Card from '../components/Card'
@@ -13,7 +13,7 @@ interface WizardStep {
   label: string; status: string; error?: string
 }
 
-type FsType = 'nfs' | 'glusterfs' | 'cephfs' | null
+type FsType = 'coresan' | 'nfs' | 'glusterfs' | 'cephfs' | null
 
 export default function StorageWizard() {
   const navigate = useNavigate()
@@ -49,6 +49,10 @@ export default function StorageWizard() {
   const [cephMonitors, setCephMonitors] = useState('')
   const [cephPath, setCephPath] = useState('/')
   const [cephSecret, setCephSecret] = useState('')
+  // CoreSAN
+  const [coresanResilience, setCoresanResilience] = useState('mirror')
+  const [coresanReplicas, setCoresanReplicas] = useState(2)
+  const [coresanBackendPath, setCoresanBackendPath] = useState('/vmm/san-data')
 
   // Step 4
   const [setupSteps, setSetupSteps] = useState<WizardStep[]>([])
@@ -149,16 +153,22 @@ export default function StorageWizard() {
       {step === 1 && (
         <div className="space-y-4">
           <h2 className="text-lg font-semibold text-vmm-text">Choose Filesystem Type</h2>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
             {([
-              { id: 'nfs', icon: Server, title: 'NFS', desc: 'Network File Share', detail: 'Sets up one host as NFS server and mounts the share on all others. Simple and reliable. Everything is installed and configured automatically.' },
-              { id: 'glusterfs', icon: Database, title: 'GlusterFS', desc: 'Distributed Replicated Storage', detail: 'Installs GlusterFS on all hosts and creates a replicated volume from scratch. No external server needed. Recommended for most setups.' },
-              { id: 'cephfs', icon: HardDrive, title: 'CephFS', desc: 'Enterprise Scale-Out Storage', detail: 'Installs and configures a Ceph cluster across your hosts with CephFS. Maximum scalability and fault tolerance.' },
+              { id: 'coresan', icon: Boxes, title: 'CoreSAN', desc: 'Software-Defined Storage', detail: 'Built-in distributed storage with per-volume RAID levels, automatic replication, self-healing, and network benchmarking. No external software required.', recommended: true },
+              { id: 'nfs', icon: Server, title: 'NFS', desc: 'Network File Share', detail: 'Sets up one host as NFS server and mounts the share on all others. Simple and reliable.', recommended: false },
+              { id: 'glusterfs', icon: Database, title: 'GlusterFS', desc: 'Distributed Replicated', detail: 'Installs GlusterFS on all hosts and creates a replicated volume. No external server needed.', recommended: false },
+              { id: 'cephfs', icon: HardDrive, title: 'CephFS', desc: 'Enterprise Scale-Out', detail: 'Installs Ceph across your hosts with CephFS. Maximum scalability and fault tolerance.', recommended: false },
             ] as const).map(opt => (
               <Card key={opt.id}>
                 <div onClick={() => setFsType(opt.id)}
-                  className={`p-5 cursor-pointer rounded-xl transition-colors text-center ${fsType === opt.id ? 'ring-2 ring-vmm-accent bg-vmm-accent/5' : 'hover:bg-vmm-surface-hover'}`}>
-                  <opt.icon size={32} className={`mx-auto mb-3 ${fsType === opt.id ? 'text-vmm-accent' : 'text-vmm-text-muted'}`} />
+                  className={`p-5 cursor-pointer rounded-xl transition-colors text-center relative ${fsType === opt.id ? 'ring-2 ring-vmm-accent bg-vmm-accent/5' : 'hover:bg-vmm-surface-hover'}`}>
+                  {opt.recommended && (
+                    <span className="absolute top-2 right-2 inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-vmm-success/20 text-vmm-success border border-vmm-success/30">
+                      <Star size={10} /> RECOMMENDED
+                    </span>
+                  )}
+                  <opt.icon size={32} className={`mx-auto mb-3 ${fsType === opt.id ? 'text-vmm-accent' : opt.recommended ? 'text-vmm-success' : 'text-vmm-text-muted'}`} />
                   <h3 className="text-base font-semibold text-vmm-text">{opt.title}</h3>
                   <p className="text-xs text-vmm-accent mt-1">{opt.desc}</p>
                   <p className="text-xs text-vmm-text-muted mt-2">{opt.detail}</p>

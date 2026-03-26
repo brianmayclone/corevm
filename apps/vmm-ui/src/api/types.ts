@@ -387,3 +387,98 @@ export interface Alarm {
   created_at: string
   triggered_at: string | null
 }
+
+// ── CoreSAN (Software-Defined Storage) ──────────────────────────────────
+
+export type ResilienceMode = 'none' | 'mirror' | 'erasure'
+export type SyncMode = 'sync' | 'async'
+
+export interface CoreSanVolume {
+  id: string
+  name: string
+  resilience_mode: ResilienceMode
+  replica_count: number
+  stripe_width: number
+  sync_mode: SyncMode
+  status: 'creating' | 'online' | 'degraded' | 'offline'
+  total_bytes: number
+  free_bytes: number
+  backend_count: number
+  created_at: string
+}
+
+export interface CoreSanBackend {
+  id: string
+  volume_id: string
+  node_id: string
+  path: string
+  total_bytes: number
+  free_bytes: number
+  status: 'online' | 'degraded' | 'offline' | 'draining'
+  last_check: string | null
+}
+
+export interface CoreSanPeer {
+  node_id: string
+  address: string
+  peer_port: number
+  hostname: string
+  status: 'connecting' | 'online' | 'offline'
+  last_heartbeat: string | null
+}
+
+export interface CoreSanStatus {
+  running: boolean
+  node_id: string
+  hostname: string
+  uptime_secs: number
+  volumes: CoreSanVolumeStatus[]
+  peer_count: number
+  benchmark_summary: CoreSanBenchmarkSummary | null
+}
+
+export interface CoreSanVolumeStatus {
+  volume_id: string
+  volume_name: string
+  resilience_mode: string
+  replica_count: number
+  total_bytes: number
+  free_bytes: number
+  status: string
+  backend_count: number
+  files_synced: number
+  files_syncing: number
+}
+
+export interface CoreSanBenchmarkSummary {
+  avg_bandwidth_mbps: number
+  avg_latency_us: number
+  worst_peer: string | null
+  measured_at: string
+}
+
+export interface CoreSanBenchmarkResult {
+  from_node_id: string
+  to_node_id: string
+  bandwidth_mbps: number
+  latency_us: number
+  jitter_us: number
+  packet_loss_pct: number
+  test_size_bytes: number
+  measured_at: string
+}
+
+export interface CoreSanBenchmarkMatrix {
+  node_ids: string[]
+  entries: CoreSanBenchmarkResult[]
+}
+
+export interface CoreSanFile {
+  rel_path: string
+  size_bytes: number
+  sha256: string
+  created_at: string
+  updated_at: string
+  replica_count: number
+  synced_count: number
+}

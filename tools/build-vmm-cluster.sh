@@ -36,6 +36,19 @@ echo -e "${CYAN}=== Building vmm-server (Rust) ===${NC}"
 cargo build --release -p vmm-server
 echo -e "${GREEN}✓ vmm-server built${NC}"
 
+# ── Build vmm-san (CoreSAN) ─────────────────────────────────────────────
+
+echo ""
+echo -e "${CYAN}=== Building vmm-san / CoreSAN (Rust) ===${NC}"
+if pkg-config --exists fuse3 2>/dev/null; then
+    cargo build --release -p vmm-san
+    echo -e "${GREEN}✓ vmm-san built${NC}"
+    HAS_SAN=1
+else
+    echo -e "${YELLOW}⚠ FUSE3 not found — skipping vmm-san (run tools/prepare-coresan.sh)${NC}"
+    HAS_SAN=0
+fi
+
 # Copy BIOS assets next to the binary
 BIOS_SRC="$ROOT/apps/vmm-server/assets/bios"
 BIOS_DST="$ROOT/target/release/assets/bios"
@@ -120,13 +133,58 @@ EOF
         echo -e "Created server config: ${SERVER_CONFIG}"
     fi
 
+    # ── Create CoreSAN config if missing ──────────────────────────
+
+    SAN_CONFIG="$ROOT/vmm-san.toml"
+    if [ ! -f "$SAN_CONFIG" ]; then
+        cat > "$SAN_CONFIG" << 'EOF'
+[server]
+bind = "0.0.0.0"
+port = 7443
+
+[data]
+data_dir = "/tmp/vmm-san"
+fuse_root = "/tmp/vmm-san/mnt"
+
+[peer]
+port = 7444
+secret = ""
+
+[replication]
+sync_mode = "async"
+
+[benchmark]
+enabled = true
+interval_secs = 300
+bandwidth_test_size_mb = 64
+
+[integrity]
+enabled = true
+interval_secs = 3600
+repair_interval_secs = 60
+
+[logging]
+level = "info"
+EOF
+        echo -e "Created CoreSAN config: ${SAN_CONFIG}"
+    fi
+
     # ── Create data directories ──────────────────────────────────────
 
-    mkdir -p /tmp/vmm-cluster /tmp/vmm/images /tmp/vmm/isos /tmp/vmm/vms
+    mkdir -p /tmp/vmm-cluster /tmp/vmm/images /tmp/vmm/isos /tmp/vmm/vms /tmp/vmm-san /tmp/vmm-san/mnt
+
+    # ── Start CoreSAN (before vmm-server, so storage is ready) ───────
+
+    cd "$ROOT"
+    if [ "${HAS_SAN:-0}" = "1" ]; then
+        echo -e "${CYAN}Starting vmm-san (CoreSAN) on :7443...${NC}"
+        "$ROOT/target/release/vmm-san" --config "$SAN_CONFIG" &
+        PIDS+=($!)
+        sleep 1
+    fi
 
     # ── Start vmm-cluster ────────────────────────────────────────────
 
-    cd "$ROOT"
     echo -e "${CYAN}Starting vmm-cluster on :9443...${NC}"
     "$ROOT/target/release/vmm-cluster" --config "$CLUSTER_CONFIG" &
     PIDS+=($!)
@@ -152,6 +210,9 @@ EOF
     echo -e "${GREEN}  VMM-Cluster Stack Running${NC}"
     echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
     echo ""
+    if [ "${HAS_SAN:-0}" = "1" ]; then
+    echo -e "  ${CYAN}vmm-san${NC}      : http://localhost:7443   (CoreSAN storage)"
+    fi
     echo -e "  ${CYAN}vmm-cluster${NC}  : http://localhost:9443   (central authority)"
     echo -e "  ${CYAN}vmm-server${NC}   : http://localhost:8443   (host agent)"
     echo -e "  ${CYAN}vmm-ui${NC}       : http://localhost:5173   (web UI → cluster)"

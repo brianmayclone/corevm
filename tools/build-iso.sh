@@ -90,6 +90,7 @@ util-linux,pciutils,nftables,locales,\
 nfs-common,nfs-kernel-server,\
 glusterfs-server,glusterfs-client,\
 ceph-common,ceph-fuse,\
+fuse3,libfuse3-dev,\
 curl,gcc,libc6-dev,pkg-config,libssl-dev,make \
     bookworm "$ROOTFS_DIR" http://deb.debian.org/debian
 
@@ -109,7 +110,7 @@ chroot "$ROOTFS_DIR" bash -c '
     curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable 2>&1
     source /root/.cargo/env
     cd /build
-    cargo build --release -p vmm-appliance -p vmm-server -p vmm-cluster
+    cargo build --release -p vmm-appliance -p vmm-server -p vmm-cluster -p vmm-san
 '
 
 # Unmount source and cleanup Rust toolchain from rootfs
@@ -123,6 +124,7 @@ mkdir -p "$ROOTFS_DIR/opt/vmm"
 cp "$ROOT/target/release/vmm-appliance" "$ROOTFS_DIR/opt/vmm/"
 cp "$ROOT/target/release/vmm-server" "$ROOTFS_DIR/opt/vmm/"
 cp "$ROOT/target/release/vmm-cluster" "$ROOTFS_DIR/opt/vmm/"
+cp "$ROOT/target/release/vmm-san" "$ROOTFS_DIR/opt/vmm/"
 cp -r "$ROOT/apps/vmm-ui/dist" "$ROOTFS_DIR/opt/vmm/ui"
 if [ -d "$ROOT/apps/vmm-server/assets/bios" ]; then
     cp -r "$ROOT/apps/vmm-server/assets/bios" "$ROOTFS_DIR/opt/vmm/bios"
@@ -233,6 +235,22 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 CLUSTER_SVC
+
+tee "$ROOTFS_DIR/etc/systemd/system/vmm-san.service" > /dev/null <<'SAN_SVC'
+[Unit]
+Description=CoreSAN Software-Defined Storage
+After=network.target
+Before=vmm-server.service
+
+[Service]
+Type=simple
+ExecStart=/opt/vmm/vmm-san
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SAN_SVC
 
 # Copy GRUB defaults and nftables config
 cp "$SCRIPT_DIR/iso/grub-installed.cfg" "$ROOTFS_DIR/etc/default/grub"

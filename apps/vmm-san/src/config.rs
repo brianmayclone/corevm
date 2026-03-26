@@ -1,0 +1,165 @@
+//! CoreSAN configuration (parsed from TOML file).
+
+use serde::Deserialize;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Deserialize)]
+pub struct CoreSanConfig {
+    #[serde(default)]
+    pub server: ServerSection,
+    #[serde(default)]
+    pub data: DataSection,
+    #[serde(default)]
+    pub peer: PeerSection,
+    #[serde(default)]
+    pub replication: ReplicationSection,
+    #[serde(default)]
+    pub benchmark: BenchmarkSection,
+    #[serde(default)]
+    pub integrity: IntegritySection,
+    #[serde(default)]
+    pub logging: LoggingSection,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ServerSection {
+    #[serde(default = "default_bind")]
+    pub bind: String,
+    #[serde(default = "default_port")]
+    pub port: u16,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DataSection {
+    #[serde(default = "default_data_dir")]
+    pub data_dir: PathBuf,
+    #[serde(default = "default_fuse_root")]
+    pub fuse_root: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PeerSection {
+    #[serde(default = "default_peer_port")]
+    pub port: u16,
+    #[serde(default)]
+    pub secret: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReplicationSection {
+    #[serde(default = "default_sync_mode")]
+    pub sync_mode: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BenchmarkSection {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_benchmark_interval")]
+    pub interval_secs: u64,
+    #[serde(default = "default_bandwidth_test_size")]
+    pub bandwidth_test_size_mb: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IntegritySection {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_integrity_interval")]
+    pub interval_secs: u64,
+    #[serde(default = "default_repair_interval")]
+    pub repair_interval_secs: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LoggingSection {
+    #[serde(default = "default_log_level")]
+    pub level: String,
+    pub file: Option<PathBuf>,
+}
+
+// ── Defaults ─────────────────────────────────────────────────────────────
+
+fn default_bind() -> String { "0.0.0.0".into() }
+fn default_port() -> u16 { 7443 }
+fn default_data_dir() -> PathBuf { PathBuf::from("/var/lib/vmm-san") }
+fn default_fuse_root() -> PathBuf { PathBuf::from("/vmm/san") }
+fn default_peer_port() -> u16 { 7444 }
+fn default_sync_mode() -> String { "async".into() }
+fn default_true() -> bool { true }
+fn default_benchmark_interval() -> u64 { 300 }
+fn default_bandwidth_test_size() -> u32 { 64 }
+fn default_integrity_interval() -> u64 { 3600 }
+fn default_repair_interval() -> u64 { 60 }
+fn default_log_level() -> String { "info".into() }
+
+impl Default for ServerSection {
+    fn default() -> Self {
+        Self { bind: default_bind(), port: default_port() }
+    }
+}
+impl Default for DataSection {
+    fn default() -> Self {
+        Self { data_dir: default_data_dir(), fuse_root: default_fuse_root() }
+    }
+}
+impl Default for PeerSection {
+    fn default() -> Self {
+        Self { port: default_peer_port(), secret: String::new() }
+    }
+}
+impl Default for ReplicationSection {
+    fn default() -> Self {
+        Self { sync_mode: default_sync_mode() }
+    }
+}
+impl Default for BenchmarkSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_secs: default_benchmark_interval(),
+            bandwidth_test_size_mb: default_bandwidth_test_size(),
+        }
+    }
+}
+impl Default for IntegritySection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_secs: default_integrity_interval(),
+            repair_interval_secs: default_repair_interval(),
+        }
+    }
+}
+impl Default for LoggingSection {
+    fn default() -> Self {
+        Self { level: default_log_level(), file: None }
+    }
+}
+impl Default for CoreSanConfig {
+    fn default() -> Self {
+        Self {
+            server: Default::default(),
+            data: Default::default(),
+            peer: Default::default(),
+            replication: Default::default(),
+            benchmark: Default::default(),
+            integrity: Default::default(),
+            logging: Default::default(),
+        }
+    }
+}
+
+impl CoreSanConfig {
+    /// Load config from TOML file, falling back to defaults for missing values.
+    pub fn load(path: &Path) -> Result<Self, String> {
+        if !path.exists() {
+            tracing::warn!("Config file not found: {}, using defaults", path.display());
+            return Ok(Self::default());
+        }
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read config: {}", e))?;
+        toml::from_str(&content)
+            .map_err(|e| format!("Failed to parse config: {}", e))
+    }
+}

@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useUiStore } from '../stores/uiStore'
 import { useClusterStore } from '../stores/clusterStore'
-import { Monitor, HardDrive, Network, Settings, Zap, LifeBuoy, FileText, ChevronDown, Cable, Layers, Globe, Unplug, Database, Share2, Gauge, Disc, Palette, Users, Clock, Server, Shield, LayoutDashboard, List, FolderOpen, Activity, Bell, CheckSquare, Workflow } from 'lucide-react'
+import { Monitor, HardDrive, Network, Settings, Zap, LifeBuoy, FileText, ChevronDown, Cable, Layers, Globe, Unplug, Database, Share2, Gauge, Disc, Palette, Users, Clock, Server, Shield, LayoutDashboard, List, FolderOpen, Activity, Bell, CheckSquare, Workflow, Boxes } from 'lucide-react'
 
 interface NavItem {
   to: string
@@ -27,6 +27,7 @@ const standaloneNavItems: NavItem[] = [
       { to: '/storage/overview', icon: HardDrive, label: 'Overview' },
       { to: '/storage/local', icon: Database, label: 'Local Storage' },
       { to: '/storage/shared', icon: Share2, label: 'Shared Storage' },
+      { to: '/storage/coresan', icon: Boxes, label: 'CoreSAN' },
       { to: '/storage/disks', icon: Disc, label: 'Disk Management' },
       { to: '/storage/qos', icon: Gauge, label: 'QoS Policies' },
     ],
@@ -77,6 +78,7 @@ const clusterNavItems: NavItem[] = [
     to: '/storage', icon: HardDrive, label: 'Storage',
     children: [
       { to: '/storage/overview', icon: HardDrive, label: 'Overview' },
+      { to: '/storage/coresan', icon: Boxes, label: 'CoreSAN' },
       { to: '/storage/disks', icon: Disc, label: 'Disk Management' },
     ],
   },

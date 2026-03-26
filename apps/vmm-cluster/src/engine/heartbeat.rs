@@ -64,6 +64,24 @@ async fn poll_all_nodes(state: &Arc<ClusterState>) {
                             ds.total_bytes as i64, ds.free_bytes as i64,
                         );
                     }
+
+                    // Sync CoreSAN status — update vsan-type datastores with SAN volume capacity
+                    if let Some(ref san) = status.san {
+                        for vol in &san.volumes {
+                            // Find matching datastore with store_type "vsan" and matching mount path
+                            let _ = db.execute(
+                                "UPDATE datastores SET total_bytes = ?1, free_bytes = ?2,
+                                    status = CASE WHEN ?3 = 'online' THEN 'online'
+                                                  WHEN ?3 = 'degraded' THEN 'degraded'
+                                                  ELSE 'offline' END
+                                 WHERE store_type = 'vsan' AND name = ?4",
+                                rusqlite::params![
+                                    vol.total_bytes as i64, vol.free_bytes as i64,
+                                    &vol.status, &vol.volume_name
+                                ],
+                            );
+                        }
+                    }
                 }
 
                 // Reset missed heartbeat counter, mark online
