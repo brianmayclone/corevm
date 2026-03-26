@@ -216,8 +216,12 @@ impl PciDevice {
     pub fn add_msi_capability(&mut self, offset: usize) {
         // Set Capabilities List bit in Status register (offset 0x06, bit 4)
         self.config_space[0x06] |= 0x10;
-        // Capabilities pointer (offset 0x34) → points to our MSI cap
-        self.config_space[0x34] = offset as u8;
+        // Only set Capabilities pointer if no capability chain exists yet.
+        // If add_pm_capability was called first, it already set 0x34 and
+        // chains to this MSI cap via its next_cap field.
+        if self.config_space[0x34] == 0x00 {
+            self.config_space[0x34] = offset as u8;
+        }
         // MSI Capability ID = 0x05
         self.config_space[offset] = 0x05;
         // Next capability pointer = 0x00 (end of list)
@@ -486,10 +490,15 @@ impl PciBus {
 
         #[cfg(feature = "std")]
         {
-            static PCI_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            let n = PCI_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if n < 200 {
-                eprintln!("[pci-rd] bus={} dev={} fn={} reg=0x{:02X} → 0x{:08X}", bus, device, function, register, result);
+            // Always log Intel GPU (dev=1) PCI config reads
+            if device == 1 {
+                eprintln!("[pci-rd-igpu] reg=0x{:02X} → 0x{:08X}", register, result);
+            } else {
+                static PCI_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let n = PCI_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n < 200 {
+                    eprintln!("[pci-rd] bus={} dev={} fn={} reg=0x{:02X} → 0x{:08X}", bus, device, function, register, result);
+                }
             }
         }
 

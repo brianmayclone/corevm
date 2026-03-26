@@ -1057,16 +1057,16 @@ impl Vm {
             );
             pci_dev.device = self.chipset.slots.vga;
 
-            // Revision ID: Sandy Bridge stepping D2
-            pci_dev.config_space[0x08] = 0x09;
+            // Revision ID: Skylake GT2 stepping 06
+            pci_dev.config_space[0x08] = 0x06;
 
-            // Subsystem: Intel
+            // Subsystem: Intel HD Graphics 530
             pci_dev.config_space[0x2C] = 0x86; // Subsystem vendor low (0x8086)
             pci_dev.config_space[0x2D] = 0x80;
-            pci_dev.config_space[0x2E] = 0x02; // Subsystem device low
-            pci_dev.config_space[0x2F] = 0x01;
+            pci_dev.config_space[0x2E] = 0x12; // Subsystem device low (0x1912)
+            pci_dev.config_space[0x2F] = 0x19;
 
-            // BAR0: 4 MB MMIO (2 MB registers + 2 MB GTT)
+            // BAR0: 16 MB MMIO (Skylake GTTMMADR)
             pci_dev.set_bar(0, bar0_addr as u32, MMIO_SIZE as u32, true);
 
             // BAR2: VRAM aperture (prefetchable, 64-bit)
@@ -1075,6 +1075,12 @@ impl Vm {
 
             // Interrupt: same as VGA slot
             pci_dev.set_interrupt(self.chipset.irqs.vga, 1);
+
+            // PCI Capabilities: PM (0x40) → MSI (0x50 would collide with GGC)
+            // Intel SNB uses PM at 0x40 chained to MSI at 0x48
+            // But GGC lives at 0x50, so MSI goes at 0x60.
+            pci_dev.add_pm_capability(0x40, 0x60);   // PM cap at 0x40, next → 0x60
+            pci_dev.add_msi_capability(0x60);          // MSI cap at 0x60
 
             // GMCH Graphics Control (PCI config 0x50-0x51):
             // Report stolen memory size and GTT size
@@ -1091,12 +1097,78 @@ impl Vm {
             pci_dev.config_space[0x5E] = ((bsm >> 16) & 0xFF) as u8;
             pci_dev.config_space[0x5F] = ((bsm >> 24) & 0xFF) as u8;
 
+            // ── OpRegion: write into guest RAM and set ASLS ──
+            // Reserve 64 KB at the top of below-4G RAM for the OpRegion.
+            // CMOS reports RAM in 64 KB units, so we must reduce by at least
+            // 64 KB to ensure SeaBIOS marks the region as unavailable.
+            // We reduce both CMOS and FwCfg so the E820 map excludes this area.
+            const OPREGION_RESERVE: u64 = 0x10000; // 64 KB (CMOS granularity)
+            if !self.fw_cfg_ptr.is_null() {
+                let fw_cfg = unsafe { &mut *self.fw_cfg_ptr };
+                fw_cfg.reduce_ram_size(OPREGION_RESERVE);
+            }
+            // Also reduce CMOS extended memory above 16 MB (register 0x34/0x35).
+            if !self.cmos_ptr.is_null() {
+                let cmos = unsafe { &mut *self.cmos_ptr };
+                let cur = (cmos.data[0x34] as u16) | ((cmos.data[0x35] as u16) << 8);
+                if cur > 0 {
+                    let new_val = cur - 1; // subtract one 64 KB unit
+                    cmos.data[0x34] = new_val as u8;
+                    cmos.data[0x35] = (new_val >> 8) as u8;
+                }
+            }
+            let (ram_ptr, ram_len) = self.memory.ram_mut_ptr();
+            let below_4g_top = ram_len.min(0xE000_0000) as u32;
+            // Place OpRegion at the start of the reserved 64 KB block
+            let opregion_addr: u32 = below_4g_top - OPREGION_RESERVE as u32;
+            let opregion_data = intel_gpu::opregion::build_opregion();
+            if (opregion_addr as usize) + intel_gpu::opregion::OPREGION_SIZE <= ram_len {
+                unsafe {
+                    let dst = ram_ptr.add(opregion_addr as usize);
+                    core::ptr::copy_nonoverlapping(
+                        opregion_data.as_ptr(),
+                        dst,
+                        intel_gpu::opregion::OPREGION_SIZE,
+                    );
+                }
+            }
+
+            // Verify OpRegion was written correctly
+            #[cfg(feature = "std")]
+            if (opregion_addr as usize) + 128 <= ram_len {
+                let src = unsafe { core::slice::from_raw_parts(ram_ptr.add(opregion_addr as usize), 128) };
+                eprintln!("[intel-gpu] OpRegion verify @ 0x{:08X}:", opregion_addr);
+                for row in 0..8 {
+                    let off = row * 16;
+                    let hex: alloc::vec::Vec<alloc::string::String> = (0..16).map(|i| {
+                        alloc::format!("{:02X}", src[off + i])
+                    }).collect();
+                    let ascii: alloc::string::String = (0..16).map(|i| {
+                        let b = src[off + i];
+                        if b >= 0x20 && b < 0x7F { b as char } else { '.' }
+                    }).collect();
+                    eprintln!("  {:04X}: {} |{}|", off, hex.join(" "), ascii);
+                }
+            }
+
+            // ASLS (Address of System Loaded Software) at PCI config 0xFC
+            // Points the igfx driver to our OpRegion in guest RAM
+            pci_dev.config_space[0xFC] = (opregion_addr & 0xFF) as u8;
+            pci_dev.config_space[0xFD] = ((opregion_addr >> 8) & 0xFF) as u8;
+            pci_dev.config_space[0xFE] = ((opregion_addr >> 16) & 0xFF) as u8;
+            pci_dev.config_space[0xFF] = ((opregion_addr >> 24) & 0xFF) as u8;
+
             pci_bus.add_device(pci_dev);
         }
 
-        eprintln!("[intel-gpu] Intel HD Graphics 2000 (8086:0102) initialized");
+        eprintln!("[intel-gpu] Intel HD Graphics 530 (8086:1912) initialized");
         eprintln!("[intel-gpu] BAR0 (MMIO): 0x{:08X} (4 MB)", bar0_addr);
         eprintln!("[intel-gpu] BAR2 (VRAM): 0x{:08X} ({} MB)", bar2_addr, vram_mb);
+        {
+            let below_4g = self.memory.ram_mut_ptr().1.min(0xE000_0000) as u32;
+            let op_addr = below_4g - 0x10000;
+            eprintln!("[intel-gpu] OpRegion: 0x{:08X} (8 KB in 64 KB reserved block)", op_addr);
+        }
     }
 
     /// Set up the VirtIO GPU device at PCI slot 00:07.0.

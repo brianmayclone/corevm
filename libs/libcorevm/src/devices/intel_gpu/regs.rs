@@ -1,4 +1,4 @@
-//! Intel HD Graphics register offset constants (Sandy Bridge / Gen6).
+//! Intel HD Graphics register offset constants (Skylake / Gen9).
 //!
 //! Register offsets are relative to BAR0 MMIO base.
 //! Organized by functional block as in the Intel PRM (Programmer's Reference Manual).
@@ -125,10 +125,11 @@ pub const NUM_FENCES: usize = 16;
 
 // ── GTT (Graphics Translation Table) ────────────────────────────────────────
 
-/// GTT entries start at BAR0 + 0x200000 on Sandy Bridge (upper 2 MB of 4 MB BAR0).
-/// Each entry is 4 bytes: physical address >> 12 | flags.
+/// GTT entries at BAR0 + 0x200000 (upper 2 MB of 4 MB BAR0).
+/// Each entry is 4 bytes: (physical_address >> 12) | flags.
+/// 2 MB of GTT = 512K entries × 4 bytes = 2 GB addressable.
 pub const GTT_BASE: usize = 0x200000;
-pub const GTT_SIZE: usize = 0x200000; // 2 MB = 512K entries × 4 bytes = 2 GB addressable
+pub const GTT_SIZE: usize = 0x200000; // 2 MB
 
 // ── Display register range checks ──────────────────────────────────────────
 
@@ -178,6 +179,52 @@ pub const GEN6_RP_CUR_DOWN_EI: usize = 0xA054;
 pub const GEN6_RP_PREV_UP: usize = 0xA058;
 pub const GEN6_RP_PREV_DOWN: usize = 0xA05C;
 
+// ── GPU Reset ──────────────────────────────────────────────────────────
+
+/// GEN6 Graphics Device Reset — the driver writes here to reset the GPU.
+/// Bit 0 = full GPU reset, Bit 1 = render reset, Bit 2 = media reset.
+/// After writing, the driver polls until the written bits are cleared
+/// (indicates reset completed).
+pub const GEN6_GDRST: usize = 0x941C;
+
+// ── GT Identification ─────────────────────────────────────────────────
+
+/// GT Thread Status — reports hardware thread availability.
+/// The driver reads this during init to verify the GPU is alive.
+pub const GEN6_GT_THREAD_STATUS_REG: usize = 0x13805C;
+
+/// Timestamp register — monotonically incrementing GPU timestamp.
+pub const TIMESTAMP: usize = 0x2358;
+
+/// Hardware status page — alternative offset used by some driver paths.
+pub const HWS_PGA_GEN6: usize = 0x04080;
+
+/// GEN6_MBCTL — Multi-Block control (used during GPU init).
+pub const GEN6_MBCTL: usize = 0x0907C;
+
+/// GEN6_UCGCTL1/2 — Unit-level Clock Gating Control.
+pub const GEN6_UCGCTL1: usize = 0x09400;
+pub const GEN6_UCGCTL2: usize = 0x09404;
+
+/// GAC_ECO_BITS — various ECO (Engineering Change Order) bits.
+pub const GAC_ECO_BITS: usize = 0x14090;
+
+/// GEN6_MBCUNIT_SNPCR — Snoop Control Register.
+pub const GEN6_MBCUNIT_SNPCR: usize = 0x0900C;
+
+/// MI_MODE — MI (Memory Interface) mode register.
+pub const MI_MODE: usize = 0x0209C;
+
+/// Cache Mode registers.
+pub const CACHE_MODE_0: usize = 0x02120;
+pub const CACHE_MODE_1: usize = 0x02124;
+
+/// GEN6_GT_PERF_STATUS — current GPU performance state.
+pub const GEN6_GT_PERF_STATUS: usize = 0x145948;
+
+/// GEN6_RP_STATE_LIMITS — min/max frequency limits.
+pub const GEN6_RP_STATE_LIMITS: usize = 0x1459C0;
+
 // ── Tile / Swizzle ──────────────────────────────────────────────────────
 
 pub const TILECTL: usize = 0x101000;
@@ -186,9 +233,10 @@ pub const GAM_ECOCHK: usize = 0x04090;
 
 /// Check if offset is in the render engine register space.
 pub fn is_render_range(offset: usize) -> bool {
-    // Render ring
+    // Render ring + MI/cache mode registers
     (0x02000..0x02600).contains(&offset)
         || (0x020C0..0x020D0).contains(&offset)
+        || (0x02100..0x02130).contains(&offset) // CACHE_MODE_0/1
         // BLT ring
         || (0x22000..0x22200).contains(&offset)
         // BSD ring
@@ -205,9 +253,19 @@ pub fn is_render_range(offset: usize) -> bool {
         || offset == GEN6_RP_STATE_CAP
         || (0x130090..0x1300A0).contains(&offset)
         || (0x140000..0x140010).contains(&offset)
+        // GPU reset
+        || offset == GEN6_GDRST
+        // Clock gating / unit control
+        || (0x09000..0x09500).contains(&offset)
         // Tile / ARB
         || offset == TILECTL || offset == ARB_MODE || offset == GAM_ECOCHK
         || (0x04000..0x040A0).contains(&offset)
+        // FUSE_STRAP
+        || offset == FUSE_STRAP
+        // GT identification / perf status
+        || (0x138000..0x139000).contains(&offset)
+        || (0x145000..0x146000).contains(&offset)
+        || offset == GAC_ECO_BITS
         // Catch-all for 0x100000-0x1FFFFF region (GT/PM registers)
         || (0x100000..0x200000).contains(&offset)
 }

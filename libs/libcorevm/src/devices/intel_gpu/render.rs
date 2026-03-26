@@ -14,6 +14,8 @@ pub struct RenderEngine {
     pub fences: [u64; regs::NUM_FENCES],
     /// Forcewake is active (driver claimed GT access).
     pub forcewake_active: bool,
+    /// Monotonic timestamp counter (incremented on each read).
+    pub timestamp: u32,
 }
 
 impl RenderEngine {
@@ -21,6 +23,7 @@ impl RenderEngine {
         Self {
             fences: [0u64; regs::NUM_FENCES],
             forcewake_active: false,
+            timestamp: 0,
         }
     }
 }
@@ -55,6 +58,38 @@ pub fn init_registers(regs_file: &mut Vec<u32>) {
     // Values in 50 MHz units: RP0=20(1GHz), RP1=16(800MHz), RPn=6(300MHz)
     if regs::GEN6_RP_STATE_CAP / 4 < regs_file.len() {
         regs_file[regs::GEN6_RP_STATE_CAP / 4] = 0x06_10_14;
+    }
+
+    // FUSE_STRAP: GT configuration fuses
+    // Bits 9:8 = GT type: 10 = GT2 (HD Graphics 530, Skylake)
+    // Bit 25 = internal display available
+    if regs::FUSE_STRAP / 4 < regs_file.len() {
+        regs_file[regs::FUSE_STRAP / 4] = (2 << 8) | (1 << 25);
+    }
+
+    // GEN6_GT_THREAD_STATUS_REG: report all threads idle (0)
+    if regs::GEN6_GT_THREAD_STATUS_REG / 4 < regs_file.len() {
+        regs_file[regs::GEN6_GT_THREAD_STATUS_REG / 4] = 0;
+    }
+
+    // GEN6_MBCTL: set defaults (enable boot fetch)
+    if regs::GEN6_MBCTL / 4 < regs_file.len() {
+        regs_file[regs::GEN6_MBCTL / 4] = 0;
+    }
+
+    // GEN6_UCGCTL1: default clock gating (all units clocked)
+    if regs::GEN6_UCGCTL1 / 4 < regs_file.len() {
+        regs_file[regs::GEN6_UCGCTL1 / 4] = 0;
+    }
+
+    // MI_MODE: default
+    if regs::MI_MODE / 4 < regs_file.len() {
+        regs_file[regs::MI_MODE / 4] = 0;
+    }
+
+    // GEN6_GT_PERF_STATUS: report current frequency = RP1 (800 MHz)
+    if regs::GEN6_GT_PERF_STATUS / 4 < regs_file.len() {
+        regs_file[regs::GEN6_GT_PERF_STATUS / 4] = 0x10 << 8; // RP1 = 16 in 50MHz units
     }
 }
 
@@ -105,6 +140,27 @@ pub fn reg_read(render: &mut RenderEngine, regs_file: &[u32], offset: usize) -> 
         // RP STATE CAP: GPU frequency capabilities
         regs::GEN6_RP_STATE_CAP => 0x06_10_14,
 
+        // GPU Reset: return 0 = "reset completed" (all request bits cleared)
+        regs::GEN6_GDRST => 0,
+
+        // FUSE_STRAP: GT2 (Skylake), internal display
+        regs::FUSE_STRAP => (2 << 8) | (1 << 25),
+
+        // Timestamp: monotonically incrementing counter
+        regs::TIMESTAMP => {
+            render.timestamp = render.timestamp.wrapping_add(1000);
+            render.timestamp
+        }
+
+        // GT Thread Status: all idle
+        regs::GEN6_GT_THREAD_STATUS_REG => 0,
+
+        // GT Perf Status: report current freq = RP1
+        regs::GEN6_GT_PERF_STATUS => 0x10 << 8,
+
+        // RP State Limits
+        regs::GEN6_RP_STATE_LIMITS => 0x06_10_14,
+
         // Default: return stored value (bounds-checked)
         _ => regs_file.get(offset / 4).copied().unwrap_or(0),
     }
@@ -132,6 +188,28 @@ pub fn reg_write(render: &mut RenderEngine, regs_file: &mut Vec<u32>, offset: us
     }
 
     match offset {
+        // GPU Reset: driver writes bits to request reset, then polls
+        // until those bits are cleared (= reset complete).
+        // We clear the bits immediately to simulate instant reset.
+        regs::GEN6_GDRST => {
+            // Reset requested — acknowledge by NOT storing the value.
+            // When the driver reads GEN6_GDRST, it gets 0 (all clear),
+            // which means "reset done". We also re-initialize ring state.
+            if val & 1 != 0 {
+                // Full GPU reset: clear all ring state
+                regs_file[regs::RENDER_RING_CTL / 4] = 0;
+                regs_file[regs::RENDER_RING_HEAD / 4] = 0;
+                regs_file[regs::RENDER_RING_TAIL / 4] = 0;
+                regs_file[regs::BLT_RING_CTL / 4] = 0;
+                regs_file[regs::BLT_RING_HEAD / 4] = 0;
+                regs_file[regs::BLT_RING_TAIL / 4] = 0;
+                regs_file[regs::BSD_RING_CTL / 4] = 0;
+                regs_file[regs::BSD_RING_HEAD / 4] = 0;
+                regs_file[regs::BSD_RING_TAIL / 4] = 0;
+            }
+            // Do NOT store val — reading back 0 signals "reset done"
+        }
+
         // Forcewake: driver writes to claim/release GT access
         regs::FORCEWAKE | regs::FORCEWAKE_MT => {
             // Bit 0 = set forcewake, bit 16 = mask bit for bit 0
@@ -161,6 +239,20 @@ pub fn reg_write(render: &mut RenderEngine, regs_file: &mut Vec<u32>, offset: us
             let idx = offset / 4;
             if idx < regs_file.len() {
                 regs_file[idx] = val;
+            }
+        }
+
+        // Masked registers (MI_MODE, CACHE_MODE, GFX_MODE, INSTPM, etc.):
+        // Upper 16 bits = mask, lower 16 bits = value.
+        // Only bits with corresponding mask bit set are modified.
+        regs::MI_MODE | regs::CACHE_MODE_0 | regs::CACHE_MODE_1 |
+        regs::GFX_MODE | regs::INSTPM => {
+            let idx = offset / 4;
+            if idx < regs_file.len() {
+                let mask = (val >> 16) & 0xFFFF;
+                let bits = val & 0xFFFF;
+                let old = regs_file[idx] & 0xFFFF;
+                regs_file[idx] = (old & !mask) | (bits & mask);
             }
         }
 

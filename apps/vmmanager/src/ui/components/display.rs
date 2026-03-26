@@ -611,8 +611,11 @@ impl DisplayWidget {
             #[cfg(target_os = "linux")]
             if let Some(ref mut evdev) = self.evdev_input {
                 evdev.start();
-                eprintln!("[evdev] input reader started (mouse={}, kbd={})",
-                    evdev.has_mouse(), evdev.has_keyboard());
+                // Exclusively grab the mouse device so the host desktop stops
+                // receiving events — this freezes the host cursor in place.
+                let grabbed = evdev.grab_mouse();
+                eprintln!("[evdev] input reader started (mouse={}, kbd={}, grabbed={})",
+                    evdev.has_mouse(), evdev.has_keyboard(), grabbed);
             }
 
             // Lock cursor — prevents it from leaving the window.
@@ -720,9 +723,10 @@ impl DisplayWidget {
         self.right_click_start = None;
         self.escape_presses.clear();
 
-        // Stop evdev raw input reader
+        // Release exclusive mouse grab and stop evdev raw input reader
         #[cfg(target_os = "linux")]
         if let Some(ref mut evdev) = self.evdev_input {
+            evdev.ungrab_mouse();
             evdev.stop();
             eprintln!("[evdev] input reader stopped");
         }
@@ -751,14 +755,35 @@ impl DisplayWidget {
 
     /// Handle mouse input over the display area and inject PS/2 events into the VM.
     fn handle_mouse_input(&mut self, ui: &egui::Ui, ctx: &egui::Context, display_rect: egui::Rect, vm_handle: u64, _response: &egui::Response) {
-        // Read button state from egui (always available).
-        let buttons = ui.input(|i| {
-            let mut b = 0u8;
-            if i.pointer.button_down(egui::PointerButton::Primary) { b |= 1; }
-            if i.pointer.button_down(egui::PointerButton::Secondary) { b |= 2; }
-            if i.pointer.button_down(egui::PointerButton::Middle) { b |= 4; }
-            b
-        });
+        // Read button state: prefer evdev when mouse is exclusively grabbed
+        // (EVIOCGRAB prevents egui from seeing button events).
+        let buttons = {
+            let mut from_evdev = false;
+            #[cfg(target_os = "linux")]
+            {
+                if let Some(ref evdev) = self.evdev_input {
+                    if evdev.is_mouse_grabbed() {
+                        from_evdev = true;
+                    }
+                }
+            }
+            if from_evdev {
+                #[cfg(target_os = "linux")]
+                {
+                    self.evdev_input.as_ref().map(|e| e.get_buttons()).unwrap_or(0)
+                }
+                #[cfg(not(target_os = "linux"))]
+                { 0u8 }
+            } else {
+                ui.input(|i| {
+                    let mut b = 0u8;
+                    if i.pointer.button_down(egui::PointerButton::Primary) { b |= 1; }
+                    if i.pointer.button_down(egui::PointerButton::Secondary) { b |= 2; }
+                    if i.pointer.button_down(egui::PointerButton::Middle) { b |= 4; }
+                    b
+                })
+            }
+        };
 
         self.mouse_debug_counter += 1;
 

@@ -1,6 +1,6 @@
-//! Intel HD Graphics emulation (Sandy Bridge / Gen6).
+//! Intel HD Graphics emulation (Skylake / Gen9).
 //!
-//! Emulates an Intel HD Graphics 2000 (PCI ID 8086:0102) with enough
+//! Emulates an Intel HD Graphics 530 (PCI ID 8086:1912) with enough
 //! functionality for the Linux i915 driver and Windows igfx driver to
 //! initialize the display engine and set up a framebuffer.
 //!
@@ -19,6 +19,7 @@ pub mod gmbus;
 pub mod display;
 pub mod gtt;
 pub mod render;
+pub mod opregion;
 
 extern crate alloc;
 use alloc::vec;
@@ -26,12 +27,14 @@ use alloc::vec::Vec;
 use crate::memory::mmio::MmioHandler;
 use crate::error::Result;
 
-/// Intel HD Graphics 2000 (Sandy Bridge GT1).
+/// Intel HD Graphics 530 (Skylake GT2).
 pub const VENDOR_ID: u16 = 0x8086;
-pub const DEVICE_ID: u16 = 0x0102;
+pub const DEVICE_ID: u16 = 0x1912;
 
-/// MMIO register space size (BAR0): 4 MB (2 MB registers + 2 MB GTT aperture).
-/// Sandy Bridge GTTMMADR requires 4 MB total.
+/// MMIO register space size (BAR0): 4 MB.
+/// Real Skylake uses 16 MB, but we report 4 MB (2 MB registers + 2 MB GTT)
+/// to avoid displacing other PCI devices in the limited MMIO address space.
+/// The i915/igfx driver will still initialize with a smaller BAR.
 pub const MMIO_SIZE: usize = 4 * 1024 * 1024;
 
 /// Intel HD Graphics device.
@@ -56,6 +59,24 @@ pub struct IntelGpu {
 }
 
 impl IntelGpu {
+    /// Append a trace line to /tmp/igpu_trace.log for debugging.
+    #[cfg(feature = "std")]
+    fn trace_log(msg: alloc::string::String) {
+        use std::io::Write;
+        static TRACE_FILE: std::sync::OnceLock<std::sync::Mutex<std::fs::File>> =
+            std::sync::OnceLock::new();
+        let mtx = TRACE_FILE.get_or_init(|| {
+            let f = std::fs::OpenOptions::new()
+                .create(true).append(true)
+                .open("/tmp/igpu_trace.log")
+                .expect("cannot open /tmp/igpu_trace.log");
+            std::sync::Mutex::new(f)
+        });
+        if let Ok(mut f) = mtx.lock() {
+            let _ = f.write_all(msg.as_bytes());
+        }
+    }
+
     /// Create a new Intel HD Graphics device.
     ///
     /// `vram_mb` is the graphics memory size in MiB (typically 64–256).
@@ -103,15 +124,25 @@ impl IntelGpu {
 
     /// Read a 32-bit MMIO register (BAR0).
     pub fn reg_read(&mut self, offset: usize) -> u32 {
+        // Dispatch to subsystems first
+        let val = self.reg_read_inner(offset);
+
         #[cfg(feature = "std")]
         {
-            static IGPU_RD_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            let n = IGPU_RD_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if n < 100 {
-                eprintln!("[intel-gpu] MMIO read offset=0x{:06X}", offset);
+            // Skip GTT range to avoid flooding the log
+            if offset < regs::GTT_BASE || offset >= regs::GTT_BASE + regs::GTT_SIZE {
+                Self::trace_log(
+                    alloc::fmt::format(format_args!(
+                        "[igpu] R 0x{:06X} => 0x{:08X}\n", offset, val
+                    ))
+                );
             }
         }
 
+        val
+    }
+
+    fn reg_read_inner(&mut self, offset: usize) -> u32 {
         // GMBUS3 data register: special — returns EDID bytes from state machine
         if offset == regs::GMBUS3 {
             return self.gmbus.read_data();
@@ -143,10 +174,13 @@ impl IntelGpu {
     pub fn reg_write(&mut self, offset: usize, val: u32) {
         #[cfg(feature = "std")]
         {
-            static IGPU_WR_LOG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            let n = IGPU_WR_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if n < 100 {
-                eprintln!("[intel-gpu] MMIO write offset=0x{:06X} val=0x{:08X}", offset, val);
+            // Skip GTT range to avoid flooding the log
+            if offset < regs::GTT_BASE || offset >= regs::GTT_BASE + regs::GTT_SIZE {
+                Self::trace_log(
+                    alloc::fmt::format(format_args!(
+                        "[igpu] W 0x{:06X} <= 0x{:08X}\n", offset, val
+                    ))
+                );
             }
         }
 

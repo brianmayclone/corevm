@@ -167,6 +167,15 @@ impl FwCfg {
         self.ram_len = len;
     }
 
+    /// Reduce the reported below-4G RAM size by `amount` bytes.
+    /// Used to carve out a reserved region (e.g., for Intel GPU OpRegion)
+    /// that SeaBIOS will report as RESERVED in the E820 map.
+    pub fn reduce_ram_size(&mut self, amount: u64) {
+        if self.ram_size > amount {
+            self.ram_size -= amount;
+        }
+    }
+
     /// Set up direct kernel boot via legacy fw_cfg selectors.
     ///
     /// Parses a Linux bzImage, splits it into setup header and protected-mode

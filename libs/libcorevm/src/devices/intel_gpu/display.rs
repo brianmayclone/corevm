@@ -108,10 +108,12 @@ pub fn reg_read(display: &mut DisplayEngine, regs_file: &mut Vec<u32>, offset: u
             regs_file[offset / 4] = val ^ (1 << 1);
             val
         }
-        regs::DEIIR => {
-            // Read-and-clear
-            let val = regs_file[offset / 4];
-            regs_file[offset / 4] = 0;
+        regs::DEIIR | regs::GTIIR | regs::SDEIIR => {
+            // Read-and-clear for interrupt identity registers
+            let val = regs_file.get(offset / 4).copied().unwrap_or(0);
+            if let Some(r) = regs_file.get_mut(offset / 4) {
+                *r = 0;
+            }
             val
         }
         _ => regs_file.get(offset / 4).copied().unwrap_or(0),
@@ -178,8 +180,8 @@ pub fn reg_write(
             display.refresh_framebuffer(vram, framebuffer);
         }
 
-        // Interrupt registers: W1C
-        regs::DEIIR | regs::SDEIIR => {
+        // Interrupt identity registers: W1C (write-1-to-clear)
+        regs::DEIIR | regs::GTIIR | regs::SDEIIR => {
             regs_file[idx] &= !val;
         }
 
