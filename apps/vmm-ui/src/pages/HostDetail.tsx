@@ -1,6 +1,10 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Server, Cpu, MemoryStick, HardDrive, Circle, Wrench, ArrowLeft, Trash2, Boxes, Check, X } from 'lucide-react'
+import { Server, Cpu, MemoryStick, HardDrive, Circle, Wrench, ArrowLeft, Trash2, Boxes, Check, X, Pencil, Network } from 'lucide-react'
+import Dialog from '../components/Dialog'
+import FormField from '../components/FormField'
+import TextInput from '../components/TextInput'
+import Button from '../components/Button'
 import { useClusterStore } from '../stores/clusterStore'
 import { useVmStore } from '../stores/vmStore'
 import api from '../api/client'
@@ -16,6 +20,8 @@ export default function HostDetail() {
   const navigate = useNavigate()
   const { hosts, fetchHosts, setMaintenance, deregisterHost } = useClusterStore()
   const [maintenanceOpen, setMaintenanceOpen] = useState(false)
+  const [editOpen, setEditOpen] = useState(false)
+  const [editName, setEditName] = useState('')
   const { vms, fetchVms, startVm, stopVm } = useVmStore()
   const [host, setHost] = useState<Host | null>(null)
 
@@ -39,6 +45,12 @@ export default function HostDetail() {
           <p className="text-sm text-vmm-text-muted">{host.address}</p>
         </div>
         <div className="flex gap-2">
+          <button
+            onClick={() => { setEditName(host.hostname); setEditOpen(true) }}
+            className="flex items-center gap-2 px-4 py-2 bg-vmm-surface hover:bg-vmm-surface-hover border border-vmm-border rounded-lg text-sm font-medium text-vmm-text transition-colors cursor-pointer"
+          >
+            <Pencil size={14} /> Edit
+          </button>
           <button
             onClick={() => {
               if (host.maintenance_mode) {

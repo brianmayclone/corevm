@@ -1012,6 +1012,15 @@ export default function StorageCoresan() {
         onCancel={() => setResetDisk(null)}
       />
 
+      {/* Volume Browser */}
+      <VolumeBrowser
+        open={!!browseVolume}
+        onClose={() => setBrowseVolume(null)}
+        volumeId={browseVolume?.id || ''}
+        volumeName={browseVolume?.name || ''}
+        sanApi={sanApi}
+      />
+
       {/* Auto-Claim Dialog */}
       <Dialog open={autoClaimOpen} title="Auto-Claim Disks" onClose={() => setAutoClaimOpen(false)} width="max-w-4xl">
         <div className="space-y-4">
