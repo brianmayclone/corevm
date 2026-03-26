@@ -120,16 +120,23 @@ pub async fn list(
 ) -> Json<Vec<VolumeResponse>> {
     let db = state.db.lock().unwrap();
 
+    // Pool-wide capacity (shared across all volumes)
+    let total_bytes: u64 = db.query_row(
+        "SELECT COALESCE(SUM(total_bytes), 0) FROM backends WHERE status = 'online'",
+        [], |row| row.get(0),
+    ).unwrap_or(0);
+    let free_bytes: u64 = db.query_row(
+        "SELECT COALESCE(SUM(free_bytes), 0) FROM backends WHERE status = 'online'",
+        [], |row| row.get(0),
+    ).unwrap_or(0);
+    let backend_count: u32 = db.query_row(
+        "SELECT COUNT(*) FROM backends WHERE status = 'online'",
+        [], |row| row.get(0),
+    ).unwrap_or(0);
+
     let mut stmt = db.prepare(
-        "SELECT v.id, v.name, v.ftt, v.local_raid, v.chunk_size_bytes,
-                v.status, v.created_at,
-                COALESCE(SUM(b.total_bytes), 0),
-                COALESCE(SUM(b.free_bytes), 0),
-                COUNT(b.id)
-         FROM volumes v
-         LEFT JOIN backends b ON b.volume_id = v.id AND b.status != 'offline'
-         GROUP BY v.id
-         ORDER BY v.name"
+        "SELECT id, name, ftt, local_raid, chunk_size_bytes, status, created_at
+         FROM volumes ORDER BY name"
     ).unwrap();
 
     let volumes = stmt.query_map([], |row| {
@@ -141,9 +148,9 @@ pub async fn list(
             chunk_size_bytes: row.get(4)?,
             status: row.get(5)?,
             created_at: row.get(6)?,
-            total_bytes: row.get(7)?,
-            free_bytes: row.get(8)?,
-            backend_count: row.get(9)?,
+            total_bytes,
+            free_bytes,
+            backend_count,
         })
     }).unwrap().filter_map(|r| r.ok()).collect();
 
@@ -157,16 +164,22 @@ pub async fn get(
 ) -> Result<Json<VolumeResponse>, StatusCode> {
     let db = state.db.lock().unwrap();
 
+    let total_bytes: u64 = db.query_row(
+        "SELECT COALESCE(SUM(total_bytes), 0) FROM backends WHERE status = 'online'",
+        [], |row| row.get(0),
+    ).unwrap_or(0);
+    let free_bytes: u64 = db.query_row(
+        "SELECT COALESCE(SUM(free_bytes), 0) FROM backends WHERE status = 'online'",
+        [], |row| row.get(0),
+    ).unwrap_or(0);
+    let backend_count: u32 = db.query_row(
+        "SELECT COUNT(*) FROM backends WHERE status = 'online'",
+        [], |row| row.get(0),
+    ).unwrap_or(0);
+
     let vol = db.query_row(
-        "SELECT v.id, v.name, v.ftt, v.local_raid, v.chunk_size_bytes,
-                v.status, v.created_at,
-                COALESCE(SUM(b.total_bytes), 0),
-                COALESCE(SUM(b.free_bytes), 0),
-                COUNT(b.id)
-         FROM volumes v
-         LEFT JOIN backends b ON b.volume_id = v.id AND b.status != 'offline'
-         WHERE v.id = ?1
-         GROUP BY v.id",
+        "SELECT id, name, ftt, local_raid, chunk_size_bytes, status, created_at
+         FROM volumes WHERE id = ?1",
         rusqlite::params![&id],
         |row| Ok(VolumeResponse {
             id: row.get(0)?,
@@ -176,9 +189,9 @@ pub async fn get(
             chunk_size_bytes: row.get(4)?,
             status: row.get(5)?,
             created_at: row.get(6)?,
-            total_bytes: row.get(7)?,
-            free_bytes: row.get(8)?,
-            backend_count: row.get(9)?,
+            total_bytes,
+            free_bytes,
+            backend_count,
         }),
     ).map_err(|_| StatusCode::NOT_FOUND)?;
 

@@ -76,7 +76,6 @@ export default function StorageCoresan() {
   // Auto-claim dialog
   const [autoClaimOpen, setAutoClaimOpen] = useState(false)
   const [autoClaimSelected, setAutoClaimSelected] = useState<Set<string>>(new Set())
-  const [autoClaimVolumeId, setAutoClaimVolumeId] = useState('')
   const [autoClaimRunning, setAutoClaimRunning] = useState(false)
   const [autoClaimError, setAutoClaimError] = useState('')
 
@@ -305,13 +304,12 @@ export default function StorageCoresan() {
     const claimable = disks.filter(d => d.status === 'available' || d.status === 'has_data')
     const preSelected = new Set(claimable.filter(d => d.status === 'available').map(d => d.path))
     setAutoClaimSelected(preSelected)
-    setAutoClaimVolumeId(volumes[0]?.id || '')
     setAutoClaimError('')
     setAutoClaimOpen(true)
   }
 
   const handleAutoClaim = async () => {
-    if (autoClaimSelected.size === 0 || !autoClaimVolumeId) return
+    if (autoClaimSelected.size === 0) return
     setAutoClaimRunning(true)
     setAutoClaimError('')
 
@@ -326,7 +324,6 @@ export default function StorageCoresan() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           device_path: devicePath,
-          volume_id: autoClaimVolumeId,
           confirm_format: true,
         }),
       })
@@ -455,6 +452,9 @@ export default function StorageCoresan() {
         </div>
         <div className="flex items-center gap-2">
           <Button variant="ghost" onClick={refresh}><RefreshCw size={14} /></Button>
+          <Button variant="outline" onClick={openAutoClaim}>
+            <Disc size={14} /> Auto-Claim
+          </Button>
           <Button variant="primary" onClick={() => setCreateVolumeOpen(true)}>
             <Plus size={14} /> New Volume
           </Button>
@@ -495,17 +495,10 @@ export default function StorageCoresan() {
         <Card>
           <div className="flex items-center justify-between mb-3">
             <SectionLabel>Physical Disks</SectionLabel>
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-vmm-text-muted">
-                {disks.filter(d => d.status === 'available' || d.status === 'has_data').length} available,{' '}
-                {disks.filter(d => d.status === 'claimed').length} claimed
-              </span>
-              {disks.some(d => d.status === 'available' || d.status === 'has_data') && volumes.length > 0 && (
-                <Button variant="primary" onClick={openAutoClaim}>
-                  <Plus size={13} /> Auto-Claim
-                </Button>
-              )}
-            </div>
+            <span className="text-xs text-vmm-text-muted">
+              {disks.filter(d => d.status === 'available' || d.status === 'has_data').length} available,{' '}
+              {disks.filter(d => d.status === 'claimed').length} claimed
+            </span>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
@@ -983,11 +976,6 @@ export default function StorageCoresan() {
               <div className="bg-vmm-danger/10 border border-vmm-danger/30 text-vmm-danger rounded-lg p-3 text-sm">{claimError}</div>
             )}
 
-            <FormField label="Add to Volume">
-              <Select value={claimVolumeId} onChange={(e) => setClaimVolumeId(e.target.value)}
-                options={volumes.map(v => ({ value: v.id, label: v.name }))} />
-            </FormField>
-
             {claimDisk.status === 'has_data' && (
               <label className="flex items-center gap-2 cursor-pointer">
                 <input type="checkbox" checked={claimConfirm} onChange={e => setClaimConfirm(e.target.checked)} className="accent-vmm-danger" />
@@ -1016,6 +1004,110 @@ export default function StorageCoresan() {
         onConfirm={handleResetDisk}
         onCancel={() => setResetDisk(null)}
       />
+
+      {/* Auto-Claim Dialog */}
+      <Dialog open={autoClaimOpen} title="Auto-Claim Disks" onClose={() => setAutoClaimOpen(false)} width="max-w-4xl">
+        <div className="space-y-4">
+          <p className="text-sm text-vmm-text-dim">
+            Select disks to claim for CoreSAN. Empty disks are pre-selected.
+            Disks with existing data must be explicitly selected (they will be formatted).
+            OS disks cannot be selected.
+          </p>
+
+          {autoClaimError && (
+            <div className="bg-vmm-danger/10 border border-vmm-danger/30 text-vmm-danger rounded-lg p-3 text-sm">{autoClaimError}</div>
+          )}
+
+          {/* Disks grouped by host */}
+          <div className="space-y-4 max-h-[50vh] overflow-y-auto">
+            {/* This node's disks */}
+            <div>
+              <div className="flex items-center gap-2 mb-2">
+                <Server size={14} className="text-vmm-success" />
+                <span className="text-xs font-bold text-vmm-text uppercase tracking-wider">{status?.hostname}</span>
+                <span className="text-[10px] text-vmm-text-muted">(this node)</span>
+              </div>
+              <div className="space-y-1.5 ml-5">
+                {disks.filter(d => d.status !== 'claimed').map(d => {
+                  const isOsDisk = d.status === 'os_disk' || d.status === 'in_use'
+                  const hasData = d.status === 'has_data'
+                  const checked = autoClaimSelected.has(d.path)
+                  return (
+                    <label key={d.path} className={`flex items-center gap-3 p-3 rounded-lg border transition-colors
+                      ${isOsDisk ? 'opacity-40 cursor-not-allowed border-vmm-border' :
+                        checked ? 'bg-vmm-accent/5 border-vmm-accent/30 cursor-pointer' :
+                        'border-vmm-border hover:border-vmm-accent/20 cursor-pointer'}`}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={isOsDisk}
+                        onChange={() => {
+                          setAutoClaimSelected(prev => {
+                            const next = new Set(prev)
+                            if (next.has(d.path)) next.delete(d.path)
+                            else next.add(d.path)
+                            return next
+                          })
+                        }}
+                        className="accent-vmm-accent"
+                      />
+                      <Disc size={16} className={isOsDisk ? 'text-vmm-danger' : checked ? 'text-vmm-accent' : 'text-vmm-text-muted'} />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-mono font-medium text-vmm-text">{d.path}</span>
+                          <span className="text-xs text-vmm-text-dim">{formatBytes(d.size_bytes)}</span>
+                          {d.model && <span className="text-xs text-vmm-text-muted">{d.model}</span>}
+                        </div>
+                      </div>
+                      <div className="shrink-0">
+                        {isOsDisk && (
+                          <Badge label="OS DISK" color="bg-vmm-danger/20 text-vmm-danger border-vmm-danger/30" />
+                        )}
+                        {d.status === 'in_use' && (
+                          <Badge label="IN USE" color={statusColors.offline} />
+                        )}
+                        {d.status === 'available' && (
+                          <Badge label="EMPTY" color={statusColors.online} />
+                        )}
+                        {hasData && (
+                          <Badge label={`HAS DATA (${d.fs_type || '?'})`} color={statusColors.degraded} />
+                        )}
+                      </div>
+                    </label>
+                  )
+                })}
+                {disks.filter(d => d.status !== 'claimed').length === 0 && (
+                  <p className="text-xs text-vmm-text-muted py-2">No unclaimed disks on this node.</p>
+                )}
+              </div>
+            </div>
+
+            {/* TODO: Remote host disks would go here in multi-node mode */}
+          </div>
+
+          {autoClaimSelected.size > 0 && disks.some(d => autoClaimSelected.has(d.path) && d.status === 'has_data') && (
+            <div className="flex items-center gap-2 p-3 rounded-lg bg-vmm-warning/10 border border-vmm-warning/30 text-xs text-vmm-warning">
+              <AlertTriangle size={14} />
+              {disks.filter(d => autoClaimSelected.has(d.path) && d.status === 'has_data').length} disk(s)
+              with existing data selected. They will be wiped and formatted!
+            </div>
+          )}
+
+          <div className="flex items-center justify-between pt-2 border-t border-vmm-border">
+            <span className="text-sm text-vmm-text-dim">
+              {autoClaimSelected.size} disk{autoClaimSelected.size !== 1 ? 's' : ''} selected
+              ({formatBytes(disks.filter(d => autoClaimSelected.has(d.path)).reduce((s, d) => s + d.size_bytes, 0))} total)
+            </span>
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" onClick={() => setAutoClaimOpen(false)}>Cancel</Button>
+              <Button variant="primary" onClick={handleAutoClaim}
+                disabled={autoClaimSelected.size === 0 || autoClaimRunning}>
+                {autoClaimRunning ? 'Claiming...' : `Claim ${autoClaimSelected.size} Disk${autoClaimSelected.size !== 1 ? 's' : ''}`}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </Dialog>
     </div>
   )
 }

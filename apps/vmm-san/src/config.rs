@@ -12,6 +12,8 @@ pub struct CoreSanConfig {
     #[serde(default)]
     pub peer: PeerSection,
     #[serde(default)]
+    pub network: NetworkSection,
+    #[serde(default)]
     pub replication: ReplicationSection,
     #[serde(default)]
     pub benchmark: BenchmarkSection,
@@ -43,6 +45,25 @@ pub struct PeerSection {
     pub port: u16,
     #[serde(default)]
     pub secret: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NetworkSection {
+    /// NIC to bind SAN traffic to (e.g. "eth1", "ens192"). Empty = all interfaces.
+    #[serde(default)]
+    pub san_interface: String,
+    /// Static IP for the SAN interface. Empty = use existing/DHCP.
+    #[serde(default)]
+    pub san_ip: String,
+    /// Subnet mask (e.g. "255.255.255.0" or "/24"). Empty = use existing.
+    #[serde(default)]
+    pub san_netmask: String,
+    /// Gateway for the SAN network. Empty = no gateway (direct L2).
+    #[serde(default)]
+    pub san_gateway: String,
+    /// MTU for SAN traffic (0 = default, 9000 = jumbo frames recommended).
+    #[serde(default)]
+    pub san_mtu: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,6 +129,17 @@ impl Default for PeerSection {
         Self { port: default_peer_port(), secret: String::new() }
     }
 }
+impl Default for NetworkSection {
+    fn default() -> Self {
+        Self {
+            san_interface: String::new(),
+            san_ip: String::new(),
+            san_netmask: String::new(),
+            san_gateway: String::new(),
+            san_mtu: 0,
+        }
+    }
+}
 impl Default for ReplicationSection {
     fn default() -> Self {
         Self { sync_mode: default_sync_mode() }
@@ -142,6 +174,7 @@ impl Default for CoreSanConfig {
             server: Default::default(),
             data: Default::default(),
             peer: Default::default(),
+            network: Default::default(),
             replication: Default::default(),
             benchmark: Default::default(),
             integrity: Default::default(),

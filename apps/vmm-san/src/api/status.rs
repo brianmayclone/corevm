@@ -146,12 +146,10 @@ pub async fn dashboard(
 fn query_volume_summaries(db: &rusqlite::Connection) -> Vec<VolumeStatusSummary> {
     let mut stmt = db.prepare(
         "SELECT v.id, v.name, v.ftt, v.local_raid, v.chunk_size_bytes, v.status,
-                COALESCE(SUM(b.total_bytes), 0) AS total_bytes,
-                COALESCE(SUM(b.free_bytes), 0) AS free_bytes,
-                COUNT(b.id) AS backend_count
-         FROM volumes v
-         LEFT JOIN backends b ON b.volume_id = v.id AND b.status = 'online'
-         GROUP BY v.id"
+                (SELECT COALESCE(SUM(total_bytes), 0) FROM backends WHERE status = 'online') AS total_bytes,
+                (SELECT COALESCE(SUM(free_bytes), 0) FROM backends WHERE status = 'online') AS free_bytes,
+                (SELECT COUNT(*) FROM backends WHERE status = 'online') AS backend_count
+         FROM volumes v"
     ).unwrap();
 
     let volumes: Vec<VolumeStatusSummary> = stmt.query_map([], |row| {
@@ -287,4 +285,86 @@ fn query_protection_counts(db: &rusqlite::Connection, volume_id: &str, ftt: u32)
     ).unwrap_or(0);
 
     (protected, degraded)
+}
+
+// ── Network Configuration ────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct NetworkConfigResponse {
+    pub san_interface: String,
+    pub san_ip: String,
+    pub san_netmask: String,
+    pub san_gateway: String,
+    pub san_mtu: u32,
+}
+
+#[derive(Serialize)]
+pub struct NetworkInterface {
+    pub name: String,
+    pub mac: String,
+    pub ipv4: String,
+    pub state: String,
+    pub speed_mbps: Option<u32>,
+    pub mtu: u32,
+}
+
+/// GET /api/network/config — current SAN network configuration.
+pub async fn get_network_config(
+    State(state): State<Arc<CoreSanState>>,
+) -> Json<NetworkConfigResponse> {
+    Json(NetworkConfigResponse {
+        san_interface: state.config.network.san_interface.clone(),
+        san_ip: state.config.network.san_ip.clone(),
+        san_netmask: state.config.network.san_netmask.clone(),
+        san_gateway: state.config.network.san_gateway.clone(),
+        san_mtu: state.config.network.san_mtu,
+    })
+}
+
+/// GET /api/network/interfaces — list all network interfaces on this host.
+pub async fn list_interfaces() -> Json<Vec<NetworkInterface>> {
+    let interfaces = discover_interfaces();
+    Json(interfaces)
+}
+
+fn discover_interfaces() -> Vec<NetworkInterface> {
+    let sys_net = std::path::Path::new("/sys/class/net");
+    let entries = match std::fs::read_dir(sys_net) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut result = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == "lo" { continue; }
+
+        let iface_path = sys_net.join(&name);
+
+        let mac = std::fs::read_to_string(iface_path.join("address"))
+            .map(|s| s.trim().to_string()).unwrap_or_default();
+
+        let state = std::fs::read_to_string(iface_path.join("operstate"))
+            .map(|s| s.trim().to_string()).unwrap_or_else(|_| "unknown".into());
+
+        let mtu: u32 = std::fs::read_to_string(iface_path.join("mtu"))
+            .ok().and_then(|s| s.trim().parse().ok()).unwrap_or(1500);
+
+        let speed_mbps: Option<u32> = std::fs::read_to_string(iface_path.join("speed"))
+            .ok().and_then(|s| s.trim().parse().ok());
+
+        // Get IPv4 from ip command
+        let ipv4 = std::process::Command::new("ip")
+            .args(["-4", "-o", "addr", "show", &name])
+            .output().ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.split_whitespace().nth(3).map(|ip| ip.to_string()))
+            .unwrap_or_default();
+
+        result.push(NetworkInterface {
+            name, mac, ipv4, state, speed_mbps, mtu,
+        });
+    }
+
+    result
 }

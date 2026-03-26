@@ -20,7 +20,6 @@ pub async fn list(
 #[derive(Deserialize)]
 pub struct ClaimDiskRequest {
     pub device_path: String,
-    pub volume_id: String,
     #[serde(default = "default_ext4")]
     pub fs_type: String,
     #[serde(default)]
@@ -79,18 +78,6 @@ pub async fn claim(
         disk::DiskStatus::Available => { /* Good to go */ }
     }
 
-    // Verify volume exists
-    {
-        let db = state.db.lock().unwrap();
-        let exists: bool = db.query_row(
-            "SELECT COUNT(*) FROM volumes WHERE id = ?1",
-            rusqlite::params![&body.volume_id], |row| row.get::<_, i64>(0),
-        ).map(|c| c > 0).unwrap_or(false);
-        if !exists {
-            return Err((StatusCode::NOT_FOUND, "Volume not found".into()));
-        }
-    }
-
     let disk_id = Uuid::new_v4().to_string();
     let mount_path = format!("/vmm/san-disks/{}", disk_id);
 
@@ -98,12 +85,12 @@ pub async fn claim(
     {
         let db = state.db.lock().unwrap();
         db.execute(
-            "INSERT INTO claimed_disks (id, device_path, mount_path, fs_type, model, serial, size_bytes, status, volume_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'formatting', ?8)",
+            "INSERT INTO claimed_disks (id, device_path, mount_path, fs_type, model, serial, size_bytes, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'formatting')",
             rusqlite::params![
                 &disk_id, &body.device_path, &mount_path, &body.fs_type,
                 &disk_info.device.model, &disk_info.device.serial,
-                disk_info.device.size_bytes, &body.volume_id
+                disk_info.device.size_bytes
             ],
         ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)))?;
     }
@@ -148,17 +135,17 @@ pub async fn claim(
 
         // Create backend
         db.execute(
-            "INSERT INTO backends (id, volume_id, node_id, path, total_bytes, free_bytes, status, last_check, claimed_disk_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'online', ?7, ?8)",
+            "INSERT INTO backends (id, node_id, path, total_bytes, free_bytes, status, last_check, claimed_disk_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'online', ?6, ?7)",
             rusqlite::params![
-                &backend_id, &body.volume_id, &state.node_id, &mount_path,
+                &backend_id, &state.node_id, &mount_path,
                 total_bytes, free_bytes, &now, &disk_id
             ],
         ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Backend creation: {}", e)))?;
     }
 
-    tracing::info!("Claimed disk {} → {} (backend={}, volume={})",
-        body.device_path, mount_path, backend_id, body.volume_id);
+    tracing::info!("Claimed disk {} → {} (backend={})",
+        body.device_path, mount_path, backend_id);
 
     Ok(Json(serde_json::json!({
         "disk_id": disk_id,

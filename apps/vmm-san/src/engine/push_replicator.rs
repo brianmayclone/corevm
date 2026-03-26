@@ -49,10 +49,10 @@ async fn run_push_replicator(
             let db = state.db.lock().unwrap();
             let mut stmt = db.prepare(
                 "SELECT DISTINCT b.node_id FROM backends b
-                 WHERE b.volume_id = ?1 AND b.node_id != ?2 AND b.status = 'online'"
+                 WHERE b.node_id != ?1 AND b.status = 'online'"
             ).unwrap();
             let nodes: Vec<String> = stmt.query_map(
-                rusqlite::params![&event.volume_id, &event.writer_node_id],
+                rusqlite::params![&event.writer_node_id],
                 |row| row.get(0),
             ).unwrap().filter_map(|r| r.ok()).collect();
             nodes

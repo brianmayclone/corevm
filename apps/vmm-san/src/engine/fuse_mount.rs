@@ -180,9 +180,9 @@ impl CoreSanFS {
             let db = self.state.db.lock().unwrap();
             db.query_row(
                 "SELECT id, path FROM backends
-                 WHERE volume_id = ?1 AND node_id = ?2 AND status = 'online'
+                 WHERE node_id = ?1 AND status = 'online'
                  ORDER BY free_bytes DESC LIMIT 1",
-                rusqlite::params![&self.volume_id, &self.state.node_id],
+                rusqlite::params![&self.state.node_id],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             ).ok()
         };
@@ -242,9 +242,9 @@ impl CoreSanFS {
         let db = self.state.db.lock().unwrap();
         db.query_row(
             "SELECT id, path FROM backends
-             WHERE volume_id = ?1 AND node_id = ?2 AND status = 'online'
+             WHERE node_id = ?1 AND status = 'online'
              ORDER BY free_bytes DESC LIMIT 1",
-            rusqlite::params![&self.volume_id, &self.state.node_id],
+            rusqlite::params![&self.state.node_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         ).ok()
     }
@@ -364,7 +364,7 @@ impl Filesystem for CoreSanFS {
                 match result {
                     Ok(mut stmt) => {
                         let rows = stmt.query_map(
-                            rusqlite::params![&self.volume_id, &self.state.node_id],
+                            rusqlite::params![&self.state.node_id],
                             |row| row.get(0),
                         );
                         rows.map(|r| r.filter_map(|v| v.ok()).collect()).unwrap_or_default()
@@ -670,7 +670,7 @@ impl Filesystem for CoreSanFS {
                 "SELECT path FROM backends WHERE volume_id = ?1 AND node_id = ?2 AND status = 'online'"
             ).unwrap();
             stmt.query_map(
-                rusqlite::params![&self.volume_id, &self.state.node_id],
+                rusqlite::params![&self.state.node_id],
                 |row| row.get(0),
             ).unwrap().filter_map(|r| r.ok()).collect()
         };
@@ -736,7 +736,7 @@ impl Filesystem for CoreSanFS {
                 "SELECT path FROM backends WHERE volume_id = ?1 AND node_id = ?2 AND status = 'online'"
             ).unwrap();
             stmt.query_map(
-                rusqlite::params![&self.volume_id, &self.state.node_id],
+                rusqlite::params![&self.state.node_id],
                 |row| row.get(0),
             ).unwrap().filter_map(|r| r.ok()).collect()
         };

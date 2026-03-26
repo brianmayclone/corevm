@@ -18,6 +18,8 @@ pub fn router() -> Router<Arc<CoreSanState>> {
         .route("/api/status", get(status::status))
         .route("/api/health", get(status::health))
         .route("/api/dashboard", get(status::dashboard))
+        .route("/api/network/config", get(status::get_network_config))
+        .route("/api/network/interfaces", get(status::list_interfaces))
 
         // ── Physical Disks ────────────────────────────────
         .route("/api/disks", get(disks::list))

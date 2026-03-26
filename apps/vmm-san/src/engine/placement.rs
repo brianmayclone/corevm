@@ -28,7 +28,7 @@ pub fn select_replica_backends(
     // First try backends on different nodes
     let mut stmt = db.prepare(
         "SELECT b.id, b.node_id, b.path FROM backends b
-         WHERE b.volume_id = ?1 AND b.id != ?2 AND b.status = 'online'
+         WHERE b.id != ?1 AND b.status = 'online'
          AND b.node_id NOT IN (
              SELECT node_id FROM backends WHERE id = ?2
          )
@@ -44,7 +44,7 @@ pub fn select_replica_backends(
     if (results.len() as u32) < desired_count {
         let mut fallback = db.prepare(
             "SELECT b.id, b.node_id, b.path FROM backends b
-             WHERE b.volume_id = ?1 AND b.id != ?2 AND b.status = 'online'
+             WHERE b.id != ?1 AND b.status = 'online'
              AND b.id NOT IN (SELECT id FROM backends WHERE id IN (
                  SELECT ?2 UNION ALL SELECT ?3
              ))
@@ -80,7 +80,7 @@ pub fn select_new_replica_target(
     // preferring backends on different nodes from existing replicas.
     db.query_row(
         "SELECT b.id, b.node_id, b.path FROM backends b
-         WHERE b.volume_id = ?1 AND b.status = 'online'
+         WHERE b.status = 'online'
          AND b.id NOT IN (
              SELECT backend_id FROM file_replicas WHERE file_id = ?2
          )

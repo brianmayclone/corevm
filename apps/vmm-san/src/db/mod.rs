@@ -32,13 +32,13 @@ CREATE TABLE IF NOT EXISTS volumes (
 
 CREATE TABLE IF NOT EXISTS backends (
     id              TEXT PRIMARY KEY,
-    volume_id       TEXT NOT NULL REFERENCES volumes(id) ON DELETE CASCADE,
     node_id         TEXT NOT NULL,
-    path            TEXT NOT NULL,              -- local mountpoint, e.g. /mnt/data1
+    path            TEXT NOT NULL,              -- mount point of a claimed disk
     total_bytes     INTEGER NOT NULL DEFAULT 0,
     free_bytes      INTEGER NOT NULL DEFAULT 0,
     status          TEXT NOT NULL DEFAULT 'online',  -- online, degraded, offline, draining
     last_check      TEXT,
+    claimed_disk_id TEXT NOT NULL DEFAULT '',    -- link to claimed_disks table
     UNIQUE(node_id, path)
 );
 
@@ -186,7 +186,8 @@ CREATE TABLE IF NOT EXISTS claimed_disks (
     size_bytes      INTEGER NOT NULL DEFAULT 0,
     status          TEXT NOT NULL DEFAULT 'formatting', -- formatting, mounted, error, released
     backend_id      TEXT NOT NULL DEFAULT '', -- linked backend in backends table
-    volume_id       TEXT NOT NULL DEFAULT '', -- which volume this disk belongs to
+    -- Disks belong to the NODE POOL, not to a specific volume.
+    -- All volumes share all disks on a node.
     claimed_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -198,7 +199,7 @@ CREATE INDEX IF NOT EXISTS idx_file_map_vol_path ON file_map(volume_id, rel_path
 CREATE INDEX IF NOT EXISTS idx_file_map_write_owner ON file_map(write_owner);
 CREATE INDEX IF NOT EXISTS idx_file_replicas_state ON file_replicas(state);
 CREATE INDEX IF NOT EXISTS idx_file_replicas_backend ON file_replicas(backend_id);
-CREATE INDEX IF NOT EXISTS idx_backends_volume ON backends(volume_id);
+CREATE INDEX IF NOT EXISTS idx_backends_node ON backends(node_id);
 CREATE INDEX IF NOT EXISTS idx_benchmark_nodes ON benchmark_results(from_node_id, to_node_id);
 CREATE INDEX IF NOT EXISTS idx_write_log_seq ON write_log(seq);
 CREATE INDEX IF NOT EXISTS idx_write_log_volume ON write_log(volume_id);

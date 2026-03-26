@@ -55,19 +55,20 @@ pub fn chunk_path(backend_path: &str, volume_id: &str, file_id: i64, chunk_index
 /// Returns Vec of (backend_id, backend_path) — 1 for stripe, N for mirror.
 pub fn place_chunk(
     db: &Connection,
-    volume_id: &str,
+    _volume_id: &str,
     node_id: &str,
     chunk_index: u32,
     local_raid: &str,
 ) -> Vec<(String, String)> {
+    // Backends belong to the node pool, not to a specific volume
     let backends: Vec<(String, String)> = {
         let mut stmt = db.prepare(
             "SELECT id, path FROM backends
-             WHERE volume_id = ?1 AND node_id = ?2 AND status = 'online'
+             WHERE node_id = ?1 AND status = 'online'
              ORDER BY free_bytes DESC"
         ).unwrap();
         stmt.query_map(
-            rusqlite::params![volume_id, node_id],
+            rusqlite::params![node_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         ).unwrap().filter_map(|r| r.ok()).collect()
     };
