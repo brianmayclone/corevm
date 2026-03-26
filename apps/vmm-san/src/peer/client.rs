@@ -28,6 +28,7 @@ impl PeerClient {
         node_id: &str,
         hostname: &str,
         uptime_secs: u64,
+        our_address: &str,
     ) -> Result<(), String> {
         let url = format!("{}/api/peers/heartbeat", peer_address);
         self.http.post(&url)
@@ -36,6 +37,7 @@ impl PeerClient {
                 "node_id": node_id,
                 "hostname": hostname,
                 "uptime_secs": uptime_secs,
+                "address": our_address,
             }))
             .send().await
             .map_err(|e| format!("Heartbeat failed: {}", e))?;

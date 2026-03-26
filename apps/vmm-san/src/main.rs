@@ -18,6 +18,7 @@ mod services;
 use std::sync::{Arc, Mutex};
 use config::CoreSanConfig;
 use state::{CoreSanState, PeerConnection, PeerStatus};
+use peer::client::PeerClient;
 use dashmap::DashMap;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
@@ -120,7 +121,7 @@ async fn main() {
         }).unwrap().filter_map(|r| r.ok()).collect();
 
         for p in peer_list {
-            tracing::info!("Loaded peer: {} ({})", p.hostname, p.node_id);
+            tracing::info!("Loaded peer: {} ({}) at {}", p.hostname, p.node_id, p.address);
             peers.insert(p.node_id.clone(), p);
         }
     }
@@ -154,6 +155,33 @@ async fn main() {
 
     engine::peer_monitor::spawn(Arc::clone(&state));
     tracing::info!("Peer monitor started (5s heartbeat interval)");
+
+    // Immediately announce ourselves to all loaded peers (re-register with correct address)
+    {
+        let state_clone = Arc::clone(&state);
+        tokio::spawn(async move {
+            let client = PeerClient::new(&state_clone.config.peer.secret);
+            let our_address = format!("http://{}:{}",
+                engine::discovery::get_local_ip_cached(), state_clone.config.server.port);
+            let our_port = state_clone.config.peer.port;
+
+            let peer_list: Vec<(String, String, String)> = state_clone.peers.iter()
+                .map(|p| (p.node_id.clone(), p.address.clone(), p.hostname.clone()))
+                .collect();
+
+            for (peer_id, peer_addr, peer_host) in &peer_list {
+                tracing::info!("Announcing to peer {} ({}) at {} (our address: {})",
+                    peer_host, peer_id, peer_addr, our_address);
+                match client.announce(
+                    peer_addr, &state_clone.node_id, &our_address,
+                    &state_clone.hostname, our_port,
+                ).await {
+                    Ok(_) => tracing::info!("Successfully announced to {} at {}", peer_host, peer_addr),
+                    Err(e) => tracing::warn!("Failed to announce to {} at {}: {}", peer_host, peer_addr, e),
+                }
+            }
+        });
+    }
 
     engine::replication::spawn(Arc::clone(&state));
     tracing::info!("Replication engine started");

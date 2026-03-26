@@ -35,6 +35,9 @@ pub struct HeartbeatRequest {
     pub node_id: String,
     pub hostname: String,
     pub uptime_secs: u64,
+    /// The sender's reachable address — used to fix stale peer addresses.
+    #[serde(default)]
+    pub address: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -166,18 +169,38 @@ pub async fn heartbeat(
     State(state): State<Arc<CoreSanState>>,
     Json(body): Json<HeartbeatRequest>,
 ) -> Json<HeartbeatResponse> {
-    // Update last heartbeat time
+    // Update last heartbeat time and fix stale address if provided
     if let Some(mut peer) = state.peers.get_mut(&body.node_id) {
+        if let Some(ref addr) = body.address {
+            if !addr.is_empty() && peer.address != *addr {
+                tracing::info!("Peer {} address updated: {} -> {}", body.node_id, peer.address, addr);
+                peer.address = addr.clone();
+            }
+        }
         peer.status = PeerStatus::Online;
         peer.missed_heartbeats = 0;
     }
 
     let db = state.db.lock().unwrap();
     let now = chrono::Utc::now().to_rfc3339();
-    db.execute(
-        "UPDATE peers SET status = 'online', last_heartbeat = ?1 WHERE node_id = ?2",
-        rusqlite::params![&now, &body.node_id],
-    ).ok();
+    if let Some(ref addr) = body.address {
+        if !addr.is_empty() {
+            db.execute(
+                "UPDATE peers SET status = 'online', last_heartbeat = ?1, address = ?3 WHERE node_id = ?2",
+                rusqlite::params![&now, &body.node_id, addr],
+            ).ok();
+        } else {
+            db.execute(
+                "UPDATE peers SET status = 'online', last_heartbeat = ?1 WHERE node_id = ?2",
+                rusqlite::params![&now, &body.node_id],
+            ).ok();
+        }
+    } else {
+        db.execute(
+            "UPDATE peers SET status = 'online', last_heartbeat = ?1 WHERE node_id = ?2",
+            rusqlite::params![&now, &body.node_id],
+        ).ok();
+    }
 
     Json(HeartbeatResponse {
         node_id: state.node_id.clone(),

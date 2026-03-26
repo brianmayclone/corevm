@@ -29,19 +29,25 @@ async fn heartbeat_all_peers(state: &CoreSanState, client: &PeerClient) {
         .map(|p| p.node_id.clone())
         .collect();
 
+    if peer_ids.is_empty() {
+        return;
+    }
+
     let uptime = state.started_at.elapsed().as_secs();
+    let our_address = format!("http://{}:{}",
+        crate::engine::discovery::get_local_ip_cached(), state.config.server.port);
 
     for peer_id in peer_ids {
-        let address = match state.peers.get(&peer_id) {
-            Some(p) => p.address.clone(),
+        let (address, hostname) = match state.peers.get(&peer_id) {
+            Some(p) => (p.address.clone(), p.hostname.clone()),
             None => continue,
         };
 
-        match client.heartbeat(&address, &state.node_id, &state.hostname, uptime).await {
+        match client.heartbeat(&address, &state.node_id, &state.hostname, uptime, &our_address).await {
             Ok(_) => {
                 if let Some(mut peer) = state.peers.get_mut(&peer_id) {
                     if peer.status != PeerStatus::Online {
-                        tracing::info!("Peer {} ({}) is now online", peer.hostname, peer_id);
+                        tracing::info!("Peer {} ({}) at {} is now online", hostname, peer_id, address);
                     }
                     peer.status = PeerStatus::Online;
                     peer.missed_heartbeats = 0;
@@ -54,15 +60,20 @@ async fn heartbeat_all_peers(state: &CoreSanState, client: &PeerClient) {
                     rusqlite::params![&now, &peer_id],
                 ).ok();
             }
-            Err(_) => {
+            Err(e) => {
                 if let Some(mut peer) = state.peers.get_mut(&peer_id) {
                     peer.missed_heartbeats += 1;
+
+                    if peer.missed_heartbeats == 1 {
+                        tracing::warn!("Heartbeat to {} ({}) at {} failed: {}",
+                            hostname, peer_id, address, e);
+                    }
 
                     if peer.missed_heartbeats >= MAX_MISSED_HEARTBEATS
                         && peer.status != PeerStatus::Offline
                     {
-                        tracing::warn!("Peer {} ({}) is now OFFLINE ({} missed heartbeats)",
-                            peer.hostname, peer_id, peer.missed_heartbeats);
+                        tracing::warn!("Peer {} ({}) at {} is now OFFLINE ({} missed heartbeats)",
+                            hostname, peer_id, address, peer.missed_heartbeats);
                         peer.status = PeerStatus::Offline;
 
                         // Update DB

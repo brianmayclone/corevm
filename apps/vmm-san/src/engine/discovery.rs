@@ -75,9 +75,40 @@ fn send_beacon(state: &CoreSanState, socket: &UdpSocket, addr: &str) {
 }
 
 fn get_local_ip() -> Option<String> {
+    // Try internet-routable detection first
+    if let Some(ip) = get_ip_via_connect("8.8.8.8:80") {
+        return Some(ip);
+    }
+
+    // Fallback: scan network interfaces for a non-loopback IPv4 address.
+    // This works even without a default route (isolated SAN networks).
+    if let Ok(output) = std::process::Command::new("ip")
+        .args(["-4", "-o", "addr", "show", "scope", "global"])
+        .output()
+    {
+        if let Ok(stdout) = String::from_utf8(output.stdout) {
+            for line in stdout.lines() {
+                // Format: "2: eth0    inet 192.168.1.10/24 ..."
+                if let Some(addr) = line.split_whitespace().nth(3) {
+                    if let Some(ip) = addr.split('/').next() {
+                        if ip != "127.0.0.1" {
+                            return Some(ip.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Last resort: try connecting to a link-local multicast address
+    get_ip_via_connect("224.0.0.1:1")
+}
+
+fn get_ip_via_connect(target: &str) -> Option<String> {
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("8.8.8.8:80").ok()?;
-    Some(socket.local_addr().ok()?.ip().to_string())
+    socket.connect(target).ok()?;
+    let ip = socket.local_addr().ok()?.ip();
+    if ip.is_loopback() { None } else { Some(ip.to_string()) }
 }
 
 /// Public helper: get local IP or fallback to 127.0.0.1.

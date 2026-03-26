@@ -222,7 +222,7 @@ export default function StorageCoresan() {
           }).catch(() => {})
           await fetch(`${hostSanAddr}/api/peers/join`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ address: status.address, node_id: status.node_id, hostname: status.hostname }),
+            body: JSON.stringify({ address: sanBase, node_id: status.node_id, hostname: status.hostname }),
           }).catch(() => {})
         }
       }
@@ -280,7 +280,7 @@ export default function StorageCoresan() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            address: status.address, node_id: status.node_id,
+            address: sanBase, node_id: status.node_id,
             hostname: status.hostname,
           }),
         })
@@ -429,8 +429,7 @@ export default function StorageCoresan() {
   const totalNodes = 1 + peers.length
   const onlineNodes = 1 + peers.filter(p => p.status === 'online').length
 
-  // Cluster hosts with/without CoreSAN (auto-discovered via heartbeat)
-  const sanHosts = hosts.filter(h => h.san_enabled)
+  // Cluster hosts without CoreSAN (available to add)
   const availableHosts = hosts.filter(h => h.status === 'online' && !h.san_enabled)
 
   if (loading) {
