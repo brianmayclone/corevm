@@ -30,9 +30,12 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-fn build_partition_preview(disk_path: &str, efi: bool) -> String {
-    let ram_bytes = get_ram_bytes();
-    let swap_gb = ((ram_bytes / (1024 * 1024 * 1024)).min(8)).max(1);
+fn build_partition_preview(disk_path: &str, disk_size_bytes: u64, efi: bool) -> String {
+    let ram_gib = get_ram_bytes() / (1024 * 1024 * 1024);
+    let disk_size_mib = disk_size_bytes / (1024 * 1024);
+    let fixed_mib: u64 = 1 + if efi { 256 } else { 1 } + 512 + 8 * 1024 + 1024;
+    let available_for_swap_mib = disk_size_mib.saturating_sub(fixed_mib);
+    let swap_gb = ram_gib.min(8).max(1).min(available_for_swap_mib / 1024);
 
     let mut lines = Vec::new();
     if efi {
@@ -109,7 +112,7 @@ impl DiskState {
                             let disk = &self.disks[self.list.selected];
                             let path_str = disk.path.display().to_string();
                             let efi = is_efi_booted();
-                            let msg = build_partition_preview(&path_str, efi);
+                            let msg = build_partition_preview(&path_str, disk.size_bytes, efi);
                             self.confirm = Some(ConfirmDialog::new(
                                 " Confirm Disk Erasure ",
                                 &msg,

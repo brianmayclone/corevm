@@ -264,18 +264,21 @@ impl ProgressState {
             // 10. Service config
             send(ProgressMsg::Update(0.75, "Writing service configuration...".into()));
             let data_dir = "/var/lib/vmm";
+
+            // vmm-server config is always written (every node runs vmm-server)
+            let server_log = "/var/log/vmm/vmm-server.log";
+            if let Err(e) = write_vmm_server_config(target, server_port, data_dir, server_log) {
+                send(ProgressMsg::Error(format!("write_vmm_server_config failed: {}", e)));
+                return;
+            }
+
             let web_url = match &role {
                 ApplianceRole::Server => {
-                    let log_file = "/var/log/vmm/vmm-server.log";
-                    if let Err(e) = write_vmm_server_config(target, server_port, data_dir, log_file) {
-                        send(ProgressMsg::Error(format!("write_vmm_server_config failed: {}", e)));
-                        return;
-                    }
                     format!("https://{}:{}", hostname, server_port)
                 }
                 ApplianceRole::Cluster => {
-                    let log_file = "/var/log/vmm/vmm-cluster.log";
-                    if let Err(e) = write_vmm_cluster_config(target, cluster_port, data_dir, log_file) {
+                    let cluster_log = "/var/log/vmm/vmm-cluster.log";
+                    if let Err(e) = write_vmm_cluster_config(target, cluster_port, data_dir, cluster_log) {
                         send(ProgressMsg::Error(format!("write_vmm_cluster_config failed: {}", e)));
                         return;
                     }
@@ -293,22 +296,31 @@ impl ProgressState {
                 return;
             }
 
-            // 10b. Enable role-specific service
-            let svc_name = match &role {
-                ApplianceRole::Server => "vmm-server.service",
-                ApplianceRole::Cluster => "vmm-cluster.service",
-            };
-            if let Err(e) = enable_service(target, svc_name) {
-                send(ProgressMsg::Error(format!("enable_service failed: {}", e)));
-                return;
+            // 10b. Enable services
+            // vmm-server and vmm-san always run (every node is a hypervisor + storage node)
+            for svc in &["vmm-server.service", "vmm-san.service"] {
+                if let Err(e) = enable_service(target, svc) {
+                    send(ProgressMsg::Error(format!("enable_service({}) failed: {}", svc, e)));
+                    return;
+                }
+            }
+            // Cluster-Management role additionally needs vmm-cluster
+            if matches!(role, ApplianceRole::Cluster) {
+                if let Err(e) = enable_service(target, "vmm-cluster.service") {
+                    send(ProgressMsg::Error(format!("enable_service(vmm-cluster) failed: {}", e)));
+                    return;
+                }
             }
 
             // 11. Firewall
             send(ProgressMsg::Update(0.80, "Configuring firewall...".into()));
             let fw_config = FirewallConfig {
                 ssh_port: 22,
-                vmm_server_port: if matches!(role, ApplianceRole::Server) { Some(server_port) } else { None },
+                vmm_server_port: Some(server_port),
                 vmm_cluster_port: if matches!(role, ApplianceRole::Cluster) { Some(cluster_port) } else { None },
+                vmm_san_port: Some(7443),
+                vmm_san_peer_port: Some(7444),
+                discovery_port: Some(7445),
             };
             if let Err(e) = write_nftables_config(target, &fw_config) {
                 send(ProgressMsg::Error(format!("write_nftables_config failed: {}", e)));

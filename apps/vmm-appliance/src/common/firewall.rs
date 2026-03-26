@@ -7,6 +7,9 @@ pub struct FirewallConfig {
     pub ssh_port: u16,
     pub vmm_server_port: Option<u16>,
     pub vmm_cluster_port: Option<u16>,
+    pub vmm_san_port: Option<u16>,
+    pub vmm_san_peer_port: Option<u16>,
+    pub discovery_port: Option<u16>,
 }
 
 pub fn write_nftables_config(target: &Path, config: &FirewallConfig) -> Result<()> {
@@ -26,6 +29,21 @@ pub fn write_nftables_config(target: &Path, config: &FirewallConfig) -> Result<(
     // VMM cluster port
     if let Some(port) = config.vmm_cluster_port {
         accept_rules.push_str(&format!("        tcp dport {} accept\n", port));
+    }
+
+    // VMM SAN port
+    if let Some(port) = config.vmm_san_port {
+        accept_rules.push_str(&format!("        tcp dport {} accept\n", port));
+    }
+
+    // VMM SAN peer port
+    if let Some(port) = config.vmm_san_peer_port {
+        accept_rules.push_str(&format!("        tcp dport {} accept\n", port));
+    }
+
+    // UDP discovery port
+    if let Some(port) = config.discovery_port {
+        accept_rules.push_str(&format!("        udp dport {} accept\n", port));
     }
 
     let nftables_conf = format!(
@@ -76,15 +94,21 @@ mod tests {
         let dir = temp_dir("server");
         let config = FirewallConfig {
             ssh_port: 22,
-            vmm_server_port: Some(8080),
+            vmm_server_port: Some(8443),
             vmm_cluster_port: None,
+            vmm_san_port: Some(7443),
+            vmm_san_peer_port: Some(7444),
+            discovery_port: Some(7445),
         };
         write_nftables_config(&dir, &config).unwrap();
 
         let content = fs::read_to_string(dir.join("etc/nftables.conf")).unwrap();
         assert!(content.contains("tcp dport 22 accept"), "missing ssh port");
-        assert!(content.contains("tcp dport 8080 accept"), "missing server port");
-        assert!(!content.contains("tcp dport 8081"), "unexpected cluster port");
+        assert!(content.contains("tcp dport 8443 accept"), "missing server port");
+        assert!(content.contains("tcp dport 7443 accept"), "missing san port");
+        assert!(content.contains("tcp dport 7444 accept"), "missing san peer port");
+        assert!(content.contains("udp dport 7445 accept"), "missing discovery port");
+        assert!(!content.contains("tcp dport 9443"), "unexpected cluster port");
     }
 
     #[test]
@@ -92,15 +116,21 @@ mod tests {
         let dir = temp_dir("cluster");
         let config = FirewallConfig {
             ssh_port: 22,
-            vmm_server_port: Some(8080),
-            vmm_cluster_port: Some(8081),
+            vmm_server_port: Some(8443),
+            vmm_cluster_port: Some(9443),
+            vmm_san_port: Some(7443),
+            vmm_san_peer_port: Some(7444),
+            discovery_port: Some(7445),
         };
         write_nftables_config(&dir, &config).unwrap();
 
         let content = fs::read_to_string(dir.join("etc/nftables.conf")).unwrap();
         assert!(content.contains("tcp dport 22 accept"), "missing ssh port");
-        assert!(content.contains("tcp dport 8080 accept"), "missing server port");
-        assert!(content.contains("tcp dport 8081 accept"), "missing cluster port");
+        assert!(content.contains("tcp dport 8443 accept"), "missing server port");
+        assert!(content.contains("tcp dport 9443 accept"), "missing cluster port");
+        assert!(content.contains("tcp dport 7443 accept"), "missing san port");
+        assert!(content.contains("tcp dport 7444 accept"), "missing san peer port");
+        assert!(content.contains("udp dport 7445 accept"), "missing discovery port");
     }
 
     #[test]
@@ -110,6 +140,9 @@ mod tests {
             ssh_port: 2222,
             vmm_server_port: None,
             vmm_cluster_port: None,
+            vmm_san_port: None,
+            vmm_san_peer_port: None,
+            discovery_port: None,
         };
         write_nftables_config(&dir, &config).unwrap();
 

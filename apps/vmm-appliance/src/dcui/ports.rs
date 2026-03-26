@@ -59,13 +59,18 @@ impl Dialog {
             Ok(_) => {}
         }
 
-        // Update nftables
-        let nft_conf = format!(
-            "#!/usr/sbin/nft -f\nflush ruleset\ntable inet filter {{\n    chain input {{\n        type filter hook input priority 0; policy drop;\n        iif lo accept\n        ct state established,related accept\n        ip protocol icmp accept\n        tcp dport 22 accept\n        tcp dport {} accept\n    }}\n    chain forward {{ type filter hook forward priority 0; policy drop; }}\n    chain output {{ type filter hook output priority 0; policy accept; }}\n}}\n",
-            port
-        );
-        let _ = fs::write("/etc/nftables.conf", &nft_conf);
-        let _ = Command::new("systemctl").args(["restart", "nftables"]).status();
+        // Update nftables — regenerate full config with all service ports
+        use crate::common::firewall::{write_nftables_config, FirewallConfig, apply_nftables};
+        let fw_config = FirewallConfig {
+            ssh_port: 22,
+            vmm_server_port: if !self.is_cluster { Some(port) } else { Some(8443) },
+            vmm_cluster_port: if self.is_cluster { Some(port) } else { None },
+            vmm_san_port: Some(7443),
+            vmm_san_peer_port: Some(7444),
+            discovery_port: Some(7445),
+        };
+        let _ = write_nftables_config(Path::new("/"), &fw_config);
+        let _ = apply_nftables();
 
         // Restart service
         match Command::new("systemctl")

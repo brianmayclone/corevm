@@ -82,8 +82,13 @@ fn part_path(disk: &Path, num: u32) -> String {
 
 pub fn partition_disk(disk: &Path, efi: bool) -> Result<()> {
     let disk_str = disk.to_str().context("Invalid disk path")?;
+    let disk_size_mib = get_disk_size_mib(disk)?;
     let ram_gib = get_ram_bytes() / (1024 * 1024 * 1024);
-    let swap_gib = std::cmp::min(ram_gib, 8).max(1);
+
+    // Fixed partitions: EFI/BIOS (max 256 MiB) + boot (512 MiB) + root (8 GiB) + min data (1 GiB)
+    let fixed_mib: u64 = 1 + if efi { 256 } else { 1 } + 512 + 8 * 1024 + 1024;
+    let available_for_swap_mib = disk_size_mib.saturating_sub(fixed_mib);
+    let swap_gib = std::cmp::min(ram_gib, 8).max(1).min(available_for_swap_mib / 1024);
 
     run_cmd("parted", &["-s", disk_str, "mklabel", "gpt"])
         .context("Failed to create GPT label")?;
@@ -478,6 +483,14 @@ pub fn reboot() -> Result<()> {
         .status()
         .context("Failed to execute reboot")?;
     Ok(())
+}
+
+fn get_disk_size_mib(disk: &Path) -> Result<u64> {
+    let disk_str = disk.to_str().context("Invalid disk path")?;
+    let output = run_cmd_output("blockdev", &["--getsize64", disk_str])
+        .context("Failed to get disk size")?;
+    let bytes: u64 = output.trim().parse().context("Failed to parse disk size")?;
+    Ok(bytes / (1024 * 1024))
 }
 
 pub fn get_ram_bytes() -> u64 {
