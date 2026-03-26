@@ -293,13 +293,28 @@ pub fn write_chunk_data(
         let chunk_data_slice = &data[data_offset..data_offset + range.size as usize];
         data_offset += range.size as usize;
 
-        // Write to each backend replica (mirror writes)
+        // Write to each backend replica (mirror writes).
+        // If a backend fails, mark it as error and try to write to a fallback backend.
         let mut chunk_sha = String::new();
+        let mut at_least_one_write_ok = false;
+
         for (chunk_id, backend_id, backend_path) in &chunk_backends {
             let path = chunk_path(backend_path, volume_id, file_id, range.chunk_index);
 
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).ok();
+                if std::fs::create_dir_all(parent).is_err() {
+                    // Can't even create directory — backend is probably dead
+                    tracing::warn!("Chunk write: cannot create dir on backend {}, marking error", backend_id);
+                    db.execute(
+                        "UPDATE chunk_replicas SET state = 'error' WHERE chunk_id = ?1 AND backend_id = ?2",
+                        rusqlite::params![chunk_id, backend_id],
+                    ).ok();
+                    db.execute(
+                        "UPDATE backends SET status = 'degraded' WHERE id = ?1",
+                        rusqlite::params![backend_id],
+                    ).ok();
+                    continue;
+                }
             }
 
             // Read-modify-write: read existing chunk, patch, write back
@@ -312,25 +327,92 @@ pub fn write_chunk_data(
 
             // Atomic write: temp + fsync + rename
             let tmp = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
-            std::fs::write(&tmp, &existing)
-                .map_err(|e| format!("write chunk: {}", e))?;
-            if let Ok(f) = std::fs::File::open(&tmp) {
-                f.sync_all().ok();
+            match std::fs::write(&tmp, &existing) {
+                Ok(_) => {
+                    if let Ok(f) = std::fs::File::open(&tmp) {
+                        f.sync_all().ok();
+                    }
+                    match std::fs::rename(&tmp, &path) {
+                        Ok(_) => {
+                            let sha = format!("{:x}", Sha256::digest(&existing));
+                            chunk_sha = sha.clone();
+
+                            let now = chrono::Utc::now().to_rfc3339();
+                            db.execute(
+                                "UPDATE chunk_replicas SET state = 'synced', synced_at = ?1
+                                 WHERE chunk_id = ?2 AND backend_id = ?3",
+                                rusqlite::params![&now, chunk_id, backend_id],
+                            ).ok();
+                            at_least_one_write_ok = true;
+                        }
+                        Err(e) => {
+                            std::fs::remove_file(&tmp).ok();
+                            tracing::warn!("Chunk write rename failed on backend {}: {}", backend_id, e);
+                            db.execute(
+                                "UPDATE chunk_replicas SET state = 'error' WHERE chunk_id = ?1 AND backend_id = ?2",
+                                rusqlite::params![chunk_id, backend_id],
+                            ).ok();
+                            db.execute(
+                                "UPDATE backends SET status = 'degraded' WHERE id = ?1",
+                                rusqlite::params![backend_id],
+                            ).ok();
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Chunk write failed on backend {}: {} — marking degraded", backend_id, e);
+                    std::fs::remove_file(&tmp).ok();
+                    db.execute(
+                        "UPDATE chunk_replicas SET state = 'error' WHERE chunk_id = ?1 AND backend_id = ?2",
+                        rusqlite::params![chunk_id, backend_id],
+                    ).ok();
+                    db.execute(
+                        "UPDATE backends SET status = 'degraded' WHERE id = ?1",
+                        rusqlite::params![backend_id],
+                    ).ok();
+                }
             }
-            std::fs::rename(&tmp, &path)
-                .map_err(|e| { std::fs::remove_file(&tmp).ok(); format!("rename: {}", e) })?;
+        }
 
-            // Compute SHA256 of the full chunk
-            let sha = format!("{:x}", Sha256::digest(&existing));
-            chunk_sha = sha.clone();
-
-            // Mark this chunk replica as synced
-            let now = chrono::Utc::now().to_rfc3339();
-            db.execute(
-                "UPDATE chunk_replicas SET state = 'synced', synced_at = ?1
-                 WHERE chunk_id = ?2 AND backend_id = ?3",
-                rusqlite::params![&now, chunk_id, backend_id],
+        // If ALL assigned backends failed, try writing to ANY other healthy local backend
+        if !at_least_one_write_ok {
+            let assigned_ids: Vec<&str> = chunk_backends.iter().map(|(_, id, _)| id.as_str()).collect();
+            let fallback = db.query_row(
+                "SELECT id, path FROM backends WHERE node_id = ?1 AND status = 'online' ORDER BY free_bytes DESC LIMIT 1",
+                rusqlite::params![node_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             ).ok();
+
+            if let Some((fb_id, fb_path)) = fallback {
+                if !assigned_ids.contains(&fb_id.as_str()) {
+                    let path = chunk_path(&fb_path, volume_id, file_id, range.chunk_index);
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).ok();
+                    }
+                    let mut existing = Vec::new();
+                    let end = range.local_offset as usize + chunk_data_slice.len();
+                    existing.resize(end, 0);
+                    existing[range.local_offset as usize..end].copy_from_slice(chunk_data_slice);
+
+                    if std::fs::write(&path, &existing).is_ok() {
+                        let sha = format!("{:x}", Sha256::digest(&existing));
+                        chunk_sha = sha;
+                        let now = chrono::Utc::now().to_rfc3339();
+                        let chunk_id = chunk_backends.first().map(|(id, _, _)| *id).unwrap_or(0);
+                        db.execute(
+                            "INSERT OR REPLACE INTO chunk_replicas (chunk_id, backend_id, node_id, state, synced_at)
+                             VALUES (?1, ?2, ?3, 'synced', ?4)",
+                            rusqlite::params![chunk_id, &fb_id, node_id, &now],
+                        ).ok();
+                        at_least_one_write_ok = true;
+                        tracing::info!("Chunk write: fallback to backend {} succeeded", fb_id);
+                    }
+                }
+            }
+
+            if !at_least_one_write_ok {
+                return Err(format!("All backends failed for chunk {} of file {}", range.chunk_index, file_id));
+            }
         }
 
         // Update chunk SHA256
