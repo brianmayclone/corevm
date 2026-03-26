@@ -107,6 +107,38 @@ impl SanClient {
         self.post("/api/disks/reset", body).await
     }
 
+    // ── Volume File Operations ──────────────────────────────────────
+
+    pub async fn browse_volume(&self, volume_id: &str, path: &str) -> Result<Value, String> {
+        let encoded = if path.is_empty() { String::new() } else { format!("/{}", path) };
+        self.get(&format!("/api/volumes/{}/browse{}", volume_id, encoded)).await
+    }
+
+    pub async fn mkdir_volume(&self, volume_id: &str, body: &Value) -> Result<Value, String> {
+        self.post(&format!("/api/volumes/{}/mkdir", volume_id), body).await
+    }
+
+    pub async fn delete_file(&self, volume_id: &str, path: &str) -> Result<Value, String> {
+        self.delete(&format!("/api/volumes/{}/files/{}", volume_id, path)).await
+    }
+
+    pub async fn upload_file(&self, volume_id: &str, path: &str, data: Vec<u8>) -> Result<Value, String> {
+        let url = format!("{}/api/volumes/{}/files/{}", self.base_url, volume_id, path);
+        let resp = self.http.put(&url)
+            .body(data)
+            .send().await
+            .map_err(|e| format!("SAN request failed ({}): {}", url, e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("SAN {} returned {}: {}", url, status, body));
+        }
+
+        resp.json().await
+            .map_err(|e| format!("SAN response parse error ({}): {}", url, e))
+    }
+
     // ── Benchmark ─────────────────────────────────────────────────
 
     pub async fn benchmark_matrix(&self) -> Result<Value, String> {

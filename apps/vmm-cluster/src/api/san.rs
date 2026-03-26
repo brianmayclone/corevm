@@ -4,6 +4,7 @@
 //! vmm-san host(s). Multi-host operations (disks, backends) are fanned out
 //! and aggregated. All mutating operations are logged to the event log.
 
+use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -394,6 +395,66 @@ pub async fn run_benchmark(
         Some("benchmark"), None, Some(&host_id));
 
     Ok(Json(result))
+}
+
+// ── Volume File Operations ────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct BrowsePath {
+    pub id: String,
+    pub path: String,
+}
+
+/// GET /api/san/volumes/{id}/browse/*path
+pub async fn browse_volume(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Path((id, path)): Path<(String, String)>,
+) -> Result<Json<Value>, AppError> {
+    let (client, _) = any_san_client(&state)?;
+    client.browse_volume(&id, &path).await.map(Json).map_err(san_err)
+}
+
+/// GET /api/san/volumes/{id}/browse (root)
+pub async fn browse_volume_root(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let (client, _) = any_san_client(&state)?;
+    client.browse_volume(&id, "").await.map(Json).map_err(san_err)
+}
+
+/// POST /api/san/volumes/{id}/mkdir
+pub async fn mkdir_volume(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, AppError> {
+    let (client, _) = any_san_client(&state)?;
+    client.mkdir_volume(&id, &body).await.map(Json).map_err(san_err)
+}
+
+/// DELETE /api/san/volumes/{id}/files/*path
+pub async fn delete_file(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Path((id, path)): Path<(String, String)>,
+) -> Result<Json<Value>, AppError> {
+    let (client, _) = any_san_client(&state)?;
+    client.delete_file(&id, &path).await.map(Json).map_err(san_err)
+}
+
+/// PUT /api/san/volumes/{id}/files/*path
+pub async fn upload_file(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Path((id, path)): Path<(String, String)>,
+    body: Bytes,
+) -> Result<Json<Value>, AppError> {
+    let (client, _) = any_san_client(&state)?;
+    client.upload_file(&id, &path, body.to_vec()).await.map(Json).map_err(san_err)
 }
 
 // ── Health ────────────────────────────────────────────────────────

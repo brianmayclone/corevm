@@ -103,7 +103,7 @@ export default function StorageCoresan() {
   // In cluster mode, all SAN operations go through the cluster proxy (/api/san/*).
   // In standalone mode, talk directly to the local vmm-san instance.
   const localSanBase = `${window.location.protocol}//${window.location.hostname}:7443`
-  const sanApi = (path: string) => isCluster ? `/api/san${path}` : `${localSanBase}${path}`
+  const sanApi = (path: string) => isCluster ? `/api/san${path.replace(/^\/api/, '')}` : `${localSanBase}${path}`
   // SAN-enabled hosts (for host selection in dialogs)
   const sanHosts = isCluster ? hosts.filter(h => h.san_enabled && h.san_address) : []
 
@@ -661,7 +661,7 @@ export default function StorageCoresan() {
               {/* Volume Info */}
               <Card>
                 <div className="flex items-center justify-between mb-4">
-                  <SectionLabel>Volume: {sel.name}</SectionLabel>
+                  <SectionLabel>{`Volume: ${sel.name}`}</SectionLabel>
                   <div className="flex items-center gap-2">
                     <Button variant="outline" onClick={() => setBrowseVolume(sel)}>
                       <FolderOpen size={13} /> Browse
@@ -999,6 +999,7 @@ export default function StorageCoresan() {
         volumeId={browseVolume?.id || ''}
         volumeName={browseVolume?.name || ''}
         sanApi={sanApi}
+        sanFetch={sanFetch}
       />
 
       {/* Auto-Claim Dialog */}

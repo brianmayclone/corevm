@@ -9,6 +9,7 @@ import Dialog from './Dialog'
 import Button from './Button'
 import Select from './Select'
 import { formatBytes } from '../utils/format'
+import { useClusterStore } from '../stores/clusterStore'
 
 interface BrowseEntry {
   name: string
@@ -25,9 +26,23 @@ interface Props {
   onSelect: (fusePath: string) => void
 }
 
-const SAN_API = `${window.location.protocol}//${window.location.hostname}:7443`
+const LOCAL_SAN_API = `${window.location.protocol}//${window.location.hostname}:7443`
 
 export default function CoreSanFilePicker({ open, onClose, title, filterExt, onSelect }: Props) {
+  const { backendMode } = useClusterStore()
+  const isCluster = backendMode === 'cluster'
+
+  const sanApi = (path: string) => isCluster ? `/api/san${path.replace(/^\/api/, '')}` : `${LOCAL_SAN_API}${path}`
+
+  const sanFetch = (url: string, init?: RequestInit) => {
+    if (isCluster) {
+      const token = localStorage.getItem('vmm_token')
+      const headers = new Headers(init?.headers)
+      if (token) headers.set('Authorization', `Bearer ${token}`)
+      return fetch(url, { ...init, headers })
+    }
+    return fetch(url, init)
+  }
   const [volumes, setVolumes] = useState<CoreSanVolume[]>([])
   const [selectedVolume, setSelectedVolume] = useState('')
   const [currentPath, setCurrentPath] = useState('')
@@ -37,7 +52,7 @@ export default function CoreSanFilePicker({ open, onClose, title, filterExt, onS
 
   useEffect(() => {
     if (!open) return
-    fetch(`${SAN_API}/api/volumes`).then(r => r.json())
+    sanFetch(sanApi('/api/volumes')).then(r => r.json())
       .then((vols: CoreSanVolume[]) => {
         setVolumes(vols)
         if (vols.length > 0 && !selectedVolume) setSelectedVolume(vols[0].id)
@@ -55,7 +70,7 @@ export default function CoreSanFilePicker({ open, onClose, title, filterExt, onS
     setLoading(true)
     try {
       const encoded = path ? `/${encodeURIComponent(path)}` : ''
-      const resp = await fetch(`${SAN_API}/api/volumes/${selectedVolume}/browse${encoded}`)
+      const resp = await sanFetch(sanApi(`/api/volumes/${selectedVolume}/browse${encoded}`))
       if (resp.ok) setEntries(await resp.json())
       else setEntries([])
     } catch { setEntries([]) }

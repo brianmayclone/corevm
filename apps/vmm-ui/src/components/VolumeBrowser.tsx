@@ -19,9 +19,11 @@ interface Props {
   volumeId: string
   volumeName: string
   sanApi: (path: string) => string
+  sanFetch?: (url: string, init?: RequestInit) => Promise<Response>
 }
 
-export default function VolumeBrowser({ open, onClose, volumeId, volumeName, sanApi }: Props) {
+export default function VolumeBrowser({ open, onClose, volumeId, volumeName, sanApi, sanFetch }: Props) {
+  const doFetch = sanFetch || fetch
   const [currentPath, setCurrentPath] = useState('')
   const [entries, setEntries] = useState<BrowseEntry[]>([])
   const [loading, setLoading] = useState(false)
@@ -34,7 +36,7 @@ export default function VolumeBrowser({ open, onClose, volumeId, volumeName, san
     setLoading(true)
     try {
       const encodedPath = path ? `/${encodeURIComponent(path)}` : ''
-      const resp = await fetch(sanApi(`/api/volumes/${volumeId}/browse${encodedPath}`))
+      const resp = await doFetch(sanApi(`/api/volumes/${volumeId}/browse${encodedPath}`))
       if (resp.ok) {
         setEntries(await resp.json())
       } else {
@@ -63,7 +65,7 @@ export default function VolumeBrowser({ open, onClose, volumeId, volumeName, san
   const handleMkdir = async () => {
     if (!newDirName.trim()) return
     const fullPath = currentPath ? `${currentPath}/${newDirName}` : newDirName
-    await fetch(sanApi(`/api/volumes/${volumeId}/mkdir`), {
+    await doFetch(sanApi(`/api/volumes/${volumeId}/mkdir`), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: fullPath }),
@@ -76,7 +78,7 @@ export default function VolumeBrowser({ open, onClose, volumeId, volumeName, san
   const handleDelete = async () => {
     if (!deleteEntry) return
     const fullPath = currentPath ? `${currentPath}/${deleteEntry.name}` : deleteEntry.name
-    await fetch(sanApi(`/api/volumes/${volumeId}/files/${encodeURIComponent(fullPath)}`), {
+    await doFetch(sanApi(`/api/volumes/${volumeId}/files/${encodeURIComponent(fullPath)}`), {
       method: 'DELETE',
     })
     setDeleteEntry(null)
@@ -91,7 +93,7 @@ export default function VolumeBrowser({ open, onClose, volumeId, volumeName, san
     for (const file of Array.from(files)) {
       const fullPath = currentPath ? `${currentPath}/${file.name}` : file.name
       const data = await file.arrayBuffer()
-      await fetch(sanApi(`/api/volumes/${volumeId}/files/${encodeURIComponent(fullPath)}`), {
+      await doFetch(sanApi(`/api/volumes/${volumeId}/files/${encodeURIComponent(fullPath)}`), {
         method: 'PUT',
         body: new Uint8Array(data),
       })
