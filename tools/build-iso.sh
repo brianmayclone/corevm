@@ -37,6 +37,7 @@ fi
 
 # Must run as root (debootstrap, chroot, mount all require it)
 # Use: sudo -E env "PATH=$PATH" ./tools/build-iso.sh
+# Add --clean for a full rebuild (otherwise reuses existing rootfs)
 if [ "$(id -u)" -ne 0 ]; then
     echo "ERROR: This script must be run as root."
     echo "Usage: sudo -E env \"PATH=\$PATH\" ./tools/build-iso.sh"
@@ -66,10 +67,41 @@ echo "=== Building CoreVM Appliance ISO ==="
 echo "ROOT:      $ROOT"
 echo "BUILD_DIR: $BUILD_DIR"
 
-# Clean previous build (ONLY the iso-build subdirectory, never anything above it)
-if [ -d "$BUILD_DIR" ]; then
-    echo "Cleaning previous build directory..."
+# ── Safety: cleanup function to unmount chroot mounts on ANY exit ────────
+# This prevents the catastrophic scenario where a failed build leaves
+# /proc, /sys, /dev bind-mounted inside the build directory, causing
+# a subsequent "rm -rf" to destroy the host filesystem.
+cleanup_mounts() {
+    echo "Cleaning up chroot mounts..."
+    local rootfs="$BUILD_DIR/rootfs"
+    umount "$rootfs/build" 2>/dev/null || true
+    umount "$rootfs/dev"   2>/dev/null || true
+    umount "$rootfs/sys"   2>/dev/null || true
+    umount "$rootfs/proc"  2>/dev/null || true
+    # Also lazy-unmount as fallback
+    umount -l "$rootfs/build" 2>/dev/null || true
+    umount -l "$rootfs/dev"   2>/dev/null || true
+    umount -l "$rootfs/sys"   2>/dev/null || true
+    umount -l "$rootfs/proc"  2>/dev/null || true
+}
+trap cleanup_mounts EXIT ERR
+
+# Only clean if explicitly requested with --clean
+if [[ " $* " == *" --clean "* ]] && [ -d "$BUILD_DIR" ]; then
+    echo "Cleaning previous build directory (--clean requested)..."
+    cleanup_mounts
+    sleep 1
+    # Safety check: refuse to rm if any mounts are still active
+    if mount | grep -q "$BUILD_DIR/rootfs/proc"; then
+        echo "FATAL: /proc still mounted in $BUILD_DIR/rootfs — refusing to rm -rf"
+        echo "Manual fix: sudo umount $BUILD_DIR/rootfs/{proc,sys,dev,build}"
+        exit 1
+    fi
     rm -rf "$BUILD_DIR"
+elif [ -d "$BUILD_DIR" ]; then
+    echo "Reusing existing build directory (use --clean for full rebuild)"
+    # Always ensure stale mounts from a previous crashed build are gone
+    cleanup_mounts
 fi
 mkdir -p "$BUILD_DIR"
 
@@ -79,9 +111,12 @@ cd "$ROOT/apps/vmm-ui" && npm install --silent && npx vite build
 cd "$ROOT"
 
 # Step 2: Build installable root-FS
-echo "[2/9] Building root filesystem..."
 ROOTFS_DIR="$BUILD_DIR/rootfs"
-debootstrap --variant=minbase --include=\
+if [ -d "$ROOTFS_DIR/usr" ]; then
+    echo "[2/9] Reusing existing root filesystem (use --clean to rebuild)"
+else
+    echo "[2/9] Building root filesystem..."
+    debootstrap --variant=minbase --include=\
 linux-image-amd64,grub-pc,grub-efi-amd64-bin,systemd,systemd-sysv,dbus,\
 openssh-server,openssl,chrony,parted,\
 plymouth,plymouth-themes,\
@@ -90,9 +125,10 @@ util-linux,pciutils,nftables,locales,\
 nfs-common,nfs-kernel-server,\
 glusterfs-server,glusterfs-client,\
 ceph-common,ceph-fuse,\
-fuse3,libfuse3-dev,\
+fuse3,\
 curl,gcc,libc6-dev,pkg-config,libssl-dev,make \
     bookworm "$ROOTFS_DIR" http://deb.debian.org/debian
+fi
 
 # Step 3: Build Rust binaries inside chroot (ensures glibc compatibility)
 echo "[3/9] Building Rust binaries in Debian 12 chroot..."
@@ -107,17 +143,29 @@ mount --bind "$ROOT" "$ROOTFS_DIR/build"
 # Install Rust in chroot and build
 chroot "$ROOTFS_DIR" bash -c '
     export HOME=/root
+
+    # Install build-only dependencies for CoreSAN (FUSE headers needed by fuser crate)
+    apt-get update -qq
+    apt-get install -y --no-install-recommends libfuse3-dev 2>/dev/null || true
+
     curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable 2>&1
     source /root/.cargo/env
     cd /build
     cargo build --release -p vmm-appliance -p vmm-server -p vmm-cluster -p vmm-san
+
+    # Remove build-only dependencies (not needed at runtime, saves ~50MB)
+    apt-get purge -y libfuse3-dev 2>/dev/null || true
+    apt-get autoremove -y 2>/dev/null || true
+    apt-get clean
 '
 
 # Unmount source and cleanup Rust toolchain from rootfs
-umount "$ROOTFS_DIR/build"
-rmdir "$ROOTFS_DIR/build"
-chroot "$ROOTFS_DIR" bash -c 'rm -rf /root/.cargo /root/.rustup'
-umount "$ROOTFS_DIR/dev" "$ROOTFS_DIR/sys" "$ROOTFS_DIR/proc"
+umount "$ROOTFS_DIR/build" 2>/dev/null || umount -l "$ROOTFS_DIR/build" 2>/dev/null || true
+rmdir "$ROOTFS_DIR/build" 2>/dev/null || true
+chroot "$ROOTFS_DIR" bash -c 'rm -rf /root/.cargo /root/.rustup' 2>/dev/null || true
+umount "$ROOTFS_DIR/dev"  2>/dev/null || umount -l "$ROOTFS_DIR/dev"  2>/dev/null || true
+umount "$ROOTFS_DIR/sys"  2>/dev/null || umount -l "$ROOTFS_DIR/sys"  2>/dev/null || true
+umount "$ROOTFS_DIR/proc" 2>/dev/null || umount -l "$ROOTFS_DIR/proc" 2>/dev/null || true
 
 # Copy CoreVM binaries (now built for Debian 12 glibc)
 mkdir -p "$ROOTFS_DIR/opt/vmm"

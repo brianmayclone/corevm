@@ -285,6 +285,10 @@ pub struct CoreSanNodeStatus {
     pub volumes: Vec<CoreSanVolumeStatus>,
     #[serde(default)]
     pub peer_count: u32,
+    #[serde(default)]
+    pub available_disks: u32,
+    #[serde(default)]
+    pub claimed_disks: u32,
     pub benchmark_summary: Option<CoreSanBenchmarkSummary>,
 }
 

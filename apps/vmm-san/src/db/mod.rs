@@ -137,16 +137,38 @@ CREATE TABLE IF NOT EXISTS integrity_log (
 );
 
 -- ═══════════════════════════════════════════════════════════════
+-- CLAIMED_DISKS: physical disks managed by CoreSAN
+-- CoreSAN claims whole disks, formats them, and uses them as backends
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS claimed_disks (
+    id              TEXT PRIMARY KEY,
+    device_path     TEXT NOT NULL UNIQUE,    -- /dev/sdb, /dev/nvme1n1
+    device_uuid     TEXT NOT NULL DEFAULT '',-- filesystem UUID after formatting
+    mount_path      TEXT NOT NULL UNIQUE,    -- /vmm/san-disks/<uuid>
+    fs_type         TEXT NOT NULL DEFAULT 'ext4',
+    model           TEXT NOT NULL DEFAULT '',
+    serial          TEXT NOT NULL DEFAULT '',
+    size_bytes      INTEGER NOT NULL DEFAULT 0,
+    status          TEXT NOT NULL DEFAULT 'formatting', -- formatting, mounted, error, released
+    backend_id      TEXT NOT NULL DEFAULT '', -- linked backend in backends table
+    volume_id       TEXT NOT NULL DEFAULT '', -- which volume this disk belongs to
+    claimed_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ═══════════════════════════════════════════════════════════════
 -- INDEXES
 -- ═══════════════════════════════════════════════════════════════
 
 CREATE INDEX IF NOT EXISTS idx_file_map_vol_path ON file_map(volume_id, rel_path);
 CREATE INDEX IF NOT EXISTS idx_file_map_write_owner ON file_map(write_owner);
 CREATE INDEX IF NOT EXISTS idx_file_replicas_state ON file_replicas(state);
+CREATE INDEX IF NOT EXISTS idx_file_replicas_backend ON file_replicas(backend_id);
 CREATE INDEX IF NOT EXISTS idx_backends_volume ON backends(volume_id);
 CREATE INDEX IF NOT EXISTS idx_benchmark_nodes ON benchmark_results(from_node_id, to_node_id);
 CREATE INDEX IF NOT EXISTS idx_write_log_seq ON write_log(seq);
 CREATE INDEX IF NOT EXISTS idx_write_log_volume ON write_log(volume_id);
+CREATE INDEX IF NOT EXISTS idx_claimed_disks_status ON claimed_disks(status);
 "#;
 
 /// Initialize the database: create tables and indexes.
@@ -178,5 +200,9 @@ fn migrate(db: &Connection) {
     ).ok();
     db.execute_batch(
         "ALTER TABLE file_replicas ADD COLUMN replica_version INTEGER NOT NULL DEFAULT 0;"
+    ).ok();
+    // Claimed disk reference on backends
+    db.execute_batch(
+        "ALTER TABLE backends ADD COLUMN claimed_disk_id TEXT NOT NULL DEFAULT '';"
     ).ok();
 }

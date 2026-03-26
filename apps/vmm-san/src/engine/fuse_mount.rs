@@ -202,6 +202,22 @@ impl CoreSanFS {
     }
 
     /// Find the best local backend path for writing new files.
+    /// Find the backend that already holds a file (for writes to existing files).
+    fn backend_for_existing_file(&self, rel_path: &str) -> Option<(String, String)> {
+        let db = self.state.db.lock().unwrap();
+        db.query_row(
+            "SELECT b.id, b.path FROM file_replicas fr
+             JOIN backends b ON b.id = fr.backend_id
+             JOIN file_map fm ON fm.id = fr.file_id
+             WHERE fm.volume_id = ?1 AND fm.rel_path = ?2
+               AND b.node_id = ?3 AND b.status = 'online'
+             LIMIT 1",
+            rusqlite::params![&self.volume_id, rel_path, &self.state.node_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).ok()
+    }
+
+    /// Find the best local backend for writing new files (most free space).
     fn local_backend_for_write(&self) -> Option<(String, String)> {
         let db = self.state.db.lock().unwrap();
         db.query_row(
@@ -458,14 +474,17 @@ impl Filesystem for CoreSanFS {
 
         match self.resolve_file(&entry.rel_path) {
             Some(path) => {
-                match std::fs::read(&path) {
-                    Ok(data) => {
-                        let start = offset as usize;
-                        let end = (start + size as usize).min(data.len());
-                        if start >= data.len() {
+                use std::io::{Read as _, Seek, SeekFrom};
+                match std::fs::File::open(&path) {
+                    Ok(mut file) => {
+                        if file.seek(SeekFrom::Start(offset as u64)).is_err() {
                             reply.data(&[]);
-                        } else {
-                            reply.data(&data[start..end]);
+                            return;
+                        }
+                        let mut buf = vec![0u8; size as usize];
+                        match file.read(&mut buf) {
+                            Ok(n) => reply.data(&buf[..n]),
+                            Err(_) => reply.error(libc::EIO),
                         }
                     }
                     Err(_) => reply.error(libc::EIO),
@@ -492,9 +511,14 @@ impl Filesystem for CoreSanFS {
 
         tracing::debug!("FUSE write: '{}' offset={} len={}", entry.rel_path, offset, data.len());
 
-        let (backend_id, backend_path) = match self.local_backend_for_write() {
+        // For existing files: write to the backend that already holds the file.
+        // For new files (no replica yet): pick best backend by free space.
+        let (backend_id, backend_path) = match self.backend_for_existing_file(&entry.rel_path) {
             Some(b) => b,
-            None => { reply.error(libc::ENOSPC); return; }
+            None => match self.local_backend_for_write() {
+                Some(b) => b,
+                None => { reply.error(libc::ENOSPC); return; }
+            }
         };
 
         // Atomic write with lease acquisition + write_log

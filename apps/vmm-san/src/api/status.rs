@@ -15,6 +15,8 @@ pub struct StatusResponse {
     pub uptime_secs: u64,
     pub volumes: Vec<VolumeStatusSummary>,
     pub peer_count: u32,
+    pub available_disks: u32,
+    pub claimed_disks: u32,
     pub benchmark_summary: Option<BenchmarkSummary>,
 }
 
@@ -59,6 +61,15 @@ pub async fn status(
     let peer_count = state.peers.len() as u32;
     let benchmark_summary = query_benchmark_summary(&db);
 
+    // Count disks
+    let disks = crate::storage::disk::discover_disks(&db);
+    let available_disks = disks.iter().filter(|d| matches!(d.status,
+        crate::storage::disk::DiskStatus::Available | crate::storage::disk::DiskStatus::HasData { .. }
+    )).count() as u32;
+    let claimed_disks = disks.iter().filter(|d| matches!(d.status,
+        crate::storage::disk::DiskStatus::Claimed { .. }
+    )).count() as u32;
+
     Json(StatusResponse {
         running: true,
         node_id: state.node_id.clone(),
@@ -66,6 +77,8 @@ pub async fn status(
         uptime_secs: state.started_at.elapsed().as_secs(),
         volumes,
         peer_count,
+        available_disks,
+        claimed_disks,
         benchmark_summary,
     })
 }
@@ -99,6 +112,7 @@ pub async fn dashboard(
         "SELECT COUNT(*) FROM integrity_log WHERE passed = 0", [], |row| row.get(0),
     ).unwrap_or(0);
 
+    let disks = crate::storage::disk::discover_disks(&db);
     let status = StatusResponse {
         running: true,
         node_id: state.node_id.clone(),
@@ -106,6 +120,12 @@ pub async fn dashboard(
         uptime_secs: state.started_at.elapsed().as_secs(),
         volumes,
         peer_count: state.peers.len() as u32,
+        available_disks: disks.iter().filter(|d| matches!(d.status,
+            crate::storage::disk::DiskStatus::Available | crate::storage::disk::DiskStatus::HasData { .. }
+        )).count() as u32,
+        claimed_disks: disks.iter().filter(|d| matches!(d.status,
+            crate::storage::disk::DiskStatus::Claimed { .. }
+        )).count() as u32,
         benchmark_summary,
     };
 

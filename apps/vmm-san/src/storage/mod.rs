@@ -2,3 +2,5 @@
 
 pub mod backend;
 pub mod file_map;
+pub mod disk;
+pub mod disk_ops;

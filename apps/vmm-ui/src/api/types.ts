@@ -489,6 +489,24 @@ export interface CoreSanFile {
   synced_count: number
 }
 
+// ── Physical Disk Discovery ──────────────────────────────────────────────
+
+export interface DiscoveredDisk {
+  name: string
+  path: string
+  size_bytes: number
+  model: string
+  serial: string
+  fs_type: string | null
+  mountpoint: string | null
+  has_partitions: boolean
+  is_os_disk: boolean
+  status: 'available' | 'has_data' | 'os_disk' | 'in_use' | 'claimed'
+  disk_id?: string
+  volume_id?: string
+  fs_type_detail?: string
+}
+
 // ── Network Discovery ───────────────────────────────────────────────────
 
 export interface DiscoveredNode {

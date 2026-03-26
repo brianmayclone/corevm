@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Boxes, Plus, Trash2, RefreshCw, Shield, Zap, WifiOff, HardDrive, Activity, Server, AlertTriangle, Check } from 'lucide-react'
-import type { CoreSanVolume, CoreSanBackend, CoreSanPeer, CoreSanStatus, CoreSanBenchmarkMatrix, Host } from '../api/types'
+import { Boxes, Plus, Trash2, RefreshCw, Shield, Zap, WifiOff, HardDrive, Activity, Server, AlertTriangle, Check, Disc, RotateCcw } from 'lucide-react'
+import type { CoreSanVolume, CoreSanBackend, CoreSanPeer, CoreSanStatus, CoreSanBenchmarkMatrix, Host, DiscoveredDisk } from '../api/types'
 import { useClusterStore } from '../stores/clusterStore'
 import api from '../api/client'
 import Card from '../components/Card'
@@ -58,8 +58,16 @@ export default function StorageCoresan() {
   const [backends, setBackends] = useState<CoreSanBackend[]>([])
   const [peers, setPeers] = useState<CoreSanPeer[]>([])
   const [benchmarkMatrix, setBenchmarkMatrix] = useState<CoreSanBenchmarkMatrix | null>(null)
+  const [disks, setDisks] = useState<DiscoveredDisk[]>([])
   const [loading, setLoading] = useState(true)
   const [sanAvailable, setSanAvailable] = useState(true)
+
+  // Disk claim dialog
+  const [claimDisk, setClaimDisk] = useState<DiscoveredDisk | null>(null)
+  const [claimVolumeId, setClaimVolumeId] = useState('')
+  const [claimConfirm, setClaimConfirm] = useState(false)
+  const [claimError, setClaimError] = useState('')
+  const [resetDisk, setResetDisk] = useState<DiscoveredDisk | null>(null)
 
   // Dialogs
   const [createVolumeOpen, setCreateVolumeOpen] = useState(false)
@@ -98,6 +106,8 @@ export default function StorageCoresan() {
       setVolumes(vols)
       setPeers(await pRes.json())
       if (vols.length > 0 && !selectedVolume) setSelectedVolume(vols[0].id)
+      // Load disks
+      fetch(sanApi('/api/disks')).then(r => r.json()).then(setDisks).catch(() => setDisks([]))
       setLoading(false)
     } catch {
       setSanAvailable(false)
@@ -281,6 +291,51 @@ export default function StorageCoresan() {
     }, 3000)
   }
 
+  const handleClaimDisk = async () => {
+    setClaimError('')
+    if (!claimDisk || !claimVolumeId) return
+    const resp = await fetch(sanApi('/api/disks/claim'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        device_path: claimDisk.path,
+        volume_id: claimVolumeId,
+        confirm_format: claimConfirm || claimDisk.status === 'available',
+      }),
+    })
+    if (!resp.ok) {
+      setClaimError(await resp.text() || 'Claim failed')
+      return
+    }
+    setClaimDisk(null)
+    setClaimConfirm(false)
+    refresh()
+  }
+
+  const handleResetDisk = async () => {
+    if (!resetDisk) return
+    const resp = await fetch(sanApi('/api/disks/reset'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ device_path: resetDisk.path }),
+    })
+    if (!resp.ok) {
+      alert(await resp.text() || 'Reset failed')
+    }
+    setResetDisk(null)
+    refresh()
+  }
+
+  const handleReleaseDisk = async (devicePath: string) => {
+    if (!confirm('Release this disk? Data will be drained to other backends.')) return
+    await fetch(sanApi('/api/disks/release'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ device_path: devicePath, wipe: false }),
+    })
+    refresh()
+  }
+
   const sel = volumes.find(v => v.id === selectedVolume)
 
   // Group backends by node
@@ -383,6 +438,73 @@ export default function StorageCoresan() {
           <div className="text-xs text-vmm-text-muted mt-1 font-mono">{status?.node_id?.slice(0, 8)}...</div>
         </Card>
       </div>
+
+      {/* Physical Disks */}
+      {disks.length > 0 && (
+        <Card>
+          <div className="flex items-center justify-between mb-3">
+            <SectionLabel>Physical Disks</SectionLabel>
+            <span className="text-xs text-vmm-text-muted">
+              {disks.filter(d => d.status === 'available' || d.status === 'has_data').length} available,{' '}
+              {disks.filter(d => d.status === 'claimed').length} claimed
+            </span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-vmm-border">
+                  <th className="text-left py-2 px-2 text-vmm-text-muted">Device</th>
+                  <th className="text-left py-2 px-2 text-vmm-text-muted">Size</th>
+                  <th className="text-left py-2 px-2 text-vmm-text-muted">Model</th>
+                  <th className="text-left py-2 px-2 text-vmm-text-muted">Status</th>
+                  <th className="text-right py-2 px-2 text-vmm-text-muted">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {disks.map(d => (
+                  <tr key={d.path} className="border-b border-vmm-border/50">
+                    <td className="py-2 px-2 text-vmm-text font-mono flex items-center gap-2">
+                      <Disc size={13} className={d.status === 'claimed' ? 'text-vmm-accent' : d.status === 'os_disk' ? 'text-vmm-danger' : 'text-vmm-text-muted'} />
+                      {d.path}
+                    </td>
+                    <td className="py-2 px-2 text-vmm-text">{formatBytes(d.size_bytes)}</td>
+                    <td className="py-2 px-2 text-vmm-text-dim">{d.model || '—'}</td>
+                    <td className="py-2 px-2">
+                      <Badge label={d.status.replace('_', ' ')} color={
+                        d.status === 'available' ? statusColors.online :
+                        d.status === 'claimed' ? 'bg-vmm-accent/20 text-vmm-accent border-vmm-accent/30' :
+                        d.status === 'has_data' ? statusColors.degraded :
+                        d.status === 'os_disk' ? 'bg-vmm-danger/20 text-vmm-danger border-vmm-danger/30' :
+                        statusColors.offline
+                      } />
+                    </td>
+                    <td className="py-2 px-2 text-right">
+                      {(d.status === 'available' || d.status === 'has_data') && volumes.length > 0 && (
+                        <button onClick={() => { setClaimDisk(d); setClaimVolumeId(volumes[0]?.id || ''); setClaimConfirm(d.status === 'available'); setClaimError('') }}
+                          className="px-2 py-1 text-[10px] font-bold text-vmm-accent hover:bg-vmm-accent/10 rounded transition-colors cursor-pointer">
+                          CLAIM
+                        </button>
+                      )}
+                      {d.status === 'has_data' && (
+                        <button onClick={() => setResetDisk(d)}
+                          className="px-2 py-1 text-[10px] font-bold text-vmm-warning hover:bg-vmm-warning/10 rounded transition-colors cursor-pointer ml-1">
+                          RESET
+                        </button>
+                      )}
+                      {d.status === 'claimed' && (
+                        <button onClick={() => handleReleaseDisk(d.path)}
+                          className="px-2 py-1 text-[10px] font-bold text-vmm-danger hover:bg-vmm-danger/10 rounded transition-colors cursor-pointer">
+                          RELEASE
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
 
       {/* Participating Nodes */}
       <Card>
@@ -789,6 +911,63 @@ export default function StorageCoresan() {
         danger
         onConfirm={handleDeleteBackend}
         onCancel={() => setDeleteBackend(null)}
+      />
+
+      {/* Claim Disk Dialog */}
+      <Dialog open={!!claimDisk} title="Claim Disk" onClose={() => { setClaimDisk(null); setClaimError('') }}>
+        {claimDisk && (
+          <div className="space-y-4">
+            <div className="flex items-center gap-3 p-3 rounded-lg bg-vmm-bg/50 border border-vmm-border">
+              <Disc size={20} className="text-vmm-accent" />
+              <div>
+                <div className="text-sm font-bold text-vmm-text">{claimDisk.path}</div>
+                <div className="text-xs text-vmm-text-muted">{formatBytes(claimDisk.size_bytes)} — {claimDisk.model || 'Unknown model'}</div>
+              </div>
+            </div>
+
+            {claimDisk.status === 'has_data' && (
+              <div className="flex items-center gap-2 p-3 rounded-lg bg-vmm-danger/10 border border-vmm-danger/30 text-sm text-vmm-danger">
+                <AlertTriangle size={16} />
+                This disk has existing data ({claimDisk.fs_type || 'unknown'}). It will be wiped and reformatted. All data will be lost!
+              </div>
+            )}
+
+            {claimError && (
+              <div className="bg-vmm-danger/10 border border-vmm-danger/30 text-vmm-danger rounded-lg p-3 text-sm">{claimError}</div>
+            )}
+
+            <FormField label="Add to Volume">
+              <Select value={claimVolumeId} onChange={(e) => setClaimVolumeId(e.target.value)}
+                options={volumes.map(v => ({ value: v.id, label: v.name }))} />
+            </FormField>
+
+            {claimDisk.status === 'has_data' && (
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" checked={claimConfirm} onChange={e => setClaimConfirm(e.target.checked)} className="accent-vmm-danger" />
+                <span className="text-sm text-vmm-text">I confirm all data on this disk will be destroyed</span>
+              </label>
+            )}
+
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="ghost" onClick={() => { setClaimDisk(null); setClaimError('') }}>Cancel</Button>
+              <Button variant="primary" onClick={handleClaimDisk}
+                disabled={!claimVolumeId || (claimDisk.status === 'has_data' && !claimConfirm)}>
+                Claim & Format Disk
+              </Button>
+            </div>
+          </div>
+        )}
+      </Dialog>
+
+      {/* Reset Disk Confirm */}
+      <ConfirmDialog
+        open={!!resetDisk}
+        title="Reset Disk"
+        message={resetDisk ? `Reset disk "${resetDisk.path}" (${resetDisk.model || 'Unknown'}, ${formatBytes(resetDisk.size_bytes)})?\n\nThis will DESTROY all data, partition tables, and filesystem signatures. The disk will become available for CoreSAN.` : ''}
+        confirmLabel="Reset & Wipe"
+        danger
+        onConfirm={handleResetDisk}
+        onCancel={() => setResetDisk(null)}
       />
     </div>
   )

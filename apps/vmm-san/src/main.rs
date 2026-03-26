@@ -169,6 +169,9 @@ async fn main() {
     engine::fuse_mount::spawn_all(Arc::clone(&state));
     tracing::info!("FUSE mounts started");
 
+    engine::rebalancer::spawn(Arc::clone(&state));
+    tracing::info!("Rebalancer started (30s interval)");
+
     engine::discovery::spawn(Arc::clone(&state));
     tracing::info!("Discovery beacon started");
 

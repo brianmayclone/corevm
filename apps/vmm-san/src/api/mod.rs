@@ -10,6 +10,7 @@ pub mod peers;
 pub mod files;
 pub mod status;
 pub mod benchmark;
+pub mod disks;
 
 pub fn router() -> Router<Arc<CoreSanState>> {
     Router::new()
@@ -17,6 +18,12 @@ pub fn router() -> Router<Arc<CoreSanState>> {
         .route("/api/status", get(status::status))
         .route("/api/health", get(status::health))
         .route("/api/dashboard", get(status::dashboard))
+
+        // ── Physical Disks ────────────────────────────────
+        .route("/api/disks", get(disks::list))
+        .route("/api/disks/claim", post(disks::claim))
+        .route("/api/disks/release", post(disks::release))
+        .route("/api/disks/reset", post(disks::reset))
 
         // ── Volumes (CRUD + resilience policy) ────────────
         .route("/api/volumes", get(volumes::list).post(volumes::create))
