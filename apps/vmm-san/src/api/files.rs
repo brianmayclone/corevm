@@ -157,7 +157,15 @@ pub async fn delete(
         std::fs::remove_file(&full_path).ok();
     }
 
-    // Remove from database
+    // Remove from database — delete replicas first to avoid FK constraint
+    let file_id: Option<i64> = db.query_row(
+        "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
+        rusqlite::params![&volume_id, &rel_path], |row| row.get(0),
+    ).ok();
+    if let Some(fid) = file_id {
+        db.execute("DELETE FROM file_replicas WHERE file_id = ?1", rusqlite::params![fid]).ok();
+        db.execute("DELETE FROM write_log WHERE file_id = ?1", rusqlite::params![fid]).ok();
+    }
     db.execute(
         "DELETE FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
         rusqlite::params![&volume_id, &rel_path],

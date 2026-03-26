@@ -19,7 +19,7 @@ use fuser::{
 use crate::peer::client::PeerClient;
 use crate::state::CoreSanState;
 
-const TTL: Duration = Duration::from_secs(1);
+const TTL: Duration = Duration::from_secs(0);
 const BLOCK_SIZE: u32 = 4096;
 
 /// Inode-to-path mapping for the FUSE filesystem.
@@ -293,6 +293,8 @@ impl Filesystem for CoreSanFS {
             format!("{}/{}", parent_entry.rel_path, name_str)
         };
 
+        tracing::debug!("FUSE lookup: '{}'", rel_path);
+
         // Check if it's a directory (exists on any backend)
         let is_dir = {
             let db = self.state.db.lock().unwrap();
@@ -341,9 +343,11 @@ impl Filesystem for CoreSanFS {
         };
 
         if !is_dir && !is_file && !exists_on_disk {
+            tracing::debug!("FUSE lookup: '{}' → ENOENT (dir={}, file={}, disk={})", rel_path, is_dir, is_file, exists_on_disk);
             reply.error(libc::ENOENT);
             return;
         }
+        tracing::debug!("FUSE lookup: '{}' → found (dir={}, file={}, disk={})", rel_path, is_dir, is_file, exists_on_disk);
 
         let actual_is_dir = is_dir && !is_file;
         let ino = self.inodes.lock().unwrap().get_or_create(&self.volume_id, &rel_path, actual_is_dir);
@@ -372,6 +376,70 @@ impl Filesystem for CoreSanFS {
         }
     }
 
+    fn setattr(
+        &mut self, _req: &Request<'_>, ino: u64, _mode: Option<u32>,
+        _uid: Option<u32>, _gid: Option<u32>, size: Option<u64>,
+        _atime: Option<fuser::TimeOrNow>, _mtime: Option<fuser::TimeOrNow>,
+        _ctime: Option<SystemTime>, _fh: Option<u64>, _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>, _bkuptime: Option<SystemTime>,
+        _flags: Option<u32>, reply: ReplyAttr,
+    ) {
+        let entry = match self.inodes.lock().unwrap().get(ino).cloned() {
+            Some(e) => e,
+            None => { reply.error(libc::ENOENT); return; }
+        };
+
+        // Handle truncate (size change)
+        if let Some(new_size) = size {
+            if !entry.is_dir {
+                if let Some(path) = self.resolve_file(&entry.rel_path) {
+                    if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&path) {
+                        f.set_len(new_size).ok();
+                    }
+                }
+            }
+        }
+
+        // Return current attrs
+        if entry.is_dir {
+            reply.attr(&TTL, &self.attr_from_db(ino, true));
+        } else if let Some(path) = self.resolve_file(&entry.rel_path) {
+            reply.attr(&TTL, &self.attr_from_path(ino, &path, false));
+        } else {
+            reply.attr(&TTL, &self.attr_from_db(ino, false));
+        }
+    }
+
+    fn open(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
+        let exists = self.inodes.lock().unwrap().get(ino).is_some();
+        if exists {
+            // Return fh=0, direct_io=false — we handle caching
+            reply.opened(0, 0);
+        } else {
+            reply.error(libc::ENOENT);
+        }
+    }
+
+    fn flush(&mut self, _req: &Request<'_>, _ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
+        reply.ok();
+    }
+
+    fn release(
+        &mut self, _req: &Request<'_>, ino: u64, _fh: u64, _flags: i32,
+        _lock_owner: Option<u64>, _flush: bool, reply: ReplyEmpty,
+    ) {
+        // Release write lease when file handle is closed
+        if let Some(entry) = self.inodes.lock().unwrap().get(ino).cloned() {
+            if !entry.is_dir {
+                let db = self.state.db.lock().unwrap();
+                crate::engine::write_lease::release_lease(
+                    &db, &self.volume_id, &entry.rel_path, &self.state.node_id,
+                );
+            }
+        }
+        reply.ok();
+    }
+
     fn read(
         &mut self, _req: &Request<'_>, ino: u64, _fh: u64,
         offset: i64, size: u32, _flags: i32, _lock_owner: Option<u64>, reply: ReplyData,
@@ -385,6 +453,8 @@ impl Filesystem for CoreSanFS {
             reply.error(libc::EISDIR);
             return;
         }
+
+        tracing::debug!("FUSE read: '{}' offset={} size={}", entry.rel_path, offset, size);
 
         match self.resolve_file(&entry.rel_path) {
             Some(path) => {
@@ -419,6 +489,8 @@ impl Filesystem for CoreSanFS {
             reply.error(libc::EISDIR);
             return;
         }
+
+        tracing::debug!("FUSE write: '{}' offset={} len={}", entry.rel_path, offset, data.len());
 
         let (backend_id, backend_path) = match self.local_backend_for_write() {
             Some(b) => b,
@@ -479,15 +551,19 @@ impl Filesystem for CoreSanFS {
             format!("{}/{}", parent_entry.rel_path, name_str)
         };
 
+        tracing::info!("FUSE create: '{}'", rel_path);
+
         let (backend_id, backend_path) = match self.local_backend_for_write() {
             Some(b) => b,
-            None => { reply.error(libc::ENOSPC); return; }
+            None => { tracing::warn!("FUSE create: no backend for volume {}", self.volume_id); reply.error(libc::ENOSPC); return; }
         };
 
         let full_path = Path::new(&backend_path).join(&rel_path);
         if let Some(parent_dir) = full_path.parent() {
             std::fs::create_dir_all(parent_dir).ok();
         }
+
+        tracing::debug!("FUSE create: writing to {}", full_path.display());
 
         // Create empty file
         if std::fs::write(&full_path, b"").is_err() {
@@ -496,13 +572,17 @@ impl Filesystem for CoreSanFS {
         }
 
         // Register in DB
+        tracing::debug!("FUSE create: registering '{}' in file_map", rel_path);
         let now = chrono::Utc::now().to_rfc3339();
         let db = self.state.db.lock().unwrap();
-        db.execute(
+        match db.execute(
             "INSERT OR IGNORE INTO file_map (volume_id, rel_path, size_bytes, sha256, created_at, updated_at)
              VALUES (?1, ?2, 0, '', ?3, ?3)",
             rusqlite::params![&self.volume_id, &rel_path, &now],
-        ).ok();
+        ) {
+            Ok(n) => tracing::debug!("FUSE create: file_map insert rows={}", n),
+            Err(e) => tracing::warn!("FUSE create: file_map insert failed: {}", e),
+        }
 
         if let Ok(file_id) = db.query_row(
             "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
@@ -559,6 +639,36 @@ impl Filesystem for CoreSanFS {
         reply.entry(&TTL, &self.attr_from_db(ino, true), 0);
     }
 
+    fn getxattr(&mut self, _req: &Request<'_>, _ino: u64, _name: &OsStr, _size: u32, reply: fuser::ReplyXattr) {
+        reply.error(libc::ENODATA); // No extended attributes supported
+    }
+
+    fn listxattr(&mut self, _req: &Request<'_>, _ino: u64, _size: u32, reply: fuser::ReplyXattr) {
+        reply.size(0); // No xattrs
+    }
+
+    fn opendir(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
+        let exists = self.inodes.lock().unwrap().get(ino).is_some();
+        if exists {
+            reply.opened(0, 0);
+        } else {
+            reply.error(libc::ENOENT);
+        }
+    }
+
+    fn releasedir(&mut self, _req: &Request<'_>, _ino: u64, _fh: u64, _flags: i32, reply: ReplyEmpty) {
+        reply.ok();
+    }
+
+    fn access(&mut self, _req: &Request<'_>, ino: u64, _mask: i32, reply: ReplyEmpty) {
+        let exists = self.inodes.lock().unwrap().get(ino).is_some();
+        if exists {
+            reply.ok();
+        } else {
+            reply.error(libc::ENOENT);
+        }
+    }
+
     fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         let parent_entry = match self.inodes.lock().unwrap().get(parent).cloned() {
             Some(e) => e,
@@ -572,6 +682,8 @@ impl Filesystem for CoreSanFS {
             format!("{}/{}", parent_entry.rel_path, name_str)
         };
 
+        tracing::info!("FUSE unlink: {}/{}", self.volume_id, rel_path);
+
         // Delete from local backends
         let backends: Vec<String> = {
             let db = self.state.db.lock().unwrap();
@@ -584,23 +696,49 @@ impl Filesystem for CoreSanFS {
             ).unwrap().filter_map(|r| r.ok()).collect()
         };
 
+        let mut deleted = false;
         for bp in &backends {
             let full = Path::new(bp).join(&rel_path);
-            std::fs::remove_file(&full).ok();
+            if std::fs::remove_file(&full).is_ok() {
+                tracing::debug!("FUSE unlink: removed {}", full.display());
+                deleted = true;
+            }
         }
 
-        // Remove from DB
+        // Remove from DB — delete replicas first, then file_map
         {
             let db = self.state.db.lock().unwrap();
-            db.execute(
+
+            // Delete replicas explicitly (in case CASCADE doesn't work on migrated DBs)
+            let file_id: Option<i64> = db.query_row(
+                "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
+                rusqlite::params![&self.volume_id, &rel_path],
+                |row| row.get(0),
+            ).ok();
+
+            if let Some(fid) = file_id {
+                db.execute("DELETE FROM file_replicas WHERE file_id = ?1", rusqlite::params![fid]).ok();
+                db.execute("DELETE FROM write_log WHERE file_id = ?1", rusqlite::params![fid]).ok();
+            }
+
+            match db.execute(
                 "DELETE FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
                 rusqlite::params![&self.volume_id, &rel_path],
-            ).ok();
+            ) {
+                Ok(rows) => {
+                    tracing::info!("FUSE unlink: deleted '{}' (rows={}, replicas cleared)", rel_path, rows);
+                    if rows > 0 { deleted = true; }
+                }
+                Err(e) => {
+                    tracing::error!("FUSE unlink: file_map DELETE failed: {}", e);
+                }
+            }
         }
 
         // Remove inode
+        let rel_path_clone = rel_path.clone();
         let ino = self.inodes.lock().unwrap().paths
-            .get(&(self.volume_id.clone(), rel_path))
+            .get(&(self.volume_id.clone(), rel_path_clone))
             .copied();
         if let Some(ino) = ino {
             self.inodes.lock().unwrap().remove(ino);
@@ -729,12 +867,20 @@ pub fn spawn_all(state: Arc<CoreSanState>) {
     for (vol_id, vol_name) in volumes {
         let fuse_path = state.config.data.fuse_root.join(&vol_name);
 
-        if !fuse_path.exists() {
-            if let Err(e) = std::fs::create_dir_all(&fuse_path) {
-                tracing::warn!("Cannot create FUSE mount point {}: {}", fuse_path.display(), e);
-                continue;
-            }
+        // Clean up stale/dead FUSE mounts from previous crashed runs
+        if std::fs::metadata(&fuse_path).is_err() && fuse_path.as_os_str().len() > 0 {
+            // Path exists on disk but stat fails → dead FUSE endpoint
+            tracing::info!("Cleaning up stale FUSE mount: {}", fuse_path.display());
+            std::process::Command::new("fusermount3")
+                .args(["-u", &fuse_path.to_string_lossy()])
+                .output().ok();
+            std::process::Command::new("umount")
+                .args(["-l", &fuse_path.to_string_lossy()])
+                .output().ok();
         }
+
+        // Ensure mount point directory exists
+        std::fs::create_dir_all(&fuse_path).ok();
 
         let fs_name = format!("coresan:{}", vol_name);
         let mount_path = fuse_path.clone();

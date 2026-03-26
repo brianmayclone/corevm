@@ -2,8 +2,9 @@
 # Build (and optionally run) vmm-san (CoreSAN).
 #
 # Usage:
-#   ./tools/build-vmm-san.sh          # Build only (no sudo needed)
-#   ./tools/build-vmm-san.sh --run    # Build and run (needs sudo for FUSE mount)
+#   ./tools/build-vmm-san.sh                # Build only (no sudo needed)
+#   ./tools/build-vmm-san.sh --run          # Build and run (needs sudo for FUSE mount)
+#   ./tools/build-vmm-san.sh --run --debug  # Build and run with debug logging
 #
 # If running with sudo, use:  sudo -E env "PATH=$PATH" ./tools/build-vmm-san.sh --run
 # This preserves the Rust toolchain in PATH.
@@ -96,18 +97,40 @@ EOF
     # Create data directories
     mkdir -p /tmp/vmm-san /tmp/vmm-san/mnt
 
-    # Unmount stale FUSE mounts from previous runs
+    # Unmount stale FUSE mounts from previous runs (including crashed endpoints)
     for mnt in /tmp/vmm-san/mnt/*/; do
-        if mountpoint -q "$mnt" 2>/dev/null; then
+        [ -d "$mnt" ] || continue
+        # Check both: active mount OR dead "Transport endpoint not connected"
+        if mountpoint -q "$mnt" 2>/dev/null || ! ls "$mnt" >/dev/null 2>&1; then
             echo -e "${YELLOW}Unmounting stale FUSE: $mnt${NC}"
-            fusermount3 -u "$mnt" 2>/dev/null || fusermount -u "$mnt" 2>/dev/null || true
+            fusermount3 -u "$mnt" 2>/dev/null || fusermount -u "$mnt" 2>/dev/null || umount -l "$mnt" 2>/dev/null || true
+        fi
+    done
+
+    # CoreSAN needs root for FUSE mounts with allow_other
+    if [ "$(id -u)" -ne 0 ]; then
+        echo -e "${RED}ERROR: CoreSAN requires root to mount FUSE filesystems.${NC}"
+        echo -e "Run: ${CYAN}sudo -E env \"PATH=\$PATH\" $0 --run${NC}"
+        exit 1
+    fi
+
+    # Check for --debug flag
+    DEBUG_MODE=0
+    for arg in "$@"; do
+        if [ "$arg" = "--debug" ]; then
+            DEBUG_MODE=1
         fi
     done
 
     # Start vmm-san
     cd "$ROOT"
-    echo -e "${CYAN}Starting vmm-san on :7443...${NC}"
-    "$ROOT/target/release/vmm-san" --config "$SAN_CONFIG" &
+    if [ "$DEBUG_MODE" = "1" ]; then
+        echo -e "${CYAN}Starting vmm-san on :7443 (DEBUG mode)...${NC}"
+        RUST_LOG=debug "$ROOT/target/release/vmm-san" --config "$SAN_CONFIG" &
+    else
+        echo -e "${CYAN}Starting vmm-san on :7443...${NC}"
+        "$ROOT/target/release/vmm-san" --config "$SAN_CONFIG" &
+    fi
     SAN_PID=$!
 
     sleep 1

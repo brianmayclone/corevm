@@ -125,6 +125,10 @@ export default function StorageWizard() {
         gluster_volume: glusterVolume || undefined, gluster_brick_path: glusterBrick || undefined, gluster_replica: glusterReplica,
         ceph_monitors: cephMonitors || undefined, ceph_path: cephPath || undefined, ceph_secret: cephSecret || undefined,
         ceph_create_new: fsType === 'cephfs' && cephMode === 'create',
+        coresan_volume_name: fsType === 'coresan' ? datastoreName : undefined,
+        coresan_resilience_mode: fsType === 'coresan' ? coresanResilience : undefined,
+        coresan_replica_count: fsType === 'coresan' ? coresanReplicas : undefined,
+        coresan_backend_paths: fsType === 'coresan' ? [coresanBackendPath] : undefined,
         sudo_passwords: sudoPasswords,
       }
       const { data } = await api.post('/api/storage/wizard/setup', config)
@@ -275,6 +279,50 @@ export default function StorageWizard() {
                   setGlusterBrick(`/data/gluster/${e.target.value}`)
                 }} className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm" />
               </div>
+
+              {/* CoreSAN */}
+              {fsType === 'coresan' && (
+                <div className="space-y-4">
+                  <div className="bg-vmm-success/5 border border-vmm-success/20 rounded-lg p-4 space-y-2">
+                    <div className="text-sm font-medium text-vmm-text">CoreSAN — Software-Defined Storage</div>
+                    <div className="text-xs text-vmm-text-muted">
+                      CoreSAN will be installed and configured on <strong>{selectedHostIds.length} host{selectedHostIds.length !== 1 ? 's' : ''}</strong>.
+                      Each host runs its own CoreSAN daemon and contributes local storage to a shared volume.
+                      Data is replicated automatically between nodes based on the resilience policy.
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs text-vmm-text-muted mb-1">Resilience Mode</label>
+                      <select value={coresanResilience} onChange={e => {
+                        setCoresanResilience(e.target.value)
+                        if (e.target.value === 'none') setCoresanReplicas(1)
+                        else if (coresanReplicas < 2) setCoresanReplicas(2)
+                      }}
+                        className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm">
+                        <option value="none">No Protection (RAID-0) — maximum space</option>
+                        <option value="mirror">Mirror (RAID-1) — maximum safety</option>
+                      </select>
+                    </div>
+                    {coresanResilience === 'mirror' && (
+                      <div>
+                        <label className="block text-xs text-vmm-text-muted mb-1">Replica Count</label>
+                        <select value={String(coresanReplicas)} onChange={e => setCoresanReplicas(Number(e.target.value))}
+                          className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm">
+                          <option value="2">2 copies — tolerates 1 node failure</option>
+                          <option value="3">3 copies — tolerates 2 node failures</option>
+                        </select>
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <label className="block text-xs text-vmm-text-muted mb-1">Backend Storage Path (per host)</label>
+                    <input type="text" value={coresanBackendPath} onChange={e => setCoresanBackendPath(e.target.value)}
+                      className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm" />
+                    <p className="text-[10px] text-vmm-text-muted mt-1">Local directory on each host that provides storage to the volume. Must be a mounted filesystem (ext4, xfs, etc.).</p>
+                  </div>
+                </div>
+              )}
 
               {/* NFS */}
               {fsType === 'nfs' && (
