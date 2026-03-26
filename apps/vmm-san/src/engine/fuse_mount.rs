@@ -536,8 +536,9 @@ impl Filesystem for CoreSanFS {
             let db = self.state.db.lock().unwrap();
 
             // Acquire/renew write lease
+            let quorum = *self.state.quorum_status.read().unwrap();
             match crate::engine::write_lease::acquire_lease(
-                &db, &self.volume_id, &entry.rel_path, &self.state.node_id,
+                &db, &self.volume_id, &entry.rel_path, &self.state.node_id, quorum,
             ) {
                 crate::engine::write_lease::LeaseResult::Acquired { .. } |
                 crate::engine::write_lease::LeaseResult::Renewed { .. } => {}

@@ -251,4 +251,13 @@ fn migrate(db: &Connection) {
     // Chunk tracking on file_map
     db.execute_batch("ALTER TABLE file_map ADD COLUMN chunk_count INTEGER NOT NULL DEFAULT 0;").ok();
     db.execute_batch("ALTER TABLE file_map ADD COLUMN protection_status TEXT NOT NULL DEFAULT 'unprotected';").ok();
+
+    // Ownership ticks for split-brain conflict resolution
+    db.execute_batch("ALTER TABLE file_map ADD COLUMN ownership_epoch INTEGER NOT NULL DEFAULT 0;").ok();
+    db.execute_batch("ALTER TABLE file_map ADD COLUMN ownership_tick INTEGER NOT NULL DEFAULT 0;").ok();
+    db.execute_batch("ALTER TABLE write_log ADD COLUMN ownership_epoch INTEGER NOT NULL DEFAULT 0;").ok();
+    db.execute_batch("ALTER TABLE write_log ADD COLUMN ownership_tick INTEGER NOT NULL DEFAULT 0;").ok();
+
+    // Volume sync mode policy
+    db.execute_batch("ALTER TABLE volumes ADD COLUMN sync_mode TEXT NOT NULL DEFAULT 'async';").ok();
 }

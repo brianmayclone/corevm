@@ -21,6 +21,8 @@ pub struct CoreSanConfig {
     pub integrity: IntegritySection,
     #[serde(default)]
     pub logging: LoggingSection,
+    #[serde(default)]
+    pub cluster: ClusterSection,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,6 +99,20 @@ pub struct LoggingSection {
     #[serde(default = "default_log_level")]
     pub level: String,
     pub file: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ClusterSection {
+    /// URL of vmm-cluster for witness tie-breaking (e.g. "https://10.0.0.1:9443").
+    /// Empty = no witness, pure majority quorum only.
+    #[serde(default)]
+    pub witness_url: String,
+}
+
+impl Default for ClusterSection {
+    fn default() -> Self {
+        Self { witness_url: String::new() }
+    }
 }
 
 // ── Defaults ─────────────────────────────────────────────────────────────
@@ -179,6 +195,7 @@ impl Default for CoreSanConfig {
             benchmark: Default::default(),
             integrity: Default::default(),
             logging: Default::default(),
+            cluster: Default::default(),
         }
     }
 }

@@ -29,6 +29,7 @@ impl PeerClient {
         hostname: &str,
         uptime_secs: u64,
         our_address: &str,
+        is_leader: bool,
     ) -> Result<(), String> {
         let url = format!("{}/api/peers/heartbeat", peer_address);
         self.http.post(&url)
@@ -38,6 +39,7 @@ impl PeerClient {
                 "hostname": hostname,
                 "uptime_secs": uptime_secs,
                 "address": our_address,
+                "is_leader": is_leader,
             }))
             .send().await
             .map_err(|e| format!("Heartbeat failed: {}", e))?;
@@ -161,6 +163,30 @@ impl PeerClient {
         } else {
             Err(format!("Volume sync returned status {}", resp.status()))
         }
+    }
+
+    /// Ask vmm-cluster witness whether this node is allowed to write.
+    pub async fn witness_check(witness_url: &str, node_id: &str) -> Result<bool, String> {
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .timeout(std::time::Duration::from_secs(3))
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .build()
+            .map_err(|e| format!("witness client build error: {}", e))?;
+
+        let url = format!("{}/api/san/witness/{}", witness_url.trim_end_matches('/'), node_id);
+        let resp = client.get(&url)
+            .send().await
+            .map_err(|e| format!("witness unreachable: {}", e))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("witness returned {}", resp.status()));
+        }
+
+        let body: serde_json::Value = resp.json().await
+            .map_err(|e| format!("witness response parse error: {}", e))?;
+
+        Ok(body.get("allowed").and_then(|v| v.as_bool()).unwrap_or(false))
     }
 
     /// Notify a peer to delete a volume.

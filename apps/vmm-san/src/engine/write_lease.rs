@@ -44,7 +44,16 @@ pub fn acquire_lease(
     volume_id: &str,
     rel_path: &str,
     node_id: &str,
+    quorum: crate::state::QuorumStatus,
 ) -> LeaseResult {
+    // Fenced nodes cannot acquire or renew leases
+    if quorum == crate::state::QuorumStatus::Fenced {
+        return LeaseResult::Denied {
+            owner_node_id: String::new(),
+            until: "node is fenced (no quorum)".into(),
+        };
+    }
+
     let now = chrono::Utc::now();
     let until = (now + chrono::Duration::seconds(LEASE_DURATION_SECS))
         .to_rfc3339();
@@ -75,6 +84,12 @@ pub fn acquire_lease(
                 if owner == node_id {
                     LeaseResult::Renewed { version }
                 } else {
+                    // Ownership changed — increment epoch
+                    db.execute(
+                        "UPDATE file_map SET ownership_epoch = ownership_epoch + 1
+                         WHERE volume_id = ?1 AND rel_path = ?2",
+                        rusqlite::params![volume_id, rel_path],
+                    ).ok();
                     LeaseResult::Acquired { version }
                 }
             } else if lease_until < now_str {
@@ -85,6 +100,12 @@ pub fn acquire_lease(
                     "UPDATE file_map SET write_owner = ?1, write_lease_until = ?2
                      WHERE volume_id = ?3 AND rel_path = ?4",
                     rusqlite::params![node_id, &until, volume_id, rel_path],
+                ).ok();
+                // Ownership changed — increment epoch
+                db.execute(
+                    "UPDATE file_map SET ownership_epoch = ownership_epoch + 1
+                     WHERE volume_id = ?1 AND rel_path = ?2",
+                    rusqlite::params![volume_id, rel_path],
                 ).ok();
                 LeaseResult::Acquired { version }
             } else {
@@ -150,9 +171,10 @@ pub fn atomic_write(
     backend_path: &str,
     data: &[u8],
     offset: Option<i64>,
+    quorum: crate::state::QuorumStatus,
 ) -> Result<i64, String> {
     // 1. Acquire/renew lease
-    let version = match acquire_lease(db, volume_id, rel_path, node_id) {
+    let version = match acquire_lease(db, volume_id, rel_path, node_id, quorum) {
         LeaseResult::Acquired { version } | LeaseResult::Renewed { version } => version,
         LeaseResult::Denied { owner_node_id, .. } => {
             return Err(format!("File is owned by node {}", owner_node_id));
@@ -206,15 +228,16 @@ pub fn atomic_write(
     let size = content.len() as u64;
     let now = chrono::Utc::now().to_rfc3339();
 
-    // 5. Update file_map with new version
+    // 5. Update file_map with new version + ownership tick
     db.execute(
-        "INSERT INTO file_map (volume_id, rel_path, size_bytes, sha256, version, write_owner, write_lease_until, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+        "INSERT INTO file_map (volume_id, rel_path, size_bytes, sha256, version, write_owner, write_lease_until, created_at, updated_at, ownership_tick)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, 1)
          ON CONFLICT(volume_id, rel_path) DO UPDATE SET
             size_bytes = excluded.size_bytes, sha256 = excluded.sha256,
             version = excluded.version, write_owner = excluded.write_owner,
             write_lease_until = excluded.write_lease_until,
-            updated_at = excluded.updated_at",
+            updated_at = excluded.updated_at,
+            ownership_tick = ownership_tick + 1",
         rusqlite::params![volume_id, rel_path, size, &sha256, new_version, node_id,
                           &(chrono::Utc::now() + chrono::Duration::seconds(LEASE_DURATION_SECS)).to_rfc3339(),
                           &now],
@@ -244,11 +267,17 @@ pub fn atomic_write(
         rusqlite::params![file_id, backend_id],
     ).ok();
 
-    // 9. Append to write_log for push replication
+    // 9. Append to write_log for push replication (with ownership epoch/tick)
+    let (epoch, tick): (i64, i64) = db.query_row(
+        "SELECT ownership_epoch, ownership_tick FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
+        rusqlite::params![volume_id, rel_path],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap_or((0, 0));
+
     db.execute(
-        "INSERT INTO write_log (file_id, volume_id, rel_path, version, writer_node_id, size_bytes, sha256)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params![file_id, volume_id, rel_path, new_version, node_id, size, &sha256],
+        "INSERT INTO write_log (file_id, volume_id, rel_path, version, writer_node_id, size_bytes, sha256, ownership_epoch, ownership_tick)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params![file_id, volume_id, rel_path, new_version, node_id, size, &sha256, epoch, tick],
     ).ok();
 
     Ok(new_version)

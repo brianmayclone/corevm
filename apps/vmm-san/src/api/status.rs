@@ -19,6 +19,8 @@ pub struct StatusResponse {
     pub available_disks: u32,
     pub claimed_disks: u32,
     pub benchmark_summary: Option<BenchmarkSummary>,
+    pub quorum_status: String,
+    pub is_leader: bool,
 }
 
 #[derive(Serialize)]
@@ -78,6 +80,9 @@ pub async fn status(
     let local_addr = format!("http://{}:{}",
         crate::engine::discovery::get_local_ip_cached(), state.config.server.port);
 
+    let quorum_status = format!("{:?}", *state.quorum_status.read().unwrap()).to_lowercase();
+    let is_leader = state.is_leader.load(std::sync::atomic::Ordering::Relaxed);
+
     Json(StatusResponse {
         running: true,
         node_id: state.node_id.clone(),
@@ -89,6 +94,8 @@ pub async fn status(
         available_disks,
         claimed_disks,
         benchmark_summary,
+        quorum_status,
+        is_leader,
     })
 }
 
@@ -124,6 +131,9 @@ pub async fn dashboard(
     let disks = crate::storage::disk::discover_disks(&db);
     let local_addr2 = format!("http://{}:{}",
         crate::engine::discovery::get_local_ip_cached(), state.config.server.port);
+    let quorum_status2 = format!("{:?}", *state.quorum_status.read().unwrap()).to_lowercase();
+    let is_leader2 = state.is_leader.load(std::sync::atomic::Ordering::Relaxed);
+
     let status = StatusResponse {
         running: true,
         node_id: state.node_id.clone(),
@@ -139,6 +149,8 @@ pub async fn dashboard(
             crate::storage::disk::DiskStatus::Claimed { .. }
         )).count() as u32,
         benchmark_summary,
+        quorum_status: quorum_status2,
+        is_leader: is_leader2,
     };
 
     Json(DashboardResponse {

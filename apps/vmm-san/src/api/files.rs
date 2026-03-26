@@ -82,6 +82,27 @@ pub async fn write(
     Path((volume_id, rel_path)): Path<(String, String)>,
     body: axum::body::Bytes,
 ) -> Result<Json<FileEntry>, (StatusCode, String)> {
+    // Check quorum — fenced nodes reject writes
+    let quorum = *state.quorum_status.read().unwrap();
+    if quorum == crate::state::QuorumStatus::Fenced {
+        return Err((StatusCode::SERVICE_UNAVAILABLE,
+            "node is fenced (no quorum) — writes are not allowed".into()));
+    }
+
+    // Check volume sync_mode — 'quorum' mode not yet implemented
+    {
+        let db = state.db.lock().unwrap();
+        let sync_mode: String = db.query_row(
+            "SELECT sync_mode FROM volumes WHERE id = ?1",
+            rusqlite::params![&volume_id],
+            |row| row.get(0),
+        ).unwrap_or_else(|_| "async".into());
+        if sync_mode == "quorum" {
+            return Err((StatusCode::NOT_IMPLEMENTED,
+                "sync_mode 'quorum' is not yet implemented".into()));
+        }
+    }
+
     // Select the best local backend
     let (backend_id, backend_path) = {
         let db = state.db.lock().unwrap();
@@ -100,7 +121,7 @@ pub async fn write(
         let db = state.db.lock().unwrap();
         crate::engine::write_lease::atomic_write(
             &db, &volume_id, &rel_path, &state.node_id,
-            &backend_id, &backend_path, &body, None,
+            &backend_id, &backend_path, &body, None, quorum,
         ).map_err(|e| (StatusCode::CONFLICT, e))?
     };
 

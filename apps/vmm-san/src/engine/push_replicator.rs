@@ -44,6 +44,13 @@ async fn run_push_replicator(
     let client = PeerClient::new(&state.config.peer.secret);
 
     while let Some(event) = rx.recv().await {
+        // Skip push if node is fenced
+        let quorum = *state.quorum_status.read().unwrap();
+        if quorum == crate::state::QuorumStatus::Fenced {
+            tracing::trace!("Node fenced, dropping push event");
+            continue;
+        }
+
         // Find all peers that have backends for this volume
         let targets = {
             let db = state.db.lock().unwrap();

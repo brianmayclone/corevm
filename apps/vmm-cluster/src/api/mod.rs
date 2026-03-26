@@ -156,6 +156,7 @@ pub fn router() -> Router<Arc<ClusterState>> {
         .route("/api/san/volumes/{id}/files/{*path}", put(san::upload_file).delete(san::delete_file))
         .route("/api/san/benchmark", get(san::benchmark_matrix))
         .route("/api/san/benchmark/run", post(san::run_benchmark))
+        .route("/api/san/witness/{node_id}", get(san::witness))
 
         // ── WebSocket ───────────────────────────────────
         .route("/ws/console/{vm_id}", get(crate::ws::console_bridge::handler))

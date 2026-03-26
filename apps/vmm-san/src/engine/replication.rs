@@ -16,6 +16,11 @@ pub fn spawn(state: Arc<CoreSanState>) {
 
         loop {
             tick.tick().await;
+            let quorum = *state.quorum_status.read().unwrap();
+            if quorum == crate::state::QuorumStatus::Fenced {
+                tracing::trace!("Node fenced, skipping replication cycle");
+                continue;
+            }
             process_stale_replicas(&state, &client).await;
         }
     });

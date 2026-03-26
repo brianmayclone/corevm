@@ -457,6 +457,68 @@ pub async fn upload_file(
     client.upload_file(&id, &path, body.to_vec()).await.map(Json).map_err(san_err)
 }
 
+// ── Witness ──────────────────────────────────────────────────────
+
+/// GET /api/san/witness/{node_id} — witness tie-breaker for SAN quorum.
+/// No auth required — SAN nodes call this directly.
+pub async fn witness(
+    State(state): State<Arc<ClusterState>>,
+    Path(requesting_node_id): Path<String>,
+) -> Json<Value> {
+    // Get ALL known SAN hosts
+    let all_san_host_ids: Vec<String> = {
+        let db = state.db.lock().unwrap();
+        let mut stmt = db.prepare(
+            "SELECT id FROM hosts WHERE san_enabled = 1 AND san_address != ''"
+        ).unwrap();
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .unwrap().filter_map(|r| r.ok()).collect()
+    };
+
+    if all_san_host_ids.is_empty() {
+        return Json(serde_json::json!({"allowed": false, "reason": "no SAN hosts known"}));
+    }
+
+    // Get SAN hosts the cluster considers ONLINE
+    let reachable_ids: Vec<String> = {
+        let db = state.db.lock().unwrap();
+        let mut stmt = db.prepare(
+            "SELECT id FROM hosts WHERE san_enabled = 1 AND san_address != '' AND status = 'online'"
+        ).unwrap();
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .unwrap().filter_map(|r| r.ok()).collect()
+    };
+
+    // Is the requesting node reachable from the cluster?
+    if !reachable_ids.contains(&requesting_node_id) {
+        return Json(serde_json::json!({
+            "allowed": false,
+            "reason": "requesting node not reachable from cluster"
+        }));
+    }
+
+    let total = all_san_host_ids.len();
+    let reachable = reachable_ids.len();
+    let unreachable = total - reachable;
+
+    if reachable > unreachable {
+        return Json(serde_json::json!({"allowed": true}));
+    }
+
+    if reachable < unreachable {
+        return Json(serde_json::json!({"allowed": false, "reason": "minority partition"}));
+    }
+
+    // Tie — partition with lowest host_id wins
+    let lowest_overall = all_san_host_ids.iter().min().cloned().unwrap_or_default();
+    let allowed = reachable_ids.contains(&lowest_overall);
+
+    Json(serde_json::json!({
+        "allowed": allowed,
+        "reason": if allowed { "tie broken by lowest host_id" } else { "tie lost — lowest host_id in other partition" }
+    }))
+}
+
 // ── Health ────────────────────────────────────────────────────────
 
 /// GET /api/san/health — return latest health snapshot from the health engine.

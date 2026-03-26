@@ -19,6 +19,10 @@ pub fn spawn(state: Arc<CoreSanState>) {
 
         loop {
             tick.tick().await;
+            if !state.is_leader.load(std::sync::atomic::Ordering::Relaxed) {
+                tracing::trace!("Not leader, skipping repair cycle");
+                continue;
+            }
             run_chunk_repair(&state, &client).await;
             update_protection_status(&state);
         }
