@@ -64,12 +64,16 @@ struct LsblkDevice {
     fstype: Option<String>,
     mountpoints: Option<Vec<Option<String>>>,
     children: Option<Vec<LsblkDevice>>,
+    /// Transport type: sata, nvme, scsi, usb, ata, virtio, …
+    tran: Option<String>,
+    /// Removable device flag (1 = removable)
+    rm: Option<bool>,
 }
 
 /// Discover all block devices on this node with their availability status.
 pub fn discover_disks(db: &Connection) -> Vec<DiscoveredDisk> {
     let output = Command::new("lsblk")
-        .args(["-Jb", "-o", "NAME,SIZE,MODEL,TYPE,FSTYPE,SERIAL,MOUNTPOINTS"])
+        .args(["-Jb", "-o", "NAME,SIZE,MODEL,TYPE,FSTYPE,SERIAL,MOUNTPOINTS,TRAN,RM"])
         .output();
 
     let output = match output {
@@ -99,8 +103,38 @@ pub fn discover_disks(db: &Connection) -> Vec<DiscoveredDisk> {
     let mut result = Vec::new();
 
     for dev in &parsed.blockdevices {
-        // Only whole disks, not partitions/loops/roms
+        // Only whole disks, not partitions/loops/roms/cdroms
         if dev.dev_type != "disk" {
+            continue;
+        }
+
+        // Filter out unsupported device classes:
+        // - Removable devices (USB sticks, floppies, card readers)
+        // - CD/DVD/BD drives (show up as disk sometimes)
+        // - Floppy drives (fd*)
+        // - Loop devices that slipped through
+        if dev.rm.unwrap_or(false) {
+            continue;
+        }
+        if dev.name.starts_with("fd") || dev.name.starts_with("sr") || dev.name.starts_with("cd") {
+            continue;
+        }
+        // Filter by transport: only allow sata, nvme, scsi, ata, sas, virtio, and IDE
+        // Block usb, firewire, mmc (SD cards), and unknown removable transports
+        if let Some(ref tran) = dev.tran {
+            match tran.as_str() {
+                "sata" | "nvme" | "scsi" | "ata" | "sas" | "virtio" | "ide" | "fc" => {}
+                "usb" | "firewire" | "ieee1394" | "mmc" | "sdio" => continue,
+                _ => {
+                    // Unknown transport — allow if size > 1GB (probably a real disk)
+                    if dev.size.unwrap_or(0) < 1_073_741_824 {
+                        continue;
+                    }
+                }
+            }
+        }
+        // Skip very small devices (< 1GB) — likely floppies or virtual devices
+        if dev.size.unwrap_or(0) < 1_073_741_824 {
             continue;
         }
 
@@ -109,6 +143,11 @@ pub fn discover_disks(db: &Connection) -> Vec<DiscoveredDisk> {
 
         // Check if any child partition is mounted on /, /boot, or is swap
         let is_os_disk = is_system_disk(dev);
+
+        // Skip OS/system disks entirely — they must never be shown or claimable
+        if is_os_disk {
+            continue;
+        }
 
         // Check if the disk itself or any partition is mounted
         let mountpoint = get_any_mountpoint(dev);
@@ -125,10 +164,8 @@ pub fn discover_disks(db: &Connection) -> Vec<DiscoveredDisk> {
             is_os_disk,
         };
 
-        // Classify status
-        let status = if is_os_disk {
-            DiskStatus::OsDisk
-        } else if let Some(ref mp) = mountpoint {
+        // Classify status (OS disks already filtered above)
+        let status = if let Some(ref mp) = mountpoint {
             // Check if mounted by CoreSAN
             if let Some((id, _, vol)) = claimed.iter().find(|(_, dp, _)| *dp == path) {
                 DiskStatus::Claimed { disk_id: id.clone(), volume_id: vol.clone() }

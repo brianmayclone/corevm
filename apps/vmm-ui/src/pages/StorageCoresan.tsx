@@ -422,7 +422,7 @@ export default function StorageCoresan() {
                   <tr key={diskKey(d)} className="border-b border-vmm-border/50">
                     {isCluster && <td className="py-2 px-2 text-vmm-text-dim text-xs">{d._host_name || '—'}</td>}
                     <td className="py-2 px-2 text-vmm-text font-mono flex items-center gap-2">
-                      <Disc size={13} className={d.status === 'claimed' ? 'text-vmm-accent' : d.status === 'os_disk' ? 'text-vmm-danger' : 'text-vmm-text-muted'} />
+                      <Disc size={13} className={d.status === 'claimed' ? 'text-vmm-accent' : 'text-vmm-text-muted'} />
                       {d.path}
                     </td>
                     <td className="py-2 px-2 text-vmm-text">{formatBytes(d.size_bytes)}</td>
@@ -432,7 +432,6 @@ export default function StorageCoresan() {
                         d.status === 'available' ? statusColors.online :
                         d.status === 'claimed' ? 'bg-vmm-accent/20 text-vmm-accent border-vmm-accent/30' :
                         d.status === 'has_data' ? statusColors.degraded :
-                        d.status === 'os_disk' ? 'bg-vmm-danger/20 text-vmm-danger border-vmm-danger/30' :
                         statusColors.offline
                       } />
                     </td>

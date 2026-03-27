@@ -52,10 +52,6 @@ pub async fn claim(
 
     // Check availability
     match &disk_info.status {
-        disk::DiskStatus::OsDisk => {
-            return Err((StatusCode::FORBIDDEN,
-                "Cannot claim the OS disk".into()));
-        }
         disk::DiskStatus::InUse { mountpoint } => {
             return Err((StatusCode::CONFLICT,
                 format!("Disk is mounted at {} — unmount it first", mountpoint)));
