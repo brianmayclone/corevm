@@ -231,8 +231,10 @@ pub async fn start(
         .map_err(|e| AppError(StatusCode::BAD_GATEWAY, format!("Cannot reach host: {}", e)))?;
 
     if !resp.status().is_success() {
+        let status = resp.status();
         let err = resp.text().await.unwrap_or_default();
-        return Err(AppError(StatusCode::BAD_GATEWAY, format!("Start failed: {}", err)));
+        tracing::error!("VM start failed on host {}: {} {}", host_id, status, err);
+        return Err(AppError(StatusCode::BAD_GATEWAY, format!("Start failed on host: {} {}", status, err)));
     }
 
     // Update state in cluster DB

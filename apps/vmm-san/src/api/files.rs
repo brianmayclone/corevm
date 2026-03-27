@@ -130,10 +130,13 @@ pub async fn read(
 /// PUT /api/volumes/{id}/files/*path — write a file (creates or overwrites).
 /// Uses atomic write with write-lease acquisition and immediate push replication.
 pub async fn write(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<CoreSanState>>,
     Path((volume_id, rel_path)): Path<(String, String)>,
     body: axum::body::Bytes,
 ) -> Result<Json<FileEntry>, (StatusCode, String)> {
+    // Detect if this write comes from a peer (replication push) — do NOT re-replicate
+    let is_peer_write = headers.get(crate::auth::PEER_SECRET_HEADER).is_some();
     // Check quorum — fenced nodes reject writes
     let quorum = *state.quorum_status.read().unwrap();
     if quorum == crate::state::QuorumStatus::Fenced {
@@ -182,16 +185,19 @@ pub async fn write(
     let sha256 = format!("{:x}", Sha256::digest(&body));
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Push to peers immediately (non-blocking channel send)
-    let _ = state.write_tx.send(crate::engine::push_replicator::WriteEvent {
-        volume_id: volume_id.clone(),
-        rel_path: rel_path.clone(),
-        version: new_version,
-        data: std::sync::Arc::new(body.to_vec()),
-        writer_node_id: state.node_id.clone(),
-    });
-
-    tracing::info!("Wrote file {}/{} v{} ({} bytes)", volume_id, rel_path, new_version, size);
+    // Push to peers — only for original writes, NOT for peer-replicated writes
+    if !is_peer_write {
+        let _ = state.write_tx.send(crate::engine::push_replicator::WriteEvent {
+            volume_id: volume_id.clone(),
+            rel_path: rel_path.clone(),
+            version: new_version,
+            data: std::sync::Arc::new(body.to_vec()),
+            writer_node_id: state.node_id.clone(),
+        });
+        tracing::info!("Wrote file {}/{} v{} ({} bytes)", volume_id, rel_path, new_version, size);
+    } else {
+        tracing::info!("Received replica {}/{} v{} ({} bytes)", volume_id, rel_path, new_version, size);
+    }
 
     Ok(Json(FileEntry {
         rel_path,

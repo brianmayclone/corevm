@@ -65,8 +65,8 @@ export default function VmDetail() {
   const handleForceStop = async () => { await forceStopVm(vm.id); setVm({ ...vm, state: 'stopped' }) }
 
   // Compute total disk size and usage from real data
-  const totalDiskBytes = vm.disks.reduce((sum, d) => sum + d.size_bytes, 0)
-  const usedDiskBytes = vm.disks.reduce((sum, d) => sum + d.used_bytes, 0)
+  const totalDiskBytes = (vm.disks || []).reduce((sum: number, d: any) => sum + (d.size_bytes || 0), 0)
+  const usedDiskBytes = (vm.disks || []).reduce((sum: number, d: any) => sum + (d.used_bytes || 0), 0)
   const diskPercent = totalDiskBytes > 0 ? Math.round((usedDiskBytes / totalDiskBytes) * 100) : 0
 
   // ── Mobile Landscape: Fullscreen Console Mode ──────────────────────────
