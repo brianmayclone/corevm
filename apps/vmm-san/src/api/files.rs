@@ -346,6 +346,37 @@ pub async fn browse(
         }
     }
 
+    // Also scan backend directories for empty folders (not in file_map)
+    {
+        let backend_paths: Vec<String> = db.prepare(
+            "SELECT path FROM backends WHERE node_id = ?1 AND status = 'online'"
+        ).ok().map(|mut stmt| {
+            stmt.query_map(rusqlite::params![&state.node_id], |row| row.get(0))
+                .ok().map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default()
+        }).unwrap_or_default();
+
+        for bp in &backend_paths {
+            let scan_dir = std::path::Path::new(bp)
+                .join(".coresan").join(&volume_id).join(&dir_path);
+            if let Ok(read) = std::fs::read_dir(&scan_dir) {
+                for entry in read.flatten() {
+                    if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if seen_dirs.insert(name.clone()) {
+                            entries.push(BrowseEntry {
+                                name,
+                                is_dir: true,
+                                size_bytes: 0,
+                                updated_at: String::new(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     entries.sort_by(|a, b| {
         b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name))
     });

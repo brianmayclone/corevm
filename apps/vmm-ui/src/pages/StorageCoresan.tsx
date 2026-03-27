@@ -51,6 +51,9 @@ export default function StorageCoresan() {
   const [deleteVolume, setDeleteVolume] = useState<CoreSanVolume | null>(null)
   const [deleteBackend, setDeleteBackend] = useState<CoreSanBackend | null>(null)
 
+  // Tab navigation
+  const [activeTab, setActiveTab] = useState<'volumes' | 'disks' | 'performance'>('volumes')
+
   // Create volume form
   const [newVolName, setNewVolName] = useState('')
   const [newVolFtt, setNewVolFtt] = useState(1)
@@ -371,6 +374,27 @@ export default function StorageCoresan() {
         </Card>
       </div>
 
+      {/* Tab Navigation */}
+      <div className="flex items-center gap-1 border-b border-vmm-border">
+        {([
+          { key: 'volumes' as const, label: 'Volumes', icon: Boxes },
+          { key: 'disks' as const, label: 'Disks & Nodes', icon: HardDrive },
+          { key: 'performance' as const, label: 'Performance', icon: Activity },
+        ]).map(tab => (
+          <button key={tab.key} onClick={() => setActiveTab(tab.key)}
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px cursor-pointer ${
+              activeTab === tab.key
+                ? 'border-vmm-accent text-vmm-accent'
+                : 'border-transparent text-vmm-text-muted hover:text-vmm-text hover:border-vmm-border'
+            }`}>
+            <tab.icon size={14} /> {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Tab: Disks & Nodes ──────────────────────────────────── */}
+      {activeTab === 'disks' && <>
+
       {/* Physical Disks */}
       {disks.length > 0 && (
         <Card>
@@ -491,6 +515,11 @@ export default function StorageCoresan() {
         </div>
       </Card>
 
+      </>}
+
+      {/* ── Tab: Performance ───────────────────────────────────── */}
+      {activeTab === 'performance' && <>
+
       {/* Benchmark Summary */}
       {status?.benchmark_summary && (
         <Card>
@@ -505,6 +534,11 @@ export default function StorageCoresan() {
           </div>
         </Card>
       )}
+
+      </>}
+
+      {/* ── Tab: Volumes ───────────────────────────────────────── */}
+      {activeTab === 'volumes' && <>
 
       {/* Volumes + Volume Detail */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -644,47 +678,50 @@ export default function StorageCoresan() {
             </Card>
           )}
 
-          {/* Benchmark Matrix */}
-          {benchmarkMatrix && benchmarkMatrix.entries.length > 0 && (
-            <Card>
-              <div className="flex items-center justify-between mb-3">
-                <SectionLabel>Network Performance Matrix</SectionLabel>
-                <Button variant="ghost" onClick={handleRunBenchmark}><Activity size={13} /> Retest</Button>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="border-b border-vmm-border">
-                      <th className="text-left py-2 px-2 text-vmm-text-muted">From → To</th>
-                      <th className="text-right py-2 px-2 text-vmm-text-muted">Bandwidth</th>
-                      <th className="text-right py-2 px-2 text-vmm-text-muted">Latency</th>
-                      <th className="text-right py-2 px-2 text-vmm-text-muted">Jitter</th>
-                      <th className="text-right py-2 px-2 text-vmm-text-muted">Loss</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {benchmarkMatrix.entries.map((e, i) => (
-                      <tr key={i} className="border-b border-vmm-border/50">
-                        <td className="py-2 px-2 text-vmm-text font-mono">
-                          {e.from_node_id.slice(0, 8)} → {e.to_node_id.slice(0, 8)}
-                        </td>
-                        <td className="text-right py-2 px-2 text-vmm-text font-medium">{e.bandwidth_mbps.toFixed(0)} Mbit/s</td>
-                        <td className="text-right py-2 px-2 text-vmm-text">{e.latency_us.toFixed(0)} μs</td>
-                        <td className="text-right py-2 px-2 text-vmm-text">{e.jitter_us.toFixed(1)} μs</td>
-                        <td className="text-right py-2 px-2">
-                          <span className={e.packet_loss_pct > 0 ? 'text-vmm-danger' : 'text-vmm-success'}>
-                            {e.packet_loss_pct.toFixed(1)}%
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </Card>
-          )}
         </div>
       </div>
+
+      </>}
+
+      {/* ── Tab: Performance — Benchmark Matrix ────────────────── */}
+      {activeTab === 'performance' && benchmarkMatrix && benchmarkMatrix.entries.length > 0 && (
+        <Card>
+          <div className="flex items-center justify-between mb-3">
+            <SectionLabel>Network Performance Matrix</SectionLabel>
+            <Button variant="ghost" onClick={handleRunBenchmark}><Activity size={13} /> Retest</Button>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-vmm-border">
+                  <th className="text-left py-2 px-2 text-vmm-text-muted">From → To</th>
+                  <th className="text-right py-2 px-2 text-vmm-text-muted">Bandwidth</th>
+                  <th className="text-right py-2 px-2 text-vmm-text-muted">Latency</th>
+                  <th className="text-right py-2 px-2 text-vmm-text-muted">Jitter</th>
+                  <th className="text-right py-2 px-2 text-vmm-text-muted">Loss</th>
+                </tr>
+              </thead>
+              <tbody>
+                {benchmarkMatrix.entries.map((e, i) => (
+                  <tr key={i} className="border-b border-vmm-border/50">
+                    <td className="py-2 px-2 text-vmm-text font-mono">
+                      {e.from_node_id.slice(0, 8)} → {e.to_node_id.slice(0, 8)}
+                    </td>
+                    <td className="text-right py-2 px-2 text-vmm-text font-medium">{e.bandwidth_mbps.toFixed(0)} Mbit/s</td>
+                    <td className="text-right py-2 px-2 text-vmm-text">{e.latency_us.toFixed(0)} μs</td>
+                    <td className="text-right py-2 px-2 text-vmm-text">{e.jitter_us.toFixed(1)} μs</td>
+                    <td className="text-right py-2 px-2">
+                      <span className={e.packet_loss_pct > 0 ? 'text-vmm-danger' : 'text-vmm-success'}>
+                        {e.packet_loss_pct.toFixed(1)}%
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
 
       {/* ── Dialogs ───────────────────────────────────────────── */}
 
