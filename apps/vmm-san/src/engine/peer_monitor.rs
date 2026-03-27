@@ -11,6 +11,41 @@ use crate::peer::client::PeerClient;
 const HEARTBEAT_INTERVAL_SECS: u64 = 5;
 const MAX_MISSED_HEARTBEATS: u32 = 3;
 
+/// Pure quorum calculation — no state, no IO. Testable.
+pub fn calculate_quorum_status(
+    total_nodes: usize,
+    reachable_nodes: usize,
+    witness_allowed: Option<bool>,
+) -> QuorumStatus {
+    if total_nodes <= 1 {
+        return QuorumStatus::Solo;
+    }
+    let majority = (total_nodes / 2) + 1;
+    if reachable_nodes >= majority {
+        return if reachable_nodes == total_nodes {
+            QuorumStatus::Active
+        } else {
+            QuorumStatus::Degraded
+        };
+    }
+    if witness_allowed == Some(true) {
+        return QuorumStatus::Degraded;
+    }
+    QuorumStatus::Fenced
+}
+
+/// Pure leader calculation — no state, no IO. Testable.
+pub fn calculate_is_leader(
+    our_node_id: &str,
+    online_peer_ids: &[&str],
+    quorum: QuorumStatus,
+) -> bool {
+    if quorum == QuorumStatus::Fenced {
+        return false;
+    }
+    online_peer_ids.iter().all(|peer_id| *peer_id >= our_node_id)
+}
+
 /// Spawn the peer monitor as a background task.
 pub fn spawn(state: Arc<CoreSanState>) {
     tokio::spawn(async move {
@@ -158,55 +193,117 @@ async fn heartbeat_all_peers(state: &CoreSanState, client: &PeerClient) {
 async fn compute_quorum(state: &CoreSanState) -> QuorumStatus {
     let total_peers = state.peers.len();
     let total_nodes = 1 + total_peers;
-
-    if total_peers == 0 {
-        return QuorumStatus::Solo;
-    }
-
     let reachable_peers = state.peers.iter()
         .filter(|p| p.status == PeerStatus::Online)
         .count();
     let reachable = 1 + reachable_peers;
+
+    // Try witness if no majority
     let majority = (total_nodes / 2) + 1;
-
-    if reachable >= majority {
-        return if reachable == total_nodes {
-            QuorumStatus::Active
+    let witness_allowed = if reachable < majority {
+        let witness_url = &state.config.cluster.witness_url;
+        if !witness_url.is_empty() {
+            match PeerClient::witness_check(witness_url, &state.node_id).await {
+                Ok(allowed) => {
+                    tracing::debug!("Witness check: allowed={}", allowed);
+                    Some(allowed)
+                }
+                Err(e) => {
+                    tracing::warn!("Witness unreachable: {}", e);
+                    None
+                }
+            }
         } else {
-            QuorumStatus::Degraded
-        };
-    }
-
-    // No majority — try witness
-    let witness_url = &state.config.cluster.witness_url;
-    if !witness_url.is_empty() {
-        match PeerClient::witness_check(witness_url, &state.node_id).await {
-            Ok(true) => {
-                tracing::debug!("Witness granted quorum for this node");
-                return QuorumStatus::Degraded;
-            }
-            Ok(false) => {
-                tracing::warn!("Witness denied quorum for this node");
-            }
-            Err(e) => {
-                tracing::warn!("Witness unreachable: {}", e);
-            }
+            None
         }
-    }
+    } else {
+        None
+    };
 
-    QuorumStatus::Fenced
+    calculate_quorum_status(total_nodes, reachable, witness_allowed)
 }
 
 /// Determine if this node is the leader (lowest node_id among Active/Degraded nodes).
 fn compute_is_leader(state: &CoreSanState, quorum: QuorumStatus) -> bool {
-    if quorum == QuorumStatus::Fenced {
-        return false;
+    let online_ids: Vec<String> = state.peers.iter()
+        .filter(|p| p.status == PeerStatus::Online)
+        .map(|p| p.node_id.clone())
+        .collect();
+    let refs: Vec<&str> = online_ids.iter().map(|s| s.as_str()).collect();
+    calculate_is_leader(&state.node_id, &refs, quorum)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn solo_node() {
+        assert_eq!(calculate_quorum_status(1, 1, None), QuorumStatus::Solo);
     }
 
-    for peer in state.peers.iter() {
-        if peer.status == PeerStatus::Online && peer.node_id < state.node_id {
-            return false;
-        }
+    #[test]
+    fn two_nodes_all_online() {
+        assert_eq!(calculate_quorum_status(2, 2, None), QuorumStatus::Active);
     }
-    true
+
+    #[test]
+    fn two_nodes_one_offline_no_witness() {
+        assert_eq!(calculate_quorum_status(2, 1, None), QuorumStatus::Fenced);
+    }
+
+    #[test]
+    fn two_nodes_one_offline_witness_allows() {
+        assert_eq!(calculate_quorum_status(2, 1, Some(true)), QuorumStatus::Degraded);
+    }
+
+    #[test]
+    fn two_nodes_one_offline_witness_denies() {
+        assert_eq!(calculate_quorum_status(2, 1, Some(false)), QuorumStatus::Fenced);
+    }
+
+    #[test]
+    fn three_nodes_all_online() {
+        assert_eq!(calculate_quorum_status(3, 3, None), QuorumStatus::Active);
+    }
+
+    #[test]
+    fn three_nodes_one_offline() {
+        assert_eq!(calculate_quorum_status(3, 2, None), QuorumStatus::Degraded);
+    }
+
+    #[test]
+    fn three_nodes_two_offline() {
+        assert_eq!(calculate_quorum_status(3, 1, None), QuorumStatus::Fenced);
+    }
+
+    #[test]
+    fn five_nodes_two_offline() {
+        assert_eq!(calculate_quorum_status(5, 3, None), QuorumStatus::Degraded);
+    }
+
+    #[test]
+    fn five_nodes_three_offline() {
+        assert_eq!(calculate_quorum_status(5, 2, None), QuorumStatus::Fenced);
+    }
+
+    #[test]
+    fn ten_nodes_four_offline() {
+        assert_eq!(calculate_quorum_status(10, 6, None), QuorumStatus::Degraded);
+    }
+
+    #[test]
+    fn leader_lowest_id() {
+        assert!(calculate_is_leader("aaa", &["bbb", "ccc"], QuorumStatus::Active));
+    }
+
+    #[test]
+    fn leader_not_lowest() {
+        assert!(!calculate_is_leader("ccc", &["aaa", "bbb"], QuorumStatus::Active));
+    }
+
+    #[test]
+    fn leader_fenced_never() {
+        assert!(!calculate_is_leader("aaa", &["bbb"], QuorumStatus::Fenced));
+    }
 }
