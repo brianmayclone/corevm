@@ -1,56 +1,21 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Boxes, Plus, Trash2, RefreshCw, Shield, Zap, WifiOff, HardDrive, Activity, Server, AlertTriangle, Check, Disc, RotateCcw, FolderOpen } from 'lucide-react'
-import type { CoreSanVolume, CoreSanBackend, CoreSanPeer, CoreSanStatus, CoreSanBenchmarkMatrix, Host, DiscoveredDisk } from '../api/types'
+import { Boxes, Plus, Trash2, RefreshCw, Shield, Zap, WifiOff, HardDrive, Activity, Server, AlertTriangle, Disc, FolderOpen } from 'lucide-react'
+import type { CoreSanVolume, CoreSanBackend, CoreSanPeer, CoreSanStatus, CoreSanBenchmarkMatrix, DiscoveredDisk } from '../api/types'
 import { useClusterStore } from '../stores/clusterStore'
-import api from '../api/client'
 import Card from '../components/Card'
 import SectionLabel from '../components/SectionLabel'
 import SpecRow from '../components/SpecRow'
 import Button from '../components/Button'
 import ProgressBar from '../components/ProgressBar'
-import Dialog from '../components/Dialog'
-import FormField from '../components/FormField'
-import TextInput from '../components/TextInput'
-import Select from '../components/Select'
 import ConfirmDialog from '../components/ConfirmDialog'
 import VolumeBrowser from '../components/VolumeBrowser'
 import { formatBytes } from '../utils/format'
-
-const fttLabels: Record<number, string> = {
-  0: 'FTT=0 (No Protection)',
-  1: 'FTT=1 (1 Failure)',
-  2: 'FTT=2 (2 Failures)',
-}
-
-const fttColors: Record<number, string> = {
-  0: 'bg-vmm-warning/20 text-vmm-warning border-vmm-warning/30',
-  1: 'bg-vmm-success/20 text-vmm-success border-vmm-success/30',
-  2: 'bg-vmm-accent/20 text-vmm-accent border-vmm-accent/30',
-}
-
-const raidLabels: Record<string, string> = {
-  stripe: 'Stripe (RAID-0)',
-  mirror: 'Mirror (RAID-1)',
-  stripe_mirror: 'Stripe+Mirror (RAID-10)',
-}
-
-const statusColors: Record<string, string> = {
-  online: 'bg-vmm-success/20 text-vmm-success border-vmm-success/30',
-  degraded: 'bg-vmm-warning/20 text-vmm-warning border-vmm-warning/30',
-  offline: 'bg-vmm-danger/20 text-vmm-danger border-vmm-danger/30',
-  creating: 'bg-vmm-accent/20 text-vmm-accent border-vmm-accent/30',
-  draining: 'bg-vmm-warning/20 text-vmm-warning border-vmm-warning/30',
-  connecting: 'bg-vmm-accent/20 text-vmm-accent border-vmm-accent/30',
-}
-
-function Badge({ label, color }: { label: string; color: string }) {
-  return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold border tracking-wider uppercase ${color}`}>
-      {label}
-    </span>
-  )
-}
+import { Badge, fttLabels, fttColors, raidLabels, statusColors } from '../components/coresan/constants'
+import CreateVolumeDialog from '../components/coresan/CreateVolumeDialog'
+import AddHostDialog from '../components/coresan/AddHostDialog'
+import ClaimDiskDialog from '../components/coresan/ClaimDiskDialog'
+import AutoClaimDialog from '../components/coresan/AutoClaimDialog'
 
 export default function StorageCoresan() {
   const navigate = useNavigate()
@@ -69,7 +34,6 @@ export default function StorageCoresan() {
 
   // Disk claim dialog
   const [claimDisk, setClaimDisk] = useState<DiscoveredDisk | null>(null)
-  const [claimVolumeId, setClaimVolumeId] = useState('')
   const [claimConfirm, setClaimConfirm] = useState(false)
   const [claimError, setClaimError] = useState('')
   const [resetDisk, setResetDisk] = useState<DiscoveredDisk | null>(null)
@@ -91,23 +55,18 @@ export default function StorageCoresan() {
   const [newVolName, setNewVolName] = useState('')
   const [newVolFtt, setNewVolFtt] = useState(1)
   const [newVolRaid, setNewVolRaid] = useState('stripe')
-  const [newVolBackendPath, setNewVolBackendPath] = useState('/vmm/san-data')
   const [newVolSelectedHosts, setNewVolSelectedHosts] = useState<string[]>([])
   const [newVolError, setNewVolError] = useState('')
 
   // Add host form
   const [addHostId, setAddHostId] = useState('')
-  const [addHostBackendPath, setAddHostBackendPath] = useState('/vmm/san-data')
   const [addHostError, setAddHostError] = useState('')
 
-  // In cluster mode, all SAN operations go through the cluster proxy (/api/san/*).
-  // In standalone mode, talk directly to the local vmm-san instance.
+  // SAN API helpers
   const localSanBase = `${window.location.protocol}//${window.location.hostname}:7443`
   const sanApi = (path: string) => isCluster ? `/api/san${path.replace(/^\/api/, '')}` : `${localSanBase}${path}`
-  // SAN-enabled hosts (for host selection in dialogs)
   const sanHosts = isCluster ? hosts.filter(h => h.san_enabled && h.san_address) : []
 
-  /** Fetch wrapper that adds JWT auth when going through the cluster proxy. */
   const sanFetch = (url: string, init?: RequestInit) => {
     if (isCluster) {
       const token = localStorage.getItem('vmm_token')
@@ -117,6 +76,8 @@ export default function StorageCoresan() {
     }
     return fetch(url, init)
   }
+
+  // ── Data fetching ────────────────────────────────────────────
 
   const refresh = async () => {
     if (isCluster) fetchHosts()
@@ -128,10 +89,8 @@ export default function StorageCoresan() {
       ])
       if (!sRes.ok) { setSanAvailable(false); setLoading(false); return }
       setSanAvailable(true)
-      // In cluster mode, /api/san/status returns an array of host statuses
       const statusData = await sRes.json()
       if (isCluster && Array.isArray(statusData)) {
-        // Use the first host's status as the "primary" status display
         setStatus(statusData[0] || null)
       } else {
         setStatus(statusData)
@@ -140,10 +99,7 @@ export default function StorageCoresan() {
       setVolumes(vols)
       setPeers(await pRes.json())
       if (vols.length > 0 && !selectedVolume) setSelectedVolume(vols[0].id)
-
-      // Disks: in cluster mode, /api/san/disks already aggregates from all hosts
       sanFetch(sanApi('/api/disks')).then(r => r.json()).then(setDisks).catch(() => setDisks([]))
-
       setLoading(false)
     } catch {
       setSanAvailable(false)
@@ -165,49 +121,31 @@ export default function StorageCoresan() {
       .then(r => r.json()).then(setBenchmarkMatrix).catch(() => {})
   }, [sanAvailable])
 
+  // ── Handlers ─────────────────────────────────────────────────
+
   const handleCreateVolume = async () => {
     setNewVolError('')
-
-    // Validate host selection
     const requiredHosts = newVolFtt + 1
-    const selectedCount = newVolSelectedHosts.length + 1 // +1 for local node
+    const selectedCount = newVolSelectedHosts.length + 1
     if (selectedCount < requiredHosts) {
       setNewVolError(`FTT=${newVolFtt} needs at least ${requiredHosts} hosts. Select ${requiredHosts - 1} more.`)
       return
     }
-
-    // 1. Create volume
     const resp = await sanFetch(sanApi('/api/volumes'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: newVolName,
-        ftt: newVolFtt,
-        local_raid: newVolRaid,
-      }),
+      body: JSON.stringify({ name: newVolName, ftt: newVolFtt, local_raid: newVolRaid }),
     })
-    if (!resp.ok) {
-      setNewVolError(await resp.text() || 'Failed to create volume')
-      return
-    }
+    if (!resp.ok) { setNewVolError(await resp.text() || 'Failed to create volume'); return }
     const volData = await resp.json()
-    const volumeId = volData.id
-
-    // Auto backend path: /vmm/san-data/<volume-name>
     const backendPath = `/vmm/san-data/${newVolName}`
-
-    // 2. Add backends on all selected hosts (cluster routes to correct host)
-    // In cluster mode, the first SAN host gets a backend automatically via the volume create.
-    // Add backends on additional selected hosts.
     for (const hostId of newVolSelectedHosts) {
-      await sanFetch(sanApi(`/api/volumes/${volumeId}/backends`), {
+      await sanFetch(sanApi(`/api/volumes/${volData.id}/backends`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ host_id: hostId, path: backendPath }),
       }).catch(() => {})
     }
-    // Peer registration is handled automatically by the cluster heartbeat engine.
-
     setCreateVolumeOpen(false)
     setNewVolName('')
     setNewVolSelectedHosts([])
@@ -218,24 +156,13 @@ export default function StorageCoresan() {
   const handleAddHost = async () => {
     setAddHostError('')
     if (!addHostId || !selectedVolume || !sel) return
-
-    const backendPath = `/vmm/san-data/${sel.name}`
-
     try {
-      // Add backend on the selected host — cluster routes to the correct SAN host.
-      // Peer registration is handled automatically by the cluster heartbeat engine.
-      const backendResp = await sanFetch(sanApi(`/api/volumes/${selectedVolume}/backends`), {
+      const resp = await sanFetch(sanApi(`/api/volumes/${selectedVolume}/backends`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ host_id: addHostId, path: backendPath }),
+        body: JSON.stringify({ host_id: addHostId, path: `/vmm/san-data/${sel.name}` }),
       })
-
-      if (!backendResp.ok) {
-        const text = await backendResp.text()
-        setAddHostError(`Failed to add backend: ${text}`)
-        return
-      }
-
+      if (!resp.ok) { setAddHostError(`Failed to add backend: ${await resp.text()}`); return }
       setAddHostOpen(false)
       setAddHostId('')
       refresh()
@@ -275,11 +202,9 @@ export default function StorageCoresan() {
     }, 3000)
   }
 
-  /** Unique key for a disk across hosts. */
   const diskKey = (d: DiscoveredDisk) => d._host_id ? `${d._host_id}:${d.path}` : d.path
 
   const openAutoClaim = () => {
-    // Pre-select all empty (available) disks, leave has_data unchecked
     const claimable = disks.filter(d => d.status === 'available' || d.status === 'has_data')
     const preSelected = new Set(claimable.filter(d => d.status === 'available').map(diskKey))
     setAutoClaimSelected(preSelected)
@@ -291,38 +216,26 @@ export default function StorageCoresan() {
     if (autoClaimSelected.size === 0) return
     setAutoClaimRunning(true)
     setAutoClaimError('')
-
     const keys = Array.from(autoClaimSelected)
-    let ok = 0
-    let fail = 0
-
+    let ok = 0, fail = 0
     for (const key of keys) {
       const disk = disks.find(d => diskKey(d) === key)
       if (!disk) { fail++; continue }
       const resp = await sanFetch(sanApi('/api/disks/claim'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          host_id: disk._host_id || '',
-          device_path: disk.path,
-          confirm_format: true,
-        }),
+        body: JSON.stringify({ host_id: disk._host_id || '', device_path: disk.path, confirm_format: true }),
       })
       if (resp.ok) { ok++ } else { fail++ }
     }
-
     setAutoClaimRunning(false)
-    if (fail > 0) {
-      setAutoClaimError(`${ok} claimed, ${fail} failed`)
-    } else {
-      setAutoClaimOpen(false)
-    }
+    if (fail > 0) { setAutoClaimError(`${ok} claimed, ${fail} failed`) } else { setAutoClaimOpen(false) }
     refresh()
   }
 
   const handleClaimDisk = async () => {
     setClaimError('')
-    if (!claimDisk || !claimVolumeId) return
+    if (!claimDisk) return
     const resp = await sanFetch(sanApi('/api/disks/claim'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -332,10 +245,7 @@ export default function StorageCoresan() {
         confirm_format: claimConfirm || claimDisk.status === 'available',
       }),
     })
-    if (!resp.ok) {
-      setClaimError(await resp.text() || 'Claim failed')
-      return
-    }
+    if (!resp.ok) { setClaimError(await resp.text() || 'Claim failed'); return }
     setClaimDisk(null)
     setClaimConfirm(false)
     refresh()
@@ -348,9 +258,7 @@ export default function StorageCoresan() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ host_id: resetDisk._host_id || '', device_path: resetDisk.path }),
     })
-    if (!resp.ok) {
-      alert(await resp.text() || 'Reset failed')
-    }
+    if (!resp.ok) alert(await resp.text() || 'Reset failed')
     setResetDisk(null)
     refresh()
   }
@@ -365,22 +273,19 @@ export default function StorageCoresan() {
     refresh()
   }
 
-  const sel = volumes.find(v => v.id === selectedVolume)
+  // ── Derived state ────────────────────────────────────────────
 
-  // Group backends by node
+  const sel = volumes.find(v => v.id === selectedVolume)
   const backendsByNode = backends.reduce<Record<string, CoreSanBackend[]>>((acc, b) => {
-    const key = b.node_id
-    if (!acc[key]) acc[key] = []
-    acc[key].push(b)
+    if (!acc[b.node_id]) acc[b.node_id] = []
+    acc[b.node_id].push(b)
     return acc
   }, {})
-
-  // Total node count = 1 (self) + peers
   const totalNodes = 1 + peers.length
   const onlineNodes = 1 + peers.filter(p => p.status === 'online').length
-
-  // Cluster hosts without CoreSAN (available to add)
   const availableHosts = hosts.filter(h => h.status === 'online' && !h.san_enabled)
+
+  // ── Render ───────────────────────────────────────────────────
 
   if (loading) {
     return <div className="p-6 text-vmm-text-dim">Loading CoreSAN status...</div>
@@ -452,16 +357,12 @@ export default function StorageCoresan() {
         <Card>
           <div className="text-xs text-vmm-text-muted mb-1">Volumes</div>
           <div className="text-xl font-bold text-vmm-text">{volumes.length}</div>
-          <div className="text-xs text-vmm-text-muted mt-1">
-            {volumes.filter(v => v.status === 'online').length} online
-          </div>
+          <div className="text-xs text-vmm-text-muted mt-1">{volumes.filter(v => v.status === 'online').length} online</div>
         </Card>
         <Card>
           <div className="text-xs text-vmm-text-muted mb-1">Nodes</div>
           <div className="text-xl font-bold text-vmm-text">{totalNodes}</div>
-          <div className="text-xs text-vmm-text-muted mt-1">
-            {onlineNodes} online
-          </div>
+          <div className="text-xs text-vmm-text-muted mt-1">{onlineNodes} online</div>
         </Card>
         <Card>
           <div className="text-xs text-vmm-text-muted mb-1">This Node</div>
@@ -513,7 +414,7 @@ export default function StorageCoresan() {
                     </td>
                     <td className="py-2 px-2 text-right">
                       {(d.status === 'available' || d.status === 'has_data') && volumes.length > 0 && (
-                        <button onClick={() => { setClaimDisk(d); setClaimVolumeId(volumes[0]?.id || ''); setClaimConfirm(d.status === 'available'); setClaimError('') }}
+                        <button onClick={() => { setClaimDisk(d); setClaimConfirm(d.status === 'available'); setClaimError('') }}
                           className="px-2 py-1 text-[10px] font-bold text-vmm-accent hover:bg-vmm-accent/10 rounded transition-colors cursor-pointer">
                           CLAIM
                         </button>
@@ -550,7 +451,6 @@ export default function StorageCoresan() {
           )}
         </div>
         <div className="space-y-2">
-          {/* This node */}
           <div className="flex items-center gap-3 p-3 rounded-lg bg-vmm-bg/50 border border-vmm-border">
             <Server size={16} className="text-vmm-success shrink-0" />
             <div className="flex-1">
@@ -565,7 +465,6 @@ export default function StorageCoresan() {
               {backendsByNode[status?.node_id || '']?.length || 0} backend{(backendsByNode[status?.node_id || '']?.length || 0) !== 1 ? 's' : ''}
             </span>
           </div>
-          {/* Peers */}
           {peers.map(p => (
             <div key={p.node_id} className="flex items-center gap-3 p-3 rounded-lg bg-vmm-bg/50 border border-vmm-border">
               <Server size={16} className={p.status === 'online' ? 'text-vmm-success' : 'text-vmm-danger'} />
@@ -580,9 +479,7 @@ export default function StorageCoresan() {
                 {backendsByNode[p.node_id]?.length || 0} backend{(backendsByNode[p.node_id]?.length || 0) !== 1 ? 's' : ''}
               </span>
               {p.last_heartbeat && (
-                <span className="text-xs text-vmm-text-muted">
-                  {new Date(p.last_heartbeat).toLocaleTimeString()}
-                </span>
+                <span className="text-xs text-vmm-text-muted">{new Date(p.last_heartbeat).toLocaleTimeString()}</span>
               )}
             </div>
           ))}
@@ -615,9 +512,7 @@ export default function StorageCoresan() {
         <div className="space-y-3">
           <SectionLabel>Volumes</SectionLabel>
           {volumes.length === 0 ? (
-            <Card>
-              <p className="text-sm text-vmm-text-dim text-center py-4">No volumes yet</p>
-            </Card>
+            <Card><p className="text-sm text-vmm-text-dim text-center py-4">No volumes yet</p></Card>
           ) : volumes.map(vol => {
             const volUsed = vol.total_bytes - vol.free_bytes
             const volPct = vol.total_bytes > 0 ? (volUsed / vol.total_bytes) * 100 : 0
@@ -658,7 +553,6 @@ export default function StorageCoresan() {
         <div className="lg:col-span-2 space-y-4">
           {sel ? (
             <>
-              {/* Volume Info */}
               <Card>
                 <div className="flex items-center justify-between mb-4">
                   <SectionLabel>{`Volume: ${sel.name}`}</SectionLabel>
@@ -671,8 +565,6 @@ export default function StorageCoresan() {
                     </Button>
                   </div>
                 </div>
-
-                {/* Warning for mirror volumes without enough nodes/backends */}
                 {sel.ftt > 0 && totalNodes < (sel.ftt + 1) && (
                   <div className="flex items-center gap-2 p-3 mb-4 rounded-lg bg-vmm-warning/10 border border-vmm-warning/30 text-sm text-vmm-warning">
                     <AlertTriangle size={16} />
@@ -680,7 +572,6 @@ export default function StorageCoresan() {
                     {isCluster ? ' Add more cluster hosts to CoreSAN.' : ' Add more peers.'}
                   </div>
                 )}
-
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                   <SpecRow label="FTT" value={fttLabels[sel.ftt] || `FTT=${sel.ftt}`} icon={<Shield size={14} />} />
                   <SpecRow label="Local RAID" value={raidLabels[sel.local_raid] || sel.local_raid} />
@@ -701,13 +592,9 @@ export default function StorageCoresan() {
                 </div>
                 {backends.length === 0 ? (
                   <div className="text-center py-6">
-                    <p className="text-sm text-vmm-text-dim">
-                      No backends configured.
-                    </p>
+                    <p className="text-sm text-vmm-text-dim">No backends configured.</p>
                     <p className="text-xs text-vmm-text-muted mt-1">
-                      {isCluster
-                        ? 'Add cluster hosts to contribute storage to this volume.'
-                        : 'Add a local mountpoint to provide storage.'}
+                      {isCluster ? 'Add cluster hosts to contribute storage to this volume.' : 'Add a local mountpoint to provide storage.'}
                     </p>
                   </div>
                 ) : (
@@ -753,9 +640,7 @@ export default function StorageCoresan() {
             </>
           ) : (
             <Card>
-              <p className="text-sm text-vmm-text-dim text-center py-8">
-                Select a volume to view its details, or create a new one.
-              </p>
+              <p className="text-sm text-vmm-text-dim text-center py-8">Select a volume to view its details, or create a new one.</p>
             </Card>
           )}
 
@@ -801,124 +686,40 @@ export default function StorageCoresan() {
         </div>
       </div>
 
-      {/* Create Volume Dialog */}
-      <Dialog open={createVolumeOpen} title="Create Volume" onClose={() => { setCreateVolumeOpen(false); setNewVolError('') }} width="max-w-xl">
-        <div className="space-y-4">
-          {newVolError && (
-            <div className="bg-vmm-danger/10 border border-vmm-danger/30 text-vmm-danger rounded-lg p-3 text-sm">
-              {newVolError}
-            </div>
-          )}
-          <FormField label="Volume Name">
-            <TextInput value={newVolName} onChange={(e) => setNewVolName(e.target.value)} placeholder="e.g. pool-a" />
-          </FormField>
-          <FormField label="Failures To Tolerate (FTT)">
-            <Select value={String(newVolFtt)} onChange={(e) => setNewVolFtt(Number(e.target.value))} options={[
-              { value: '0', label: 'FTT=0 — No protection (data on 1 host only)' },
-              { value: '1', label: 'FTT=1 — Tolerates 1 host failure (2 copies)' },
-              { value: '2', label: 'FTT=2 — Tolerates 2 host failures (3 copies)' },
-            ]} />
-          </FormField>
-          <FormField label="Local RAID (per host)">
-            <Select value={newVolRaid} onChange={(e) => setNewVolRaid(e.target.value)} options={[
-              { value: 'stripe', label: 'Stripe (RAID-0) — chunks distributed across local disks' },
-              { value: 'mirror', label: 'Mirror (RAID-1) — every chunk on every local disk' },
-              { value: 'stripe_mirror', label: 'Stripe+Mirror (RAID-10) — striped with local mirror' },
-            ]} />
-          </FormField>
+      {/* ── Dialogs ───────────────────────────────────────────── */}
 
-          {/* Host Selection */}
-          <div>
-            <label className="block text-[11px] font-semibold tracking-widest text-vmm-text-muted uppercase mb-2">
-              Hosts ({1 + newVolSelectedHosts.length} selected — {newVolFtt + 1} required for FTT={newVolFtt})
-            </label>
+      <CreateVolumeDialog
+        open={createVolumeOpen}
+        onClose={() => { setCreateVolumeOpen(false); setNewVolError('') }}
+        onSubmit={handleCreateVolume}
+        status={status}
+        sanHosts={sanHosts}
+        availableHosts={availableHosts}
+        newVolName={newVolName} setNewVolName={setNewVolName}
+        newVolFtt={newVolFtt} setNewVolFtt={setNewVolFtt}
+        newVolRaid={newVolRaid} setNewVolRaid={setNewVolRaid}
+        newVolSelectedHosts={newVolSelectedHosts} setNewVolSelectedHosts={setNewVolSelectedHosts}
+        newVolError={newVolError}
+      />
 
-            {/* This node (always included) */}
-            <div className="space-y-1.5">
-              <div className="flex items-center gap-3 p-2.5 rounded-lg bg-vmm-accent/5 border border-vmm-accent/30">
-                <input type="checkbox" checked disabled className="accent-vmm-accent" />
-                <Server size={14} className="text-vmm-success" />
-                <span className="text-sm text-vmm-text">{status?.hostname}</span>
-                <span className="text-[10px] text-vmm-text-muted">(this node — always included)</span>
-              </div>
+      <AddHostDialog
+        open={addHostOpen}
+        onClose={() => { setAddHostOpen(false); setAddHostError('') }}
+        onSubmit={handleAddHost}
+        availableHosts={availableHosts}
+        selectedVolume={sel}
+        addHostId={addHostId} setAddHostId={setAddHostId}
+        addHostError={addHostError}
+      />
 
-              {/* Other cluster hosts with CoreSAN */}
-              {sanHosts.filter(h => h.san_node_id && h.san_node_id !== status?.node_id).map(h => {
-                const checked = newVolSelectedHosts.includes(h.id)
-                return (
-                  <label key={h.id} className={`flex items-center gap-3 p-2.5 rounded-lg border cursor-pointer transition-colors
-                    ${checked ? 'bg-vmm-accent/5 border-vmm-accent/30' : 'border-vmm-border hover:border-vmm-accent/20'}`}>
-                    <input type="checkbox" checked={checked} onChange={() => {
-                      setNewVolSelectedHosts(prev => checked ? prev.filter(id => id !== h.id) : [...prev, h.id])
-                    }} className="accent-vmm-accent" />
-                    <Server size={14} className={h.status === 'online' ? 'text-vmm-success' : 'text-vmm-text-muted'} />
-                    <span className="text-sm text-vmm-text">{h.hostname}</span>
-                    <span className="text-[10px] text-vmm-text-muted">{h.address}</span>
-                  </label>
-                )
-              })}
+      <ClaimDiskDialog
+        disk={claimDisk}
+        onClose={() => { setClaimDisk(null); setClaimError('') }}
+        onSubmit={handleClaimDisk}
+        claimConfirm={claimConfirm} setClaimConfirm={setClaimConfirm}
+        claimError={claimError}
+      />
 
-              {/* Cluster hosts without CoreSAN */}
-              {availableHosts.length > 0 && (
-                <p className="text-[10px] text-vmm-text-muted pt-1">
-                  {availableHosts.length} host{availableHosts.length !== 1 ? 's' : ''} without CoreSAN not shown.
-                  Enable CoreSAN on them first.
-                </p>
-              )}
-
-              {newVolFtt > 0 && (1 + newVolSelectedHosts.length) < (newVolFtt + 1) && (
-                <div className="flex items-center gap-2 p-2.5 rounded-lg bg-vmm-warning/10 border border-vmm-warning/30 text-xs text-vmm-warning">
-                  <AlertTriangle size={14} />
-                  FTT={newVolFtt} requires {newVolFtt + 1} hosts. Select {newVolFtt - newVolSelectedHosts.length} more.
-                </div>
-              )}
-            </div>
-          </div>
-
-          <p className="text-[10px] text-vmm-text-muted">
-            Storage will be automatically provisioned at <code className="text-vmm-accent">/vmm/san-data/{newVolName || '<name>'}</code> on each host.
-          </p>
-
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="ghost" onClick={() => { setCreateVolumeOpen(false); setNewVolError('') }}>Cancel</Button>
-            <Button variant="primary" onClick={handleCreateVolume}
-              disabled={!newVolName.trim() || (newVolFtt > 0 && (1 + newVolSelectedHosts.length) < (newVolFtt + 1))}>
-              Create Volume
-            </Button>
-          </div>
-        </div>
-      </Dialog>
-
-      {/* Add Host to CoreSAN Dialog */}
-      <Dialog open={addHostOpen} title="Add Host to CoreSAN" onClose={() => { setAddHostOpen(false); setAddHostError('') }}>
-        <div className="space-y-4">
-          <p className="text-sm text-vmm-text-dim">
-            Select a cluster host to add to this volume. Storage will be provisioned automatically.
-          </p>
-          {addHostError && (
-            <div className="bg-vmm-danger/10 border border-vmm-danger/30 text-vmm-danger rounded-lg p-3 text-sm">
-              {addHostError}
-            </div>
-          )}
-          <FormField label="Host">
-            <Select value={addHostId} onChange={(e) => setAddHostId(e.target.value)}
-              options={availableHosts.map(h => ({ value: h.id, label: `${h.hostname} (${h.address})` }))} />
-          </FormField>
-          {sel && (
-            <p className="text-[10px] text-vmm-text-muted">
-              Backend will be created at <code className="text-vmm-accent">/vmm/san-data/{sel.name}</code> on the selected host.
-            </p>
-          )}
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="ghost" onClick={() => { setAddHostOpen(false); setAddHostError('') }}>Cancel</Button>
-            <Button variant="primary" onClick={handleAddHost} disabled={!addHostId}>
-              Add Host
-            </Button>
-          </div>
-        </div>
-      </Dialog>
-
-      {/* Delete Volume Confirm */}
       <ConfirmDialog
         open={!!deleteVolume}
         title="Delete Volume"
@@ -929,7 +730,6 @@ export default function StorageCoresan() {
         onCancel={() => setDeleteVolume(null)}
       />
 
-      {/* Delete Backend Confirm */}
       <ConfirmDialog
         open={!!deleteBackend}
         title="Remove Backend"
@@ -940,48 +740,6 @@ export default function StorageCoresan() {
         onCancel={() => setDeleteBackend(null)}
       />
 
-      {/* Claim Disk Dialog */}
-      <Dialog open={!!claimDisk} title="Claim Disk" onClose={() => { setClaimDisk(null); setClaimError('') }}>
-        {claimDisk && (
-          <div className="space-y-4">
-            <div className="flex items-center gap-3 p-3 rounded-lg bg-vmm-bg/50 border border-vmm-border">
-              <Disc size={20} className="text-vmm-accent" />
-              <div>
-                <div className="text-sm font-bold text-vmm-text">{claimDisk.path}</div>
-                <div className="text-xs text-vmm-text-muted">{formatBytes(claimDisk.size_bytes)} — {claimDisk.model || 'Unknown model'}</div>
-              </div>
-            </div>
-
-            {claimDisk.status === 'has_data' && (
-              <div className="flex items-center gap-2 p-3 rounded-lg bg-vmm-danger/10 border border-vmm-danger/30 text-sm text-vmm-danger">
-                <AlertTriangle size={16} />
-                This disk has existing data ({claimDisk.fs_type || 'unknown'}). It will be wiped and reformatted. All data will be lost!
-              </div>
-            )}
-
-            {claimError && (
-              <div className="bg-vmm-danger/10 border border-vmm-danger/30 text-vmm-danger rounded-lg p-3 text-sm">{claimError}</div>
-            )}
-
-            {claimDisk.status === 'has_data' && (
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" checked={claimConfirm} onChange={e => setClaimConfirm(e.target.checked)} className="accent-vmm-danger" />
-                <span className="text-sm text-vmm-text">I confirm all data on this disk will be destroyed</span>
-              </label>
-            )}
-
-            <div className="flex justify-end gap-2 pt-2">
-              <Button variant="ghost" onClick={() => { setClaimDisk(null); setClaimError('') }}>Cancel</Button>
-              <Button variant="primary" onClick={handleClaimDisk}
-                disabled={!claimVolumeId || (claimDisk.status === 'has_data' && !claimConfirm)}>
-                Claim & Format Disk
-              </Button>
-            </div>
-          </div>
-        )}
-      </Dialog>
-
-      {/* Reset Disk Confirm */}
       <ConfirmDialog
         open={!!resetDisk}
         title="Reset Disk"
@@ -992,7 +750,6 @@ export default function StorageCoresan() {
         onCancel={() => setResetDisk(null)}
       />
 
-      {/* Volume Browser */}
       <VolumeBrowser
         open={!!browseVolume}
         onClose={() => setBrowseVolume(null)}
@@ -1002,124 +759,17 @@ export default function StorageCoresan() {
         sanFetch={sanFetch}
       />
 
-      {/* Auto-Claim Dialog */}
-      <Dialog open={autoClaimOpen} title="Auto-Claim Disks" onClose={() => setAutoClaimOpen(false)} width="max-w-4xl">
-        <div className="space-y-4">
-          <p className="text-sm text-vmm-text-dim">
-            Select disks to claim for CoreSAN. Empty disks are pre-selected.
-            Disks with existing data must be explicitly selected (they will be formatted).
-            OS disks cannot be selected.
-          </p>
-
-          {autoClaimError && (
-            <div className="bg-vmm-danger/10 border border-vmm-danger/30 text-vmm-danger rounded-lg p-3 text-sm">{autoClaimError}</div>
-          )}
-
-          {/* Disks grouped by host */}
-          <div className="space-y-4 max-h-[50vh] overflow-y-auto">
-            {/* Group disks by host */}
-            {(() => {
-              const unclaimedDisks = disks.filter(d => d.status !== 'claimed')
-              const groups: Record<string, { label: string; disks: DiscoveredDisk[] }> = {}
-              for (const d of unclaimedDisks) {
-                const groupKey = d._host_id || '__local__'
-                if (!groups[groupKey]) {
-                  groups[groupKey] = {
-                    label: d._host_name || status?.hostname || 'This node',
-                    disks: [],
-                  }
-                }
-                groups[groupKey].disks.push(d)
-              }
-              return Object.entries(groups).map(([groupKey, group]) => (
-                <div key={groupKey}>
-                  <div className="flex items-center gap-2 mb-2">
-                    <Server size={14} className="text-vmm-success" />
-                    <span className="text-xs font-bold text-vmm-text uppercase tracking-wider">{group.label}</span>
-                    {groupKey === '__local__' && <span className="text-[10px] text-vmm-text-muted">(this node)</span>}
-                  </div>
-                  <div className="space-y-1.5 ml-5">
-                    {group.disks.map(d => {
-                      const key = diskKey(d)
-                      const isOsDisk = d.status === 'os_disk' || d.status === 'in_use'
-                      const hasData = d.status === 'has_data'
-                      const checked = autoClaimSelected.has(key)
-                      return (
-                        <label key={key} className={`flex items-center gap-3 p-3 rounded-lg border transition-colors
-                          ${isOsDisk ? 'opacity-40 cursor-not-allowed border-vmm-border' :
-                            checked ? 'bg-vmm-accent/5 border-vmm-accent/30 cursor-pointer' :
-                            'border-vmm-border hover:border-vmm-accent/20 cursor-pointer'}`}>
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            disabled={isOsDisk}
-                            onChange={() => {
-                              setAutoClaimSelected(prev => {
-                                const next = new Set(prev)
-                                if (next.has(key)) next.delete(key)
-                                else next.add(key)
-                                return next
-                              })
-                            }}
-                            className="accent-vmm-accent"
-                          />
-                          <Disc size={16} className={isOsDisk ? 'text-vmm-danger' : checked ? 'text-vmm-accent' : 'text-vmm-text-muted'} />
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2">
-                              <span className="text-sm font-mono font-medium text-vmm-text">{d.path}</span>
-                              <span className="text-xs text-vmm-text-dim">{formatBytes(d.size_bytes)}</span>
-                              {d.model && <span className="text-xs text-vmm-text-muted">{d.model}</span>}
-                            </div>
-                          </div>
-                          <div className="shrink-0">
-                            {isOsDisk && (
-                              <Badge label="OS DISK" color="bg-vmm-danger/20 text-vmm-danger border-vmm-danger/30" />
-                            )}
-                            {d.status === 'in_use' && (
-                              <Badge label="IN USE" color={statusColors.offline} />
-                            )}
-                            {d.status === 'available' && (
-                              <Badge label="EMPTY" color={statusColors.online} />
-                            )}
-                            {hasData && (
-                              <Badge label={`HAS DATA (${d.fs_type || '?'})`} color={statusColors.degraded} />
-                            )}
-                          </div>
-                        </label>
-                      )
-                    })}
-                    {group.disks.length === 0 && (
-                      <p className="text-xs text-vmm-text-muted py-2">No unclaimed disks on this node.</p>
-                    )}
-                  </div>
-                </div>
-              ))
-            })()}
-          </div>
-
-          {autoClaimSelected.size > 0 && disks.some(d => autoClaimSelected.has(diskKey(d)) && d.status === 'has_data') && (
-            <div className="flex items-center gap-2 p-3 rounded-lg bg-vmm-warning/10 border border-vmm-warning/30 text-xs text-vmm-warning">
-              <AlertTriangle size={14} />
-              {disks.filter(d => autoClaimSelected.has(diskKey(d)) && d.status === 'has_data').length} disk(s)
-              with existing data selected. They will be wiped and formatted!
-            </div>
-          )}
-
-          <div className="flex items-center justify-between pt-2 border-t border-vmm-border">
-            <span className="text-sm text-vmm-text-dim">
-              {autoClaimSelected.size} disk{autoClaimSelected.size !== 1 ? 's' : ''} selected
-              ({formatBytes(disks.filter(d => autoClaimSelected.has(diskKey(d))).reduce((s, d) => s + d.size_bytes, 0))} total)
-            </span>
-            <div className="flex items-center gap-2">
-              <Button variant="ghost" onClick={() => setAutoClaimOpen(false)}>Cancel</Button>
-              <Button variant="primary" onClick={handleAutoClaim}
-                disabled={autoClaimSelected.size === 0 || autoClaimRunning}>
-                {autoClaimRunning ? 'Claiming...' : `Claim ${autoClaimSelected.size} Disk${autoClaimSelected.size !== 1 ? 's' : ''}`}
-              </Button>
-            </div>
-          </div>
-        </div>
-      </Dialog>
+      <AutoClaimDialog
+        open={autoClaimOpen}
+        onClose={() => setAutoClaimOpen(false)}
+        onSubmit={handleAutoClaim}
+        disks={disks}
+        diskKey={diskKey}
+        status={status}
+        autoClaimSelected={autoClaimSelected} setAutoClaimSelected={setAutoClaimSelected}
+        autoClaimRunning={autoClaimRunning}
+        autoClaimError={autoClaimError}
+      />
     </div>
   )
 }
