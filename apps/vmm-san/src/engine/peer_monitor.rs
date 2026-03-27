@@ -39,8 +39,18 @@ pub fn calculate_is_leader(
     our_node_id: &str,
     online_peer_ids: &[&str],
     quorum: QuorumStatus,
+    total_peers: usize,
 ) -> bool {
     if quorum == QuorumStatus::Fenced {
+        return false;
+    }
+    // Solo node is always leader
+    if quorum == QuorumStatus::Solo {
+        return true;
+    }
+    // If we know about peers but none are online yet, don't claim leadership
+    // (avoids split-brain during startup when all nodes think they're alone)
+    if total_peers > 0 && online_peer_ids.is_empty() {
         return false;
     }
     online_peer_ids.iter().all(|peer_id| *peer_id >= our_node_id)
@@ -225,12 +235,13 @@ async fn compute_quorum(state: &CoreSanState) -> QuorumStatus {
 
 /// Determine if this node is the leader (lowest node_id among Active/Degraded nodes).
 fn compute_is_leader(state: &CoreSanState, quorum: QuorumStatus) -> bool {
+    let total_peers = state.peers.len();
     let online_ids: Vec<String> = state.peers.iter()
         .filter(|p| p.status == PeerStatus::Online)
         .map(|p| p.node_id.clone())
         .collect();
     let refs: Vec<&str> = online_ids.iter().map(|s| s.as_str()).collect();
-    calculate_is_leader(&state.node_id, &refs, quorum)
+    calculate_is_leader(&state.node_id, &refs, quorum, total_peers)
 }
 
 #[cfg(test)]
@@ -294,16 +305,27 @@ mod tests {
 
     #[test]
     fn leader_lowest_id() {
-        assert!(calculate_is_leader("aaa", &["bbb", "ccc"], QuorumStatus::Active));
+        assert!(calculate_is_leader("aaa", &["bbb", "ccc"], QuorumStatus::Active, 2));
     }
 
     #[test]
     fn leader_not_lowest() {
-        assert!(!calculate_is_leader("ccc", &["aaa", "bbb"], QuorumStatus::Active));
+        assert!(!calculate_is_leader("ccc", &["aaa", "bbb"], QuorumStatus::Active, 2));
     }
 
     #[test]
     fn leader_fenced_never() {
-        assert!(!calculate_is_leader("aaa", &["bbb"], QuorumStatus::Fenced));
+        assert!(!calculate_is_leader("aaa", &["bbb"], QuorumStatus::Fenced, 1));
+    }
+
+    #[test]
+    fn leader_solo_always() {
+        assert!(calculate_is_leader("aaa", &[], QuorumStatus::Solo, 0));
+    }
+
+    #[test]
+    fn leader_no_online_peers_not_leader() {
+        // If we have peers but none are online, don't claim leadership
+        assert!(!calculate_is_leader("aaa", &[], QuorumStatus::Degraded, 2));
     }
 }

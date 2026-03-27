@@ -163,22 +163,32 @@ impl TestContext {
     pub async fn write_file(&self, index: usize, vol: &str, path: &str, content: &[u8]) -> Result<u16, String> {
         let node = &self.nodes[index - 1];
         let url = format!("{}/api/volumes/{}/files/{}", node.address(), vol, path);
+        tracing::debug!("Writing file: PUT {} ({} bytes)", url, content.len());
         let resp = self.http.put(&url)
             .body(content.to_vec())
             .send().await
             .map_err(|e| format!("write to node {}: {}", index, e))?;
-        Ok(resp.status().as_u16())
+        let status = resp.status().as_u16();
+        if status >= 400 {
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!("Write failed: HTTP {} — {}", status, body);
+        } else {
+            tracing::debug!("Write OK: HTTP {}", status);
+        }
+        Ok(status)
     }
 
     pub async fn read_file(&self, index: usize, vol: &str, path: &str) -> Result<(u16, Vec<u8>), String> {
         let node = &self.nodes[index - 1];
         let url = format!("{}/api/volumes/{}/files/{}", node.address(), vol, path);
+        tracing::debug!("Reading file: GET {}", url);
         let resp = self.http.get(&url)
             .send().await
             .map_err(|e| format!("read from node {}: {}", index, e))?;
         let status = resp.status().as_u16();
         let body = resp.bytes().await
             .map_err(|e| format!("read body from node {}: {}", index, e))?;
+        tracing::debug!("Read result: HTTP {} ({} bytes)", status, body.len());
         Ok((status, body.to_vec()))
     }
 

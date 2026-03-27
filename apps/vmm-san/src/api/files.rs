@@ -108,9 +108,9 @@ pub async fn write(
         let db = state.db.lock().unwrap();
         db.query_row(
             "SELECT id, path FROM backends
-             WHERE volume_id = ?1 AND node_id = ?2 AND status = 'online'
+             WHERE node_id = ?1 AND status = 'online'
              ORDER BY free_bytes DESC LIMIT 1",
-            rusqlite::params![&volume_id, &state.node_id],
+            rusqlite::params![&state.node_id],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         ).map_err(|_| (StatusCode::NOT_FOUND,
             "No local backend available for this volume".into()))?
