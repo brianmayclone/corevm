@@ -40,13 +40,40 @@ async fn main() {
         });
 
     // ── Initialize logging ──────────────────────────────────────────
-    let log_filter = config.logging.level.clone();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&log_filter))
-        )
-        .init();
+    {
+        use tracing_subscriber::prelude::*;
+        use tracing_subscriber::fmt;
+        use tracing_subscriber::EnvFilter;
+
+        let env_filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new(&config.logging.level));
+
+        if let Some(ref log_path) = config.logging.log_file {
+            if let Some(parent) = log_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let file = std::fs::OpenOptions::new()
+                .create(true).append(true)
+                .open(log_path)
+                .unwrap_or_else(|e| {
+                    eprintln!("Cannot open log file {}: {}", log_path.display(), e);
+                    std::process::exit(1);
+                });
+            let file_layer = fmt::layer()
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file));
+            let stdout_layer = fmt::layer();
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(file_layer)
+                .with(stdout_layer)
+                .init();
+        } else {
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .init();
+        }
+    }
 
     tracing::info!("CoreSAN v{} ({}) built {}",
         env!("CARGO_PKG_VERSION"), env!("COREVM_GIT_SHA"), env!("COREVM_BUILD_TIMESTAMP"));

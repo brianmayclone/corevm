@@ -848,3 +848,101 @@ fn get_cpu_model() -> String {
     }
     "Unknown CPU".to_string()
 }
+
+// ── Log retrieval ────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct LogQuery {
+    pub service: Option<String>,
+    pub lines: Option<usize>,
+}
+
+#[derive(serde::Serialize)]
+pub struct ServiceLogEntry {
+    pub service: String,
+    pub lines: Vec<String>,
+    pub log_file: String,
+    pub available: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct HostLogsResponse {
+    pub hostname: String,
+    pub services: Vec<ServiceLogEntry>,
+}
+
+/// GET /agent/logs — return log file contents for requested services.
+///
+/// Query params:
+///   service  — comma-separated list (vmm-server,vmm-san,vmm-cluster) or omit for all
+///   lines    — number of tail lines (default 200)
+pub async fn logs(
+    State(state): State<Arc<AppState>>,
+    _agent: AgentAuth,
+    axum::extract::Query(q): axum::extract::Query<LogQuery>,
+) -> Result<Json<HostLogsResponse>, AppError> {
+    let hostname = gethostname::gethostname().to_string_lossy().to_string();
+    let tail = q.lines.unwrap_or(200);
+
+    let requested: Vec<&str> = match &q.service {
+        Some(s) => s.split(',').map(|s| s.trim()).collect(),
+        None => vec!["vmm-server", "vmm-san", "vmm-cluster"],
+    };
+
+    // Standard log file locations (match what the installer/build-iso configures)
+    let log_paths: &[(&str, &[&str])] = &[
+        ("vmm-server", &["/var/log/vmm/vmm-server.log", "/var/log/vmm-server.log"]),
+        ("vmm-san",    &["/var/log/vmm/vmm-san.log", "/var/log/vmm-san.log"]),
+        ("vmm-cluster",&["/var/log/vmm/vmm-cluster.log", "/var/log/vmm-cluster.log"]),
+    ];
+
+    let mut services = Vec::new();
+
+    for (name, paths) in log_paths {
+        if !requested.contains(name) {
+            continue;
+        }
+
+        // Also check configured path for vmm-server
+        let extra_path: Option<String> = if *name == "vmm-server" {
+            state.config.logging.log_file.as_ref().map(|p| p.to_string_lossy().to_string())
+        } else {
+            None
+        };
+
+        let found = extra_path.as_deref()
+            .into_iter()
+            .chain(paths.iter().copied())
+            .find(|p| std::path::Path::new(p).exists());
+
+        if let Some(path) = found {
+            let lines = read_tail_lines(path, tail);
+            services.push(ServiceLogEntry {
+                service: name.to_string(),
+                lines,
+                log_file: path.to_string(),
+                available: true,
+            });
+        } else {
+            services.push(ServiceLogEntry {
+                service: name.to_string(),
+                lines: vec![],
+                log_file: paths[0].to_string(),
+                available: false,
+            });
+        }
+    }
+
+    Ok(Json(HostLogsResponse { hostname, services }))
+}
+
+fn read_tail_lines(path: &str, n: usize) -> Vec<String> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => {
+            let all: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+            let skip = all.len().saturating_sub(n);
+            all.into_iter().skip(skip).collect()
+        }
+        Err(_) => vec![],
+    }
+}

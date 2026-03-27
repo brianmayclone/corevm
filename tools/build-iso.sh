@@ -337,10 +337,12 @@ repair_interval_secs = 60
 
 [logging]
 level = "info"
+log_file = "/var/log/vmm/vmm-san.log"
 SAN_CONF
 
-# Create CoreSAN data directories
+# Create CoreSAN data directories and log directory
 mkdir -p "$ROOTFS_DIR/var/lib/vmm-san"
+mkdir -p "$ROOTFS_DIR/var/log/vmm"
 mkdir -p "$ROOTFS_DIR/vmm/san"
 
 # Open UDP discovery port in firewall

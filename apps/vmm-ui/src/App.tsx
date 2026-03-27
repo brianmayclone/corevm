@@ -49,6 +49,7 @@ import NotificationsPage from './pages/NotificationsPage'
 import SdnNetworks from './pages/SdnNetworks'
 import StorageWizard from './pages/StorageWizard'
 import SdnNetworkDetail from './pages/SdnNetworkDetail'
+import LogsPage from './pages/LogsPage'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore()
@@ -133,6 +134,7 @@ export default function App() {
           <Route path="cluster/detail/:id" element={<ClusterDetail />} />
           <Route path="cluster/datastores" element={<DatastoresList />} />
           <Route path="cluster/drs" element={<DrsPage />} />
+          <Route path="operations/logs" element={<LogsPage />} />
           <Route path="operations/tasks" element={<TasksList />} />
           <Route path="operations/events" element={<EventsList />} />
           <Route path="operations/alarms" element={<AlarmsList />} />

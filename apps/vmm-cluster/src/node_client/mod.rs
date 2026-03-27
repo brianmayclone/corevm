@@ -124,6 +124,24 @@ impl NodeClient {
         resp.json().await.map_err(|e| format!("Invalid response: {}", e))
     }
 
+    /// GET /agent/logs — fetch service log files from this host.
+    pub async fn get_logs(&self, service: Option<&str>, lines: Option<usize>) -> Result<serde_json::Value, String> {
+        let mut url = format!("{}/agent/logs?", &self.base_url);
+        if let Some(s) = service { url.push_str(&format!("service={}&", s)); }
+        if let Some(n) = lines { url.push_str(&format!("lines={}", n)); }
+
+        let resp = self.http.get(&url)
+            .header("X-Agent-Token", &self.agent_token)
+            .send().await
+            .map_err(|e| format!("Connection failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("Log request failed: {}", resp.status()));
+        }
+
+        resp.json().await.map_err(|e| format!("Invalid response: {}", e))
+    }
+
     /// Generic POST to an agent endpoint (no body).
     async fn post_agent(&self, path: &str) -> Result<AgentResponse, String> {
         let resp = self.http.post(format!("{}{}", &self.base_url, path))

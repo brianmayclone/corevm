@@ -41,12 +41,41 @@ async fn main() {
             std::process::exit(1);
         });
 
-    // Init logging
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&cfg.logging.level));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .init();
+    // Init logging — always write to log file when configured, plus stdout
+    {
+        use tracing_subscriber::prelude::*;
+        use tracing_subscriber::fmt;
+
+        let env_filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new(&cfg.logging.level));
+
+        if let Some(ref log_path) = cfg.logging.log_file {
+            // Ensure log directory exists
+            if let Some(parent) = log_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let file = std::fs::OpenOptions::new()
+                .create(true).append(true)
+                .open(log_path)
+                .unwrap_or_else(|e| {
+                    eprintln!("Cannot open log file {}: {}", log_path.display(), e);
+                    std::process::exit(1);
+                });
+            let file_layer = fmt::layer()
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file));
+            let stdout_layer = fmt::layer();
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(file_layer)
+                .with(stdout_layer)
+                .init();
+        } else {
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .init();
+        }
+    }
 
     tracing::info!("vmm-server v{} ({}) built {}",
         env!("CARGO_PKG_VERSION"), env!("COREVM_GIT_SHA"), env!("COREVM_BUILD_TIMESTAMP"));

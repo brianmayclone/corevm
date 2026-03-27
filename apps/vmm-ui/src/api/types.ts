@@ -511,6 +511,25 @@ export interface DiscoveredDisk {
   _san_address?: string
 }
 
+// ── Host Service Logs ────────────────────────────────────────────────────
+
+export interface ServiceLogEntry {
+  service: string
+  lines: string[]
+  log_file: string
+  available: boolean
+}
+
+export interface HostLogsResponse {
+  hostname: string
+  host_id?: string
+  services: ServiceLogEntry[]
+}
+
+export interface AllHostLogsResponse {
+  hosts: HostLogsResponse[]
+}
+
 // ── Network Discovery ───────────────────────────────────────────────────
 
 export interface DiscoveredNode {

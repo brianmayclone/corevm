@@ -76,7 +76,7 @@ pub struct VmsSection {
 pub struct LoggingSection {
     #[serde(default = "default_log_level")]
     pub level: String,
-    pub file: Option<PathBuf>,
+    pub log_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,7 +132,7 @@ impl Default for VmsSection {
 }
 impl Default for LoggingSection {
     fn default() -> Self {
-        Self { level: default_log_level(), file: None }
+        Self { level: default_log_level(), log_file: None }
     }
 }
 impl Default for ApiSection {

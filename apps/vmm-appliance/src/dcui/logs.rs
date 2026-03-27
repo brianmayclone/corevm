@@ -1,10 +1,11 @@
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs};
 use ratatui::Frame;
 
 pub enum DialogResult {
@@ -12,76 +13,150 @@ pub enum DialogResult {
     Close,
 }
 
-const LOG_PATHS: &[&str] = &[
-    "/var/log/vmm/vmm-server.log",
-    "/var/log/vmm/vmm-cluster.log",
-    "/var/log/vmm-server.log",
-    "/var/log/vmm-cluster.log",
-    "/var/log/syslog",
+struct LogSource {
+    name: &'static str,
+    paths: &'static [&'static str],
+    config_path: &'static str,
+    service_name: &'static str,
+}
+
+const LOG_SOURCES: &[LogSource] = &[
+    LogSource {
+        name: "vmm-server",
+        paths: &["/var/log/vmm/vmm-server.log", "/var/log/vmm-server.log"],
+        config_path: "/etc/vmm/vmm-server.toml",
+        service_name: "vmm-server.service",
+    },
+    LogSource {
+        name: "vmm-san",
+        paths: &["/var/log/vmm/vmm-san.log", "/var/log/vmm-san.log"],
+        config_path: "/etc/vmm/vmm-san.toml",
+        service_name: "vmm-san.service",
+    },
+    LogSource {
+        name: "vmm-cluster",
+        paths: &["/var/log/vmm/vmm-cluster.log", "/var/log/vmm-cluster.log"],
+        config_path: "/etc/vmm/vmm-cluster.toml",
+        service_name: "vmm-cluster.service",
+    },
 ];
 
-const TAIL_LINES: usize = 50;
+const TAIL_LINES: usize = 200;
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
 pub struct Dialog {
+    active_tab: usize,
+    tabs: Vec<TabState>,
+    debug_mode: bool,
+    last_refresh: Instant,
+    status_message: Option<(String, Instant)>,
+}
+
+struct TabState {
     log_path: String,
     lines: Vec<String>,
     scroll: usize,
-    last_refresh: Instant,
 }
 
 impl Dialog {
     pub fn new() -> Self {
-        let log_path = LOG_PATHS.iter()
-            .find(|p| Path::new(p).exists())
-            .map(|p| p.to_string())
-            .unwrap_or_else(|| "/var/log/syslog".to_string());
+        let debug_mode = is_debug_mode_active();
+        let tabs: Vec<TabState> = LOG_SOURCES.iter().map(|src| {
+            let log_path = src.paths.iter()
+                .find(|p| Path::new(p).exists())
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| src.paths[0].to_string());
+            let mut tab = TabState { log_path, lines: Vec::new(), scroll: 0 };
+            tab.refresh();
+            tab
+        }).collect();
 
-        let mut dlg = Self {
-            log_path,
-            lines: Vec::new(),
-            scroll: 0,
+        Self {
+            active_tab: 0,
+            tabs,
+            debug_mode,
             last_refresh: Instant::now(),
-        };
-        dlg.refresh();
-        dlg
+            status_message: None,
+        }
     }
 
-    fn refresh(&mut self) {
-        self.lines = read_last_lines(&self.log_path, TAIL_LINES);
+    fn refresh_all(&mut self) {
+        for tab in &mut self.tabs {
+            tab.refresh();
+        }
         self.last_refresh = Instant::now();
-        // Auto-scroll to bottom
-        self.scroll = self.lines.len().saturating_sub(1);
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> DialogResult {
-        // Auto-refresh check
         if self.last_refresh.elapsed() >= REFRESH_INTERVAL {
-            self.refresh();
+            self.refresh_all();
         }
 
         match key.code {
             KeyCode::Esc => return DialogResult::Close,
+            KeyCode::Tab | KeyCode::Right => {
+                self.active_tab = (self.active_tab + 1) % self.tabs.len();
+            }
+            KeyCode::BackTab | KeyCode::Left => {
+                self.active_tab = if self.active_tab == 0 { self.tabs.len() - 1 } else { self.active_tab - 1 };
+            }
             KeyCode::Up => {
-                if self.scroll > 0 {
-                    self.scroll -= 1;
-                }
+                let tab = &mut self.tabs[self.active_tab];
+                if tab.scroll > 0 { tab.scroll -= 1; }
             }
             KeyCode::Down => {
-                if self.scroll + 1 < self.lines.len() {
-                    self.scroll += 1;
-                }
+                let tab = &mut self.tabs[self.active_tab];
+                if tab.scroll + 1 < tab.lines.len() { tab.scroll += 1; }
             }
             KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_sub(10);
+                let tab = &mut self.tabs[self.active_tab];
+                tab.scroll = tab.scroll.saturating_sub(20);
             }
             KeyCode::PageDown => {
-                let max = self.lines.len().saturating_sub(1);
-                self.scroll = (self.scroll + 10).min(max);
+                let tab = &mut self.tabs[self.active_tab];
+                let max = tab.lines.len().saturating_sub(1);
+                tab.scroll = (tab.scroll + 20).min(max);
+            }
+            KeyCode::Home => {
+                self.tabs[self.active_tab].scroll = 0;
+            }
+            KeyCode::End => {
+                let tab = &mut self.tabs[self.active_tab];
+                tab.scroll = tab.lines.len().saturating_sub(1);
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                self.toggle_debug_mode();
             }
             _ => {}
         }
         DialogResult::Continue
+    }
+
+    fn toggle_debug_mode(&mut self) {
+        let new_level = if self.debug_mode { "info" } else { "debug" };
+
+        for src in LOG_SOURCES {
+            if Path::new(src.config_path).exists() {
+                if let Err(e) = set_log_level(src.config_path, new_level) {
+                    self.status_message = Some((
+                        format!("Error updating {}: {}", src.config_path, e),
+                        Instant::now(),
+                    ));
+                    return;
+                }
+                // Restart service to pick up new log level
+                let _ = Command::new("systemctl")
+                    .args(["restart", src.service_name])
+                    .output();
+            }
+        }
+
+        self.debug_mode = !self.debug_mode;
+        let mode_name = if self.debug_mode { "DEBUG" } else { "INFO" };
+        self.status_message = Some((
+            format!("Log level set to {} — services restarting...", mode_name),
+            Instant::now(),
+        ));
     }
 
     pub fn render(&self, frame: &mut Frame) {
@@ -93,7 +168,8 @@ impl Dialog {
         let buf = frame.buffer_mut();
         Clear.render(popup, buf);
 
-        let title = format!(" Logs (F7) - {} ", self.log_path);
+        let debug_indicator = if self.debug_mode { " [DEBUG]" } else { "" };
+        let title = format!(" Logs (F7){} ", debug_indicator);
         let block = Block::default()
             .title(title)
             .borders(Borders::ALL)
@@ -103,44 +179,153 @@ impl Dialog {
         let inner = block.inner(popup);
         block.render(popup, buf);
 
-        if inner.height == 0 {
+        if inner.height < 4 {
             return;
         }
 
-        let content_height = inner.height.saturating_sub(1) as usize;
+        // Tab bar
+        let tab_titles: Vec<Line> = LOG_SOURCES.iter().enumerate().map(|(i, src)| {
+            let style = if i == self.active_tab {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            Line::from(Span::styled(src.name, style))
+        }).collect();
 
-        // Determine which lines to show
-        let start = if self.lines.len() > content_height {
-            let max_scroll = self.lines.len().saturating_sub(content_height);
-            self.scroll.min(max_scroll)
+        let tabs_widget = Tabs::new(tab_titles)
+            .select(self.active_tab)
+            .divider(" | ")
+            .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+
+        let tab_area = Rect { height: 1, ..inner };
+        tabs_widget.render(tab_area, buf);
+
+        // File path line
+        let tab = &self.tabs[self.active_tab];
+        let path_area = Rect { y: inner.y + 1, height: 1, ..inner };
+        let path_style = if Path::new(&tab.log_path).exists() {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::Red)
+        };
+        Paragraph::new(Span::styled(&tab.log_path, path_style))
+            .render(path_area, buf);
+
+        // Log content
+        let content_height = inner.height.saturating_sub(4) as usize;
+        let content_area = Rect { y: inner.y + 2, height: content_height as u16, ..inner };
+
+        let start = if tab.lines.len() > content_height {
+            let max_scroll = tab.lines.len().saturating_sub(content_height);
+            tab.scroll.min(max_scroll)
         } else {
             0
         };
 
-        let visible: Vec<Line> = self.lines.iter()
+        let visible: Vec<Line> = tab.lines.iter()
             .skip(start)
             .take(content_height)
             .map(|l| Line::from(Span::raw(l.as_str())))
             .collect();
 
-        let content_area = Rect { height: inner.height.saturating_sub(1), ..inner };
         Paragraph::new(visible)
             .style(Style::default().fg(Color::White))
             .render(content_area, buf);
 
-        // Help line
-        let help_area = Rect { y: inner.y + inner.height.saturating_sub(1), height: 1, ..inner };
-        Paragraph::new("[↑↓ PgUp/PgDn] Scroll  [Esc] Close  (auto-refresh 2s)")
+        // Status message or help line
+        let help_y = inner.y + inner.height.saturating_sub(1);
+        let help_area = Rect { y: help_y, height: 1, ..inner };
+
+        if let Some((ref msg, at)) = self.status_message {
+            if at.elapsed() < Duration::from_secs(5) {
+                Paragraph::new(msg.as_str())
+                    .style(Style::default().fg(Color::Yellow))
+                    .render(help_area, buf);
+                return;
+            }
+        }
+
+        let debug_key = if self.debug_mode { "[D] Info-Modus" } else { "[D] Debug-Modus" };
+        let help = format!("[Tab] Service  [↑↓ PgUp/PgDn] Scroll  {}  [Esc] Close", debug_key);
+        Paragraph::new(help)
             .style(Style::default().fg(Color::DarkGray))
             .render(help_area, buf);
     }
 }
 
+impl TabState {
+    fn refresh(&mut self) {
+        self.lines = read_last_lines(&self.log_path, TAIL_LINES);
+        // Auto-scroll to bottom
+        self.scroll = self.lines.len().saturating_sub(1);
+    }
+}
+
 fn read_last_lines(path: &str, n: usize) -> Vec<String> {
-    let content = fs::read_to_string(path).unwrap_or_else(|e| format!("Error reading {}: {}", path, e));
-    let all: Vec<String> = content.lines().map(|l| l.to_string()).collect();
-    let skip = all.len().saturating_sub(n);
-    all.into_iter().skip(skip).collect()
+    match fs::read_to_string(path) {
+        Ok(content) => {
+            let all: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+            let skip = all.len().saturating_sub(n);
+            all.into_iter().skip(skip).collect()
+        }
+        Err(e) => vec![format!("Log-Datei nicht verfügbar: {} ({})", path, e)],
+    }
+}
+
+/// Check if any service config currently has debug level
+fn is_debug_mode_active() -> bool {
+    for src in LOG_SOURCES {
+        if let Ok(content) = fs::read_to_string(src.config_path) {
+            if content.contains("level = \"debug\"") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Update the log level in a TOML config file
+fn set_log_level(config_path: &str, level: &str) -> Result<(), String> {
+    let content = fs::read_to_string(config_path)
+        .map_err(|e| format!("read error: {}", e))?;
+
+    // Replace the level line in [logging] section
+    let mut result = String::new();
+    let mut in_logging = false;
+    let mut replaced = false;
+
+    for line in content.lines() {
+        if line.trim() == "[logging]" {
+            in_logging = true;
+            result.push_str(line);
+            result.push('\n');
+            continue;
+        }
+        if in_logging && line.starts_with('[') {
+            in_logging = false;
+        }
+        if in_logging && line.trim().starts_with("level") {
+            result.push_str(&format!("level = \"{}\"", level));
+            result.push('\n');
+            replaced = true;
+            continue;
+        }
+        result.push_str(line);
+        result.push('\n');
+    }
+
+    if !replaced {
+        // If no level line found, append to [logging] section or create one
+        if content.contains("[logging]") {
+            result = content.replace("[logging]", &format!("[logging]\nlevel = \"{}\"", level));
+        } else {
+            result.push_str(&format!("\n[logging]\nlevel = \"{}\"\n", level));
+        }
+    }
+
+    fs::write(config_path, result)
+        .map_err(|e| format!("write error: {}", e))
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {

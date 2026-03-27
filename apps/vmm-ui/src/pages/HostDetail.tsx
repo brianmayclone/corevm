@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Server, Cpu, MemoryStick, HardDrive, Circle, Wrench, ArrowLeft, Trash2, Boxes, Check, X, Pencil } from 'lucide-react'
+import { Server, Cpu, MemoryStick, HardDrive, Circle, Wrench, ArrowLeft, Trash2, Boxes, Check, X, Pencil, FileText } from 'lucide-react'
 import HostEditDialog from '../components/HostEditDialog'
+import HostLogs from '../components/HostLogs'
 import { useClusterStore } from '../stores/clusterStore'
 import { useVmStore } from '../stores/vmStore'
 import api from '../api/client'
 import Card from '../components/Card'
 import SpecRow from '../components/SpecRow'
+import TabBar from '../components/TabBar'
 import VmPriorityCard from '../components/VmPriorityCard'
 import MaintenanceDialog from '../components/MaintenanceDialog'
 import { formatRam, formatBytes } from '../utils/format'
@@ -18,6 +20,7 @@ export default function HostDetail() {
   const { hosts, fetchHosts, setMaintenance, deregisterHost } = useClusterStore()
   const [maintenanceOpen, setMaintenanceOpen] = useState(false)
   const [editOpen, setEditOpen] = useState(false)
+  const [activeTab, setActiveTab] = useState('overview')
   const { vms, fetchVms, startVm, stopVm } = useVmStore()
   const [host, setHost] = useState<Host | null>(null)
 
@@ -73,6 +76,18 @@ export default function HostDetail() {
         </div>
       </div>
 
+      <TabBar
+        tabs={[
+          { id: 'overview', label: 'Overview' },
+          { id: 'logs', label: 'Logs' },
+        ]}
+        active={activeTab}
+        onChange={setActiveTab}
+      />
+
+      {activeTab === 'logs' && <HostLogs hostId={host.id} />}
+
+      {activeTab === 'overview' && <>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <Card>
           <div className="p-4">
@@ -158,6 +173,8 @@ export default function HostDetail() {
           </div>
         </div>
       )}
+
+      </>}
 
       {/* Maintenance dialog */}
       <MaintenanceDialog

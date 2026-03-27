@@ -23,6 +23,7 @@ pub mod network;
 pub mod storage_wizard;
 pub mod discovery;
 pub mod san;
+pub mod logs;
 
 pub fn router() -> Router<Arc<ClusterState>> {
     Router::new()
@@ -100,6 +101,10 @@ pub fn router() -> Router<Arc<ClusterState>> {
         // ── Network (compat stubs) ──────────────────────
         .route("/api/network/interfaces", get(activity::network_interfaces))
         .route("/api/network/stats", get(activity::network_stats))
+
+        // ── Host Logs ──────────────────────────────────
+        .route("/api/hosts/{id}/logs", get(logs::host_logs))
+        .route("/api/logs", get(logs::all_logs))
 
         // ── Events ──────────────────────────────────────
         .route("/api/events", get(events::list))

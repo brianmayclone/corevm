@@ -11,7 +11,7 @@ use ratatui::Frame;
 
 use crate::common::{
     certs::{generate_self_signed, import_certificates},
-    config::{ApplianceConfig, ApplianceRole, write_vmm_cluster_config, write_vmm_server_config_full},
+    config::{ApplianceConfig, ApplianceRole, write_vmm_cluster_config, write_vmm_server_config, write_vmm_server_config_full},
     firewall::{write_nftables_config, FirewallConfig},
     network::write_networkd_config,
     system::{

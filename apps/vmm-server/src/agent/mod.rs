@@ -44,6 +44,8 @@ pub fn router() -> Router<Arc<AppState>> {
         // Network / Bridge management (Cluster sends these)
         .route("/agent/network/bridge/setup", post(handlers::setup_bridge))
         .route("/agent/network/bridge/teardown", post(handlers::teardown_bridge))
+        // Logs (cluster fetches service logs from hosts)
+        .route("/agent/logs", get(handlers::logs))
         // Package management + command execution (for storage wizard)
         .route("/agent/packages/check", post(handlers::check_packages))
         .route("/agent/packages/install", post(handlers::install_packages))
