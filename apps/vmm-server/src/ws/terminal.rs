@@ -62,7 +62,7 @@ async fn handle_terminal(
     let welcome = TerminalResponse {
         msg_type: "output".to_string(),
         lines: vec![
-            vmm_term::registry::OutputLine::info("CoreVM Terminal v0.1.0"),
+            vmm_term::registry::OutputLine::info(format!("CoreVM Terminal v{}", env!("CARGO_PKG_VERSION"))),
             vmm_term::registry::OutputLine::info(format!("Logged in as: {} ({})", claims.username, claims.role)),
             vmm_term::registry::OutputLine::info("Type 'help' for available commands."),
             vmm_term::registry::OutputLine::stdout(""),

@@ -5,7 +5,19 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_DIR="$ROOT/dist/iso-build"
 
-# Read version from VERSION file (single source of truth)
+# Auto-bump patch version (X.Y.Z → X.Y.Z+1) unless --no-bump is passed
+if [[ " $* " != *" --no-bump "* ]]; then
+    OLD_VERSION=$(cat "$ROOT/VERSION" | tr -d '[:space:]')
+    MAJOR=$(echo "$OLD_VERSION" | cut -d. -f1)
+    MINOR=$(echo "$OLD_VERSION" | cut -d. -f2)
+    PATCH=$(echo "$OLD_VERSION" | cut -d. -f3)
+    NEW_PATCH=$((PATCH + 1))
+    NEW_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
+    echo "Auto-bumping version: $OLD_VERSION → $NEW_VERSION (use --no-bump to skip)"
+    "$SCRIPT_DIR/bump-version.sh" "$NEW_VERSION"
+fi
+
+# Read version from VERSION file (single source of truth, now bumped)
 COREVM_VERSION=$(cat "$ROOT/VERSION" | tr -d '[:space:]')
 BUILD_TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
 

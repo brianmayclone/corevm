@@ -1,6 +1,6 @@
 [package]
 name = "vmmctl"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "CoreVM CLI management tool — remote server administration via REST API"
 
