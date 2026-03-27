@@ -151,7 +151,7 @@ chroot "$ROOTFS_DIR" bash -c '
     curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable 2>&1
     source /root/.cargo/env
     cd /build
-    cargo build --release -p vmm-appliance -p vmm-server -p vmm-cluster -p vmm-san -p vmmctl
+    cargo build --release -p vmm-appliance -p vmm-server -p vmm-cluster -p vmm-san
 
     # Remove build-only dependencies (not needed at runtime, saves ~50MB)
     apt-get purge -y libfuse3-dev 2>/dev/null || true
@@ -173,9 +173,6 @@ cp "$ROOT/target/release/vmm-appliance" "$ROOTFS_DIR/opt/vmm/"
 cp "$ROOT/target/release/vmm-server" "$ROOTFS_DIR/opt/vmm/"
 cp "$ROOT/target/release/vmm-cluster" "$ROOTFS_DIR/opt/vmm/"
 cp "$ROOT/target/release/vmm-san" "$ROOTFS_DIR/opt/vmm/"
-cp "$ROOT/target/release/vmmctl" "$ROOTFS_DIR/opt/vmm/"
-# Symlink vmmctl to /usr/local/bin for easy CLI access
-ln -sf /opt/vmm/vmmctl "$ROOTFS_DIR/usr/local/bin/vmmctl"
 cp -r "$ROOT/apps/vmm-ui/dist" "$ROOTFS_DIR/opt/vmm/ui"
 if [ -d "$ROOT/apps/vmm-server/assets/bios" ]; then
     cp -r "$ROOT/apps/vmm-server/assets/bios" "$ROOTFS_DIR/opt/vmm/bios"
