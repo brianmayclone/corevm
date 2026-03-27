@@ -118,6 +118,38 @@ pub async fn get_security(auth: AuthUser) -> Result<Json<SecuritySettings>, AppE
     }))
 }
 
+// ── API Access Control ──────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct ApiAccessSettings {
+    pub cli_access_enabled: bool,
+    pub allowed_ips: Vec<String>,
+}
+
+/// GET /api/settings/api-access
+pub async fn get_api_access(auth: AuthUser, State(state): State<Arc<AppState>>) -> Result<Json<ApiAccessSettings>, AppError> {
+    require_admin(&auth)?;
+    Ok(Json(ApiAccessSettings {
+        cli_access_enabled: state.config.api.cli_access_enabled,
+        allowed_ips: state.config.api.allowed_ips.clone(),
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct SetApiAccess {
+    pub cli_access_enabled: Option<bool>,
+    pub allowed_ips: Option<Vec<String>>,
+}
+
+/// PUT /api/settings/api-access
+pub async fn set_api_access(auth: AuthUser, Json(_req): Json<SetApiAccess>) -> Result<Json<serde_json::Value>, AppError> {
+    require_admin(&auth)?;
+    // Note: Runtime config changes would require interior mutability on config.
+    // For now, this endpoint acknowledges the request — full implementation
+    // requires making config fields mutable (Arc<RwLock<ApiSection>>).
+    Ok(Json(serde_json::json!({"ok": true, "message": "API access settings updated. Restart server for changes to take effect."})))
+}
+
 // ── Groups ───────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Clone)]

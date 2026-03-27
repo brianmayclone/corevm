@@ -21,6 +21,7 @@ vmm-term = { path = "../../libs/vmm-term" }
 # Web framework
 axum = { version = "0.8", features = ["ws", "multipart"] }
 axum-extra = { version = "0.10", features = ["typed-header"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower = { version = "0.5" }
 tower-http = { version = "0.6", features = ["cors", "compression-gzip", "fs", "trace"] }
 tokio = { version = "1", features = ["full"] }

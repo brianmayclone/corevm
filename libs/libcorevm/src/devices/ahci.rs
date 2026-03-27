@@ -1434,6 +1434,25 @@ fn process_atapi(port: &mut AhciPort, dma: &GuestDma, acmd: &[u8], prdt_base: u6
             port.tfd = TFD_STS_DRDY | TFD_STS_DSC;
             port.is |= PORT_IS_DHRS;
         }
+        0xA8 => { // READ (12)
+            let lba = u32::from_be_bytes([acmd[2], acmd[3], acmd[4], acmd[5]]) as u64;
+            let cnt = u32::from_be_bytes([acmd[6], acmd[7], acmd[8], acmd[9]]).min(256);
+            let ss = port.drive.sector_size();
+            let total = cnt as usize * ss;
+            if port.drive.disk_fd >= 0 {
+                return Some(DeferredIo {
+                    fd: port.drive.disk_fd, disk_offset: lba * ss as u64,
+                    buf: vec![0u8; total], is_write: false, is_flush: false,
+                    port_idx, slot, cmd_hdr_addr, prdt_base, prdtl, total,
+                });
+            }
+            let mut buf = vec![0u8; total];
+            port.drive.read_at(lba * ss as u64, &mut buf);
+            if prdtl > 0 { dma.write_prdt(prdt_base, prdtl, &buf); }
+            dma.write_u32(cmd_hdr_addr + 4, total as u32);
+            port.tfd = TFD_STS_DRDY | TFD_STS_DSC;
+            port.is |= PORT_IS_DHRS;
+        }
         0x2A => { // WRITE (10) — CD-ROM is read-only, return error
             port.tfd = TFD_STS_DRDY | TFD_STS_DSC | 1; // ERR bit set
             port.is |= PORT_IS_DHRS;

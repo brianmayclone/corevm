@@ -25,9 +25,12 @@ docs/
 │   ├── vmmanager/             Desktop GUI
 │   │   ├── user-guide.md      Installation, VM management
 │   │   └── developer-guide.md Architecture, UI framework, platform code
-│   └── vmctl/                 CLI tool
-│       ├── user-guide.md      Commands, options, examples
-│       └── developer-guide.md Architecture, extending
+│   ├── vmctl/                 CLI tool (direct VM engine)
+│   │   ├── user-guide.md      Commands, options, examples
+│   │   └── developer-guide.md Architecture, extending
+│   └── vmmctl/                Remote management CLI (REST API)
+│       ├── user-guide.md      Setup, commands, scripting, TLS
+│       └── developer-guide.md Architecture, adding commands
 └── README.md                  This file
 ```
 
@@ -37,7 +40,8 @@ docs/
 |-------|------|
 | **Getting Started** | [vmm-server User Guide](apps/vmm-server/user-guide.md) |
 | **Web UI** | [vmm-ui User Guide](apps/vmm-ui/user-guide.md) |
-| **CLI Usage** | [vmctl User Guide](apps/vmctl/user-guide.md) |
+| **CLI (local)** | [vmctl User Guide](apps/vmctl/user-guide.md) |
+| **CLI (remote)** | [vmmctl User Guide](apps/vmmctl/user-guide.md) |
 | **Desktop App** | [vmmanager User Guide](apps/vmmanager/user-guide.md) |
 | **Cluster Setup** | [vmm-cluster User Guide](apps/vmm-cluster/user-guide.md) |
 | **SDN Networking** | [vmm-cluster User Guide — SDN](apps/vmm-cluster/user-guide.md#sdn-software-defined-networking) |

@@ -1,11 +1,14 @@
 import type { Lang } from '../i18n';
 import { t } from '../i18n';
 
+import type { LegalPage } from './LegalModal';
+
 interface FooterProps {
   lang: Lang;
+  onLegalClick: (page: LegalPage) => void;
 }
 
-export default function Footer({ lang }: FooterProps) {
+export default function Footer({ lang, onLegalClick }: FooterProps) {
   return (
     <footer className="border-t border-white/5 bg-surface-950">
       <div className="mx-auto max-w-7xl px-6 py-16">
@@ -42,7 +45,7 @@ export default function Footer({ lang }: FooterProps) {
             <ul className="space-y-3 list-none p-0 m-0">
               <li><a href="#" className="text-sm text-surface-400 hover:text-white transition-colors no-underline">{t(lang, 'footer_documentation')}</a></li>
               <li><a href="#" className="text-sm text-surface-400 hover:text-white transition-colors no-underline">{t(lang, 'footer_api_reference')}</a></li>
-              <li><a href="#" className="text-sm text-surface-400 hover:text-white transition-colors no-underline">{t(lang, 'footer_github')}</a></li>
+              <li><a href="https://github.com/brianmayclone/corevm" className="text-sm text-surface-400 hover:text-white transition-colors no-underline">{t(lang, 'footer_github')}</a></li>
             </ul>
           </div>
         </div>
@@ -52,11 +55,19 @@ export default function Footer({ lang }: FooterProps) {
           <p className="text-xs text-surface-500">
             &copy; {new Date().getFullYear()} CoreVM. {t(lang, 'footer_rights')}
           </p>
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-surface-600">Built with</span>
-            <span className="font-mono text-xs text-primary-400">Rust</span>
-            <span className="text-xs text-surface-600">&</span>
-            <span className="font-mono text-xs text-accent-400">React</span>
+          <div className="flex items-center gap-4">
+            <button
+              onClick={() => onLegalClick('imprint')}
+              className="text-xs text-surface-500 hover:text-white transition-colors cursor-pointer bg-transparent border-none p-0"
+            >
+              {t(lang, 'legal_imprint')}
+            </button>
+            <button
+              onClick={() => onLegalClick('privacy')}
+              className="text-xs text-surface-500 hover:text-white transition-colors cursor-pointer bg-transparent border-none p-0"
+            >
+              {t(lang, 'legal_privacy')}
+            </button>
           </div>
         </div>
       </div>

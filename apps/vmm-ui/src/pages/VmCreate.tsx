@@ -33,7 +33,8 @@ const guestOsOptions = [
   { value: 'winserver2019', label: 'Windows Server 2019' },
   { value: 'ubuntu', label: 'Ubuntu' }, { value: 'debian', label: 'Debian' },
   { value: 'fedora', label: 'Fedora' }, { value: 'arch', label: 'Arch Linux' },
-  { value: 'linux', label: 'Linux (Other)' }, { value: 'freebsd', label: 'FreeBSD' },
+  { value: 'linux', label: 'Linux (Other)' }, { value: 'anyos', label: 'AnyOS' },
+  { value: 'freebsd', label: 'FreeBSD' },
   { value: 'dos', label: 'DOS / FreeDOS' },
 ]
 

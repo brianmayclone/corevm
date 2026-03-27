@@ -39,6 +39,16 @@ pub fn write_vmm_server_config(
     data_dir: &str,
     log_file: &str,
 ) -> Result<()> {
+    write_vmm_server_config_full(target, port, data_dir, log_file, true)
+}
+
+pub fn write_vmm_server_config_full(
+    target: &Path,
+    port: u16,
+    data_dir: &str,
+    log_file: &str,
+    cli_access_enabled: bool,
+) -> Result<()> {
     let vmm_dir = target.join("etc/vmm");
     fs::create_dir_all(&vmm_dir).context("Failed to create /etc/vmm directory")?;
 
@@ -51,6 +61,8 @@ pub fn write_vmm_server_config(
          port = {port}\n\n\
          [auth]\n\
          jwt_secret = \"{jwt_secret}\"\n\n\
+         [api]\n\
+         cli_access_enabled = {cli_access}\n\n\
          [storage]\n\
          data_dir = \"{data_dir}\"\n\n\
          [vms]\n\
@@ -60,6 +72,7 @@ pub fn write_vmm_server_config(
          level = \"info\"\n",
         port = port,
         jwt_secret = jwt_secret,
+        cli_access = cli_access_enabled,
         data_dir = data_dir,
         log_file = log_file,
     );

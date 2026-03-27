@@ -702,6 +702,29 @@ Full developer and user documentation is available in the [docs/](docs/) directo
 
 ---
 
+## Project Website
+
+Die statische Projektwebsite ist in einem eigenen Repository enthalten:
+
+- `corevm_website/`
+  - `index.html`
+  - `styles.css`
+  - `app.js`
+  - `service-worker.js`
+  - `manifest.json`
+  - `README.md`
+
+Zum lokalen Test:
+
+```bash
+cd corevm_website
+python3 -m http.server 8000
+```
+
+Browser öffnen: `http://localhost:8000`
+
+---
+
 ## anyOS Integration
 
 CoreVM originated as part of [anyOS](https://github.com/nicosommelier/anyos) — a 64-bit operating system built from scratch in Rust.

@@ -118,6 +118,8 @@ pub enum GuestOs {
     Arch,
     #[serde(rename = "linux", alias = "linuxother")]
     LinuxOther,
+    #[serde(rename = "anyos")]
+    AnyOs,
     #[serde(rename = "freebsd")]
     FreeBsd,
     #[serde(rename = "dos", alias = "dosfreedos")]
@@ -447,6 +449,7 @@ impl GuestOs {
         GuestOs::WindowsServer2016, GuestOs::WindowsServer2019, GuestOs::WindowsServer2022,
         GuestOs::Ubuntu, GuestOs::Debian, GuestOs::Fedora, GuestOs::OpenSuse,
         GuestOs::RedHat, GuestOs::Arch, GuestOs::LinuxOther,
+        GuestOs::AnyOs,
         GuestOs::FreeBsd, GuestOs::DosFreeDos,
     ];
 
@@ -468,6 +471,7 @@ impl GuestOs {
             GuestOs::RedHat => "redhat",
             GuestOs::Arch => "arch",
             GuestOs::LinuxOther => "linux",
+            GuestOs::AnyOs => "anyos",
             GuestOs::FreeBsd => "freebsd",
             GuestOs::DosFreeDos => "dos",
         }
@@ -490,6 +494,7 @@ impl GuestOs {
             "redhat" => GuestOs::RedHat,
             "arch" => GuestOs::Arch,
             "linux" => GuestOs::LinuxOther,
+            "anyos" => GuestOs::AnyOs,
             "freebsd" => GuestOs::FreeBsd,
             "dos" => GuestOs::DosFreeDos,
             _ => GuestOs::Other,
@@ -514,6 +519,7 @@ impl GuestOs {
             GuestOs::RedHat => "Red Hat / CentOS",
             GuestOs::Arch => "Arch Linux",
             GuestOs::LinuxOther => "Linux (Other)",
+            GuestOs::AnyOs => "AnyOS",
             GuestOs::FreeBsd => "FreeBSD",
             GuestOs::DosFreeDos => "DOS / FreeDOS",
         }

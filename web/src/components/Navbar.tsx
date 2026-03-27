@@ -7,9 +7,10 @@ import { t } from '../i18n';
 interface NavbarProps {
   lang: Lang;
   onLangChange: (lang: Lang) => void;
+  onDownloadClick: () => void;
 }
 
-export default function Navbar({ lang, onLangChange }: NavbarProps) {
+export default function Navbar({ lang, onLangChange, onDownloadClick }: NavbarProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const links = [
@@ -18,6 +19,7 @@ export default function Navbar({ lang, onLangChange }: NavbarProps) {
     { href: '#screenshots', label: t(lang, 'nav_screenshots') },
     { href: '#cluster', label: t(lang, 'nav_cluster') },
     { href: '#architecture', label: t(lang, 'nav_architecture') },
+    { href: '#vmmanager', label: 'VMManager' },
   ];
 
   return (
@@ -53,13 +55,13 @@ export default function Navbar({ lang, onLangChange }: NavbarProps) {
           </button>
 
           {/* CTA */}
-          <a
-            href="#get-started"
-            className="hidden rounded-lg bg-primary-500 px-4 py-2 text-sm font-semibold text-white transition-all hover:bg-primary-400 hover:shadow-lg hover:shadow-primary-500/25 no-underline sm:inline-flex sm:items-center sm:gap-2"
+          <button
+            onClick={onDownloadClick}
+            className="hidden rounded-lg bg-primary-500 px-4 py-2 text-sm font-semibold text-white transition-all hover:bg-primary-400 hover:shadow-lg hover:shadow-primary-500/25 cursor-pointer border-none sm:inline-flex sm:items-center sm:gap-2"
           >
             <Download size={14} />
             {t(lang, 'nav_get_started')}
-          </a>
+          </button>
 
           {/* Mobile menu button */}
           <button
@@ -91,14 +93,13 @@ export default function Navbar({ lang, onLangChange }: NavbarProps) {
                   {link.label}
                 </a>
               ))}
-              <a
-                href="#get-started"
-                onClick={() => setMobileOpen(false)}
-                className="mt-2 inline-flex items-center justify-center gap-2 rounded-lg bg-primary-500 px-4 py-3 text-center text-sm font-semibold text-white no-underline"
+              <button
+                onClick={() => { setMobileOpen(false); onDownloadClick(); }}
+                className="mt-2 inline-flex items-center justify-center gap-2 rounded-lg bg-primary-500 px-4 py-3 text-center text-sm font-semibold text-white cursor-pointer border-none"
               >
                 <Download size={14} />
                 {t(lang, 'nav_get_started')}
-              </a>
+              </button>
             </div>
           </motion.div>
         )}

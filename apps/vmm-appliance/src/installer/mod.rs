@@ -12,6 +12,7 @@ mod network;
 mod timezone;
 mod users;
 mod ports;
+mod api_access;
 mod certs;
 mod summary;
 mod progress;
@@ -34,6 +35,7 @@ pub struct InstallConfig {
     pub user_password: String,
     pub server_port: u16,
     pub cluster_port: u16,
+    pub cli_access_enabled: bool,
     pub self_signed_cert: bool,
     pub cert_path: Option<PathBuf>,
     pub key_path: Option<PathBuf>,
@@ -51,6 +53,7 @@ pub enum Screen {
     Timezone,
     Users,
     Ports,
+    ApiAccess,
     Certs,
     Summary,
     Progress,
@@ -64,7 +67,8 @@ impl Screen {
             Screen::Network   => Some(Screen::Timezone),
             Screen::Timezone  => Some(Screen::Users),
             Screen::Users     => Some(Screen::Ports),
-            Screen::Ports     => Some(Screen::Certs),
+            Screen::Ports     => Some(Screen::ApiAccess),
+            Screen::ApiAccess => Some(Screen::Certs),
             Screen::Certs     => Some(Screen::Summary),
             Screen::Summary   => Some(Screen::Progress),
             Screen::Progress  => None,
@@ -79,7 +83,8 @@ impl Screen {
             Screen::Timezone  => Some(Screen::Network),
             Screen::Users     => Some(Screen::Timezone),
             Screen::Ports     => Some(Screen::Users),
-            Screen::Certs     => Some(Screen::Ports),
+            Screen::ApiAccess => Some(Screen::Ports),
+            Screen::Certs     => Some(Screen::ApiAccess),
             Screen::Summary   => Some(Screen::Certs),
             Screen::Progress  => Some(Screen::Summary),
         }
@@ -109,6 +114,7 @@ enum ScreenState {
     Timezone(timezone::TimezoneState),
     Users(users::UsersState),
     Ports(ports::PortsState),
+    ApiAccess(api_access::ApiAccessState),
     Certs(certs::CertsState),
     Summary(summary::SummaryState),
     Progress(progress::ProgressState),
@@ -117,29 +123,31 @@ enum ScreenState {
 impl ScreenState {
     fn for_screen(screen: &Screen) -> Self {
         match screen {
-            Screen::Welcome  => ScreenState::Welcome(welcome::WelcomeState::new()),
-            Screen::Disk     => ScreenState::Disk(disk::DiskState::new()),
-            Screen::Network  => ScreenState::Network(network::NetworkState::new()),
-            Screen::Timezone => ScreenState::Timezone(timezone::TimezoneState::new()),
-            Screen::Users    => ScreenState::Users(users::UsersState::new()),
-            Screen::Ports    => ScreenState::Ports(ports::PortsState::new()),
-            Screen::Certs    => ScreenState::Certs(certs::CertsState::new()),
-            Screen::Summary  => ScreenState::Summary(summary::SummaryState::new()),
-            Screen::Progress => ScreenState::Progress(progress::ProgressState::new()),
+            Screen::Welcome   => ScreenState::Welcome(welcome::WelcomeState::new()),
+            Screen::Disk      => ScreenState::Disk(disk::DiskState::new()),
+            Screen::Network   => ScreenState::Network(network::NetworkState::new()),
+            Screen::Timezone  => ScreenState::Timezone(timezone::TimezoneState::new()),
+            Screen::Users     => ScreenState::Users(users::UsersState::new()),
+            Screen::Ports     => ScreenState::Ports(ports::PortsState::new()),
+            Screen::ApiAccess => ScreenState::ApiAccess(api_access::ApiAccessState::new()),
+            Screen::Certs     => ScreenState::Certs(certs::CertsState::new()),
+            Screen::Summary   => ScreenState::Summary(summary::SummaryState::new()),
+            Screen::Progress  => ScreenState::Progress(progress::ProgressState::new()),
         }
     }
 
     fn handle_key(&mut self, key: KeyEvent, config: &mut InstallConfig) -> ScreenResult {
         match self {
-            ScreenState::Welcome(s)  => s.handle_key(key, config),
-            ScreenState::Disk(s)     => s.handle_key(key, config),
-            ScreenState::Network(s)  => s.handle_key(key, config),
-            ScreenState::Timezone(s) => s.handle_key(key, config),
-            ScreenState::Users(s)    => s.handle_key(key, config),
-            ScreenState::Ports(s)    => s.handle_key(key, config),
-            ScreenState::Certs(s)    => s.handle_key(key, config),
-            ScreenState::Summary(s)  => s.handle_key(key, config),
-            ScreenState::Progress(s) => s.handle_key(key, config),
+            ScreenState::Welcome(s)   => s.handle_key(key, config),
+            ScreenState::Disk(s)      => s.handle_key(key, config),
+            ScreenState::Network(s)   => s.handle_key(key, config),
+            ScreenState::Timezone(s)  => s.handle_key(key, config),
+            ScreenState::Users(s)     => s.handle_key(key, config),
+            ScreenState::Ports(s)     => s.handle_key(key, config),
+            ScreenState::ApiAccess(s) => s.handle_key(key, config),
+            ScreenState::Certs(s)     => s.handle_key(key, config),
+            ScreenState::Summary(s)   => s.handle_key(key, config),
+            ScreenState::Progress(s)  => s.handle_key(key, config),
         }
     }
 
@@ -153,15 +161,16 @@ impl ScreenState {
 
     fn render(&mut self, frame: &mut Frame, config: &InstallConfig) {
         match self {
-            ScreenState::Welcome(s)  => s.render(frame, config),
-            ScreenState::Disk(s)     => s.render(frame, config),
-            ScreenState::Network(s)  => s.render(frame, config),
-            ScreenState::Timezone(s) => s.render(frame, config),
-            ScreenState::Users(s)    => s.render(frame, config),
-            ScreenState::Ports(s)    => s.render(frame, config),
-            ScreenState::Certs(s)    => s.render(frame, config),
-            ScreenState::Summary(s)  => s.render(frame, config),
-            ScreenState::Progress(s) => s.render(frame, config),
+            ScreenState::Welcome(s)   => s.render(frame, config),
+            ScreenState::Disk(s)      => s.render(frame, config),
+            ScreenState::Network(s)   => s.render(frame, config),
+            ScreenState::Timezone(s)  => s.render(frame, config),
+            ScreenState::Users(s)     => s.render(frame, config),
+            ScreenState::Ports(s)     => s.render(frame, config),
+            ScreenState::ApiAccess(s) => s.render(frame, config),
+            ScreenState::Certs(s)     => s.render(frame, config),
+            ScreenState::Summary(s)   => s.render(frame, config),
+            ScreenState::Progress(s)  => s.render(frame, config),
         }
     }
 }
@@ -176,28 +185,30 @@ mod tests {
 
     #[test]
     fn test_screen_next_transitions() {
-        assert_eq!(Screen::Welcome.next(),  Some(Screen::Disk));
-        assert_eq!(Screen::Disk.next(),     Some(Screen::Network));
-        assert_eq!(Screen::Network.next(),  Some(Screen::Timezone));
-        assert_eq!(Screen::Timezone.next(), Some(Screen::Users));
-        assert_eq!(Screen::Users.next(),    Some(Screen::Ports));
-        assert_eq!(Screen::Ports.next(),    Some(Screen::Certs));
-        assert_eq!(Screen::Certs.next(),    Some(Screen::Summary));
-        assert_eq!(Screen::Summary.next(),  Some(Screen::Progress));
-        assert_eq!(Screen::Progress.next(), None);
+        assert_eq!(Screen::Welcome.next(),   Some(Screen::Disk));
+        assert_eq!(Screen::Disk.next(),      Some(Screen::Network));
+        assert_eq!(Screen::Network.next(),   Some(Screen::Timezone));
+        assert_eq!(Screen::Timezone.next(),  Some(Screen::Users));
+        assert_eq!(Screen::Users.next(),     Some(Screen::Ports));
+        assert_eq!(Screen::Ports.next(),     Some(Screen::ApiAccess));
+        assert_eq!(Screen::ApiAccess.next(), Some(Screen::Certs));
+        assert_eq!(Screen::Certs.next(),     Some(Screen::Summary));
+        assert_eq!(Screen::Summary.next(),   Some(Screen::Progress));
+        assert_eq!(Screen::Progress.next(),  None);
     }
 
     #[test]
     fn test_screen_prev_transitions() {
-        assert_eq!(Screen::Welcome.prev(),  None);
-        assert_eq!(Screen::Disk.prev(),     Some(Screen::Welcome));
-        assert_eq!(Screen::Network.prev(),  Some(Screen::Disk));
-        assert_eq!(Screen::Timezone.prev(), Some(Screen::Network));
-        assert_eq!(Screen::Users.prev(),    Some(Screen::Timezone));
-        assert_eq!(Screen::Ports.prev(),    Some(Screen::Users));
-        assert_eq!(Screen::Certs.prev(),    Some(Screen::Ports));
-        assert_eq!(Screen::Summary.prev(),  Some(Screen::Certs));
-        assert_eq!(Screen::Progress.prev(), Some(Screen::Summary));
+        assert_eq!(Screen::Welcome.prev(),   None);
+        assert_eq!(Screen::Disk.prev(),      Some(Screen::Welcome));
+        assert_eq!(Screen::Network.prev(),   Some(Screen::Disk));
+        assert_eq!(Screen::Timezone.prev(),  Some(Screen::Network));
+        assert_eq!(Screen::Users.prev(),     Some(Screen::Timezone));
+        assert_eq!(Screen::Ports.prev(),     Some(Screen::Users));
+        assert_eq!(Screen::ApiAccess.prev(), Some(Screen::Ports));
+        assert_eq!(Screen::Certs.prev(),     Some(Screen::ApiAccess));
+        assert_eq!(Screen::Summary.prev(),   Some(Screen::Certs));
+        assert_eq!(Screen::Progress.prev(),  Some(Screen::Summary));
     }
 
     #[test]
@@ -205,7 +216,8 @@ mod tests {
         let mut screen = Some(Screen::Welcome);
         let expected = vec![
             Screen::Welcome, Screen::Disk, Screen::Network, Screen::Timezone,
-            Screen::Users, Screen::Ports, Screen::Certs, Screen::Summary, Screen::Progress,
+            Screen::Users, Screen::Ports, Screen::ApiAccess, Screen::Certs,
+            Screen::Summary, Screen::Progress,
         ];
         let mut visited = Vec::new();
         while let Some(s) = screen {

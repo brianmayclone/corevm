@@ -11,7 +11,7 @@ use ratatui::Frame;
 
 use crate::common::{
     certs::{generate_self_signed, import_certificates},
-    config::{ApplianceConfig, ApplianceRole, write_vmm_cluster_config, write_vmm_server_config},
+    config::{ApplianceConfig, ApplianceRole, write_vmm_cluster_config, write_vmm_server_config_full},
     firewall::{write_nftables_config, FirewallConfig},
     network::write_networkd_config,
     system::{
@@ -149,6 +149,7 @@ impl ProgressState {
         let user_password = config.user_password.clone();
         let server_port = config.server_port;
         let cluster_port = config.cluster_port;
+        let cli_access_enabled = config.cli_access_enabled;
         let self_signed_cert = config.self_signed_cert;
         let cert_path = config.cert_path.clone();
         let key_path = config.key_path.clone();
@@ -274,6 +275,11 @@ impl ProgressState {
 
             let web_url = match &role {
                 ApplianceRole::Server => {
+                    let log_file = "/var/log/vmm/vmm-server.log";
+                    if let Err(e) = write_vmm_server_config_full(target, server_port, data_dir, log_file, cli_access_enabled) {
+                        send(ProgressMsg::Error(format!("write_vmm_server_config failed: {}", e)));
+                        return;
+                    }
                     format!("https://{}:{}", hostname, server_port)
                 }
                 ApplianceRole::Cluster => {

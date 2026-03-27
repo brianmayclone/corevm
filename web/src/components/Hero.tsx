@@ -5,9 +5,10 @@ import { t } from '../i18n';
 
 interface HeroProps {
   lang: Lang;
+  onDownloadClick: () => void;
 }
 
-export default function Hero({ lang }: HeroProps) {
+export default function Hero({ lang, onDownloadClick }: HeroProps) {
   return (
     <section className="relative overflow-hidden pt-32 pb-20 md:pt-44 md:pb-32">
       {/* Background effects */}
@@ -78,16 +79,16 @@ export default function Hero({ lang }: HeroProps) {
           transition={{ duration: 0.5, delay: 0.3 }}
           className="mt-10 flex flex-col items-center justify-center gap-4 sm:flex-row"
         >
-          <a
-            href="#get-started"
-            className="group inline-flex items-center gap-2 rounded-xl bg-primary-500 px-7 py-3.5 text-sm font-semibold text-white shadow-lg shadow-primary-500/25 transition-all hover:bg-primary-400 hover:shadow-xl hover:shadow-primary-500/30 no-underline"
+          <button
+            onClick={onDownloadClick}
+            className="group inline-flex items-center gap-2 rounded-xl bg-primary-500 px-7 py-3.5 text-sm font-semibold text-white shadow-lg shadow-primary-500/25 transition-all hover:bg-primary-400 hover:shadow-xl hover:shadow-primary-500/30 cursor-pointer border-none"
           >
             <Download size={16} />
             {t(lang, 'hero_cta_primary')}
             <ArrowRight size={16} className="transition-transform group-hover:translate-x-0.5" />
-          </a>
+          </button>
           <a
-            href="#"
+            href="https://github.com/brianmayclone/corevm"
             className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-7 py-3.5 text-sm font-semibold text-surface-300 transition-all hover:border-white/20 hover:bg-white/10 hover:text-white no-underline"
           >
             <GitBranch size={16} />

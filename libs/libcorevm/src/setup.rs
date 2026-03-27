@@ -43,6 +43,8 @@ pub enum GuestOs {
     RedHat,
     Arch,
     LinuxOther,
+    // AnyOS
+    AnyOs,
     // BSD / DOS
     FreeBsd,
     DosFreeDos,
@@ -66,6 +68,7 @@ impl GuestOs {
         GuestOs::RedHat,
         GuestOs::Arch,
         GuestOs::LinuxOther,
+        GuestOs::AnyOs,
         GuestOs::FreeBsd,
         GuestOs::DosFreeDos,
     ];
@@ -88,6 +91,7 @@ impl GuestOs {
             GuestOs::RedHat             => "Red Hat Enterprise Linux",
             GuestOs::Arch               => "Arch Linux",
             GuestOs::LinuxOther         => "Linux (Other)",
+            GuestOs::AnyOs              => "AnyOS",
             GuestOs::FreeBsd            => "FreeBSD",
             GuestOs::DosFreeDos         => "DOS / FreeDOS",
         }
@@ -102,7 +106,7 @@ impl GuestOs {
             | GuestOs::WindowsServer2019 | GuestOs::WindowsServer2022 => "Windows",
             GuestOs::Ubuntu | GuestOs::Debian | GuestOs::Fedora
             | GuestOs::OpenSuse | GuestOs::RedHat | GuestOs::Arch
-            | GuestOs::LinuxOther => "Linux",
+            | GuestOs::LinuxOther | GuestOs::AnyOs => "Linux",
             GuestOs::FreeBsd => "BSD",
             GuestOs::DosFreeDos => "DOS",
         }
@@ -126,6 +130,7 @@ impl GuestOs {
             GuestOs::RedHat             => "rhel",
             GuestOs::Arch               => "arch",
             GuestOs::LinuxOther         => "linux",
+            GuestOs::AnyOs              => "anyos",
             GuestOs::FreeBsd            => "freebsd",
             GuestOs::DosFreeDos         => "dos",
         }
@@ -148,6 +153,7 @@ impl GuestOs {
             "rhel"        => GuestOs::RedHat,
             "arch"        => GuestOs::Arch,
             "linux"       => GuestOs::LinuxOther,
+            "anyos"       => GuestOs::AnyOs,
             "freebsd"     => GuestOs::FreeBsd,
             "dos"         => GuestOs::DosFreeDos,
             _             => GuestOs::Other,

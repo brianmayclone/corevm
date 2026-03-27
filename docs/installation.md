@@ -45,12 +45,40 @@ sudo ./vmm-server-installer.sh
 sudo ./vmm-cluster-installer.sh
 ```
 
+### Installer Options
+
+| Flag | Description |
+|------|-------------|
+| `--enable-cli-access` | Enable CLI/API access for remote management via vmmctl |
+| `--enable-tls` | Generate a self-signed TLS certificate for HTTPS |
+| `--uninstall` | Remove the installation |
+
+If no flags are provided, the installer prompts interactively whether to enable CLI access.
+
+```bash
+# Install with CLI access and TLS enabled
+sudo ./vmm-server-installer.sh --enable-cli-access --enable-tls
+```
+
 The installer will:
 1. Detect the platform (native Linux / WSL2) and init system
-2. Extract and install the binary to `/opt/vmm-server/` or `/opt/vmm-cluster/`
+2. Extract and install vmm-server and vmmctl to `/opt/vmm-server/`
 3. Install BIOS assets (vmm-server only) and the Web UI
-4. Create data directories and a config file with a random JWT secret
-5. Install the appropriate service configuration for the detected init system
+4. Generate a TLS certificate (if `--enable-tls`)
+5. Create data directories and a config file with a random JWT secret
+6. Install the appropriate service configuration for the detected init system
+
+### Remote Management with vmmctl
+
+After installation with `--enable-cli-access`, connect from a remote machine:
+
+```bash
+vmmctl config set-server https://<SERVER_IP>:8443 --insecure
+vmmctl login    # admin / admin
+vmmctl vm list
+```
+
+See the [vmmctl User Guide](apps/vmmctl/user-guide.md) for full CLI documentation.
 
 ### Starting the Service
 
@@ -101,6 +129,7 @@ This removes the binary and service files but preserves config (`/etc/vmm/`) and
 | What | vmm-server | vmm-cluster |
 |------|-----------|-------------|
 | Binary | `/opt/vmm-server/vmm-server` | `/opt/vmm-cluster/vmm-cluster` |
+| CLI tool | `/opt/vmm-server/vmmctl` (+ `/usr/local/bin/vmmctl`) | — |
 | Web UI | `/opt/vmm-server/ui/` | `/opt/vmm-cluster/ui/` |
 | BIOS assets | `/opt/vmm-server/assets/bios/` | — |
 | Config | `/etc/vmm/vmm-server.toml` | `/etc/vmm/vmm-cluster.toml` |

@@ -22,7 +22,7 @@ export function guestOsLabel(os: string): string {
     win7: 'Windows 7', win8: 'Windows 8', win10: 'Windows 10', win11: 'Windows 11',
     winserver2016: 'WinServer 2016', winserver2019: 'WinServer 2019', winserver2022: 'WinServer 2022',
     ubuntu: 'Ubuntu', debian: 'Debian', fedora: 'Fedora', opensuse: 'openSUSE',
-    redhat: 'Red Hat', arch: 'Arch Linux', linux: 'Linux', freebsd: 'FreeBSD',
+    redhat: 'Red Hat', arch: 'Arch Linux', linux: 'Linux', anyos: 'AnyOS', freebsd: 'FreeBSD',
     dos: 'DOS', other: 'Other',
   }
   return map[os] || os

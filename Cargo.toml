@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "apps/vmctl",
+  "apps/vmmctl",
   "apps/vmmanager",
   "apps/vmm-server",
   "apps/vmm-cluster",

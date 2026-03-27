@@ -567,7 +567,7 @@ impl DisplayWidget {
                 // Click on display → capture mouse and keyboard input
                 if response.clicked() || response.drag_started() {
                     ui.memory_mut(|m| m.request_focus(display_id));
-                    if use_evdev && !self.mouse_captured {
+                    if !self.mouse_captured {
                         self.capture_mouse(ctx, use_evdev);
                     }
                 }
@@ -603,7 +603,7 @@ impl DisplayWidget {
         self.mouse_accum_y = 0.0;
         self.abs_cursor_x = 16383; // center
         self.abs_cursor_y = 16383; // center
-        self.warp_skip_frames = 0;
+        self.warp_skip_frames = 2; // skip initial warp phantom deltas
         self.warp_counter = 0;
 
         if use_evdev {
@@ -617,13 +617,14 @@ impl DisplayWidget {
                 eprintln!("[evdev] input reader started (mouse={}, kbd={}, grabbed={})",
                     evdev.has_mouse(), evdev.has_keyboard(), grabbed);
             }
-
-            // Lock cursor — prevents it from leaving the window.
-            ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::Locked));
         }
-        // When evdev is disabled, no cursor lock — mouse stays free (USB tablet mode).
+
+        // CursorGrab::Locked freezes the host cursor in place.
+        // Raw mouse deltas still arrive via DeviceEvent::MouseMotion,
+        // which eframe 0.31 forwards as Event::MouseMoved → pointer.motion().
+        ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::Locked));
         ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(false));
-        eprintln!("[mouse] Captured — Ctrl+Alt+G/F to release");
+        eprintln!("[mouse] Captured (evdev={}) — Ctrl+Alt+G/F to release", use_evdev);
     }
 
     /// Check all release mechanisms. Returns true if the mouse should be released.
@@ -694,6 +695,8 @@ impl DisplayWidget {
         //    On Linux, CursorGrab::Locked is unreliable across WMs and may cause
         //    false focus-loss reports.  Only release on focus loss when evdev is NOT
         //    available (non-Linux or no evdev reader).
+        //    Grace period: CursorGrab::Locked itself can trigger transient focus-loss
+        //    events on some WMs, so ignore focus loss within 500ms of capture.
         #[cfg(target_os = "linux")]
         let has_evdev = self.evdev_input.as_ref()
             .map_or(false, |e| e.is_running());
@@ -701,10 +704,15 @@ impl DisplayWidget {
         let has_evdev = false;
 
         if !has_evdev {
-            let has_focus = ctx.input(|i| i.focused);
-            if !has_focus {
-                eprintln!("[mouse] Release via focus loss");
-                return true;
+            let in_grace = self.capture_time
+                .map(|t| t.elapsed() < std::time::Duration::from_millis(500))
+                .unwrap_or(false);
+            if !in_grace {
+                let has_focus = ctx.input(|i| i.focused);
+                if !has_focus {
+                    eprintln!("[mouse] Release via focus loss");
+                    return true;
+                }
             }
         }
 
@@ -755,37 +763,75 @@ impl DisplayWidget {
 
     /// Handle mouse input over the display area and inject PS/2 events into the VM.
     fn handle_mouse_input(&mut self, ui: &egui::Ui, ctx: &egui::Context, display_rect: egui::Rect, vm_handle: u64, _response: &egui::Response) {
-        // Read button state: prefer evdev when mouse is exclusively grabbed
-        // (EVIOCGRAB prevents egui from seeing button events).
+        // Read button state from all available sources.
+        // In CursorGrab::Locked mode, egui_winit may not push PointerButton
+        // events (requires pointer_pos_in_points != None), so pointer.button_down()
+        // can become stuck at false. We merge evdev + egui to be robust.
         let buttons = {
-            let mut from_evdev = false;
+            let mut b = 0u8;
+
+            // Source 1: evdev (Linux) — always preferred when available
             #[cfg(target_os = "linux")]
             {
                 if let Some(ref evdev) = self.evdev_input {
-                    if evdev.is_mouse_grabbed() {
-                        from_evdev = true;
+                    if evdev.is_running() && evdev.has_mouse() {
+                        b |= evdev.get_buttons();
                     }
                 }
             }
-            if from_evdev {
-                #[cfg(target_os = "linux")]
-                {
-                    self.evdev_input.as_ref().map(|e| e.get_buttons()).unwrap_or(0)
-                }
-                #[cfg(not(target_os = "linux"))]
-                { 0u8 }
-            } else {
-                ui.input(|i| {
-                    let mut b = 0u8;
-                    if i.pointer.button_down(egui::PointerButton::Primary) { b |= 1; }
-                    if i.pointer.button_down(egui::PointerButton::Secondary) { b |= 2; }
-                    if i.pointer.button_down(egui::PointerButton::Middle) { b |= 4; }
-                    b
-                })
+
+            // Source 2: egui pointer state (works when cursor is not locked)
+            if b == 0 {
+                b |= ui.input(|i| {
+                    let mut eb = 0u8;
+                    if i.pointer.button_down(egui::PointerButton::Primary) { eb |= 1; }
+                    if i.pointer.button_down(egui::PointerButton::Secondary) { eb |= 2; }
+                    if i.pointer.button_down(egui::PointerButton::Middle) { eb |= 4; }
+                    eb
+                });
             }
+
+            // Source 3: scan egui events directly for PointerButton events.
+            // This catches button presses that pointer.button_down() misses
+            // when pointer_pos is None (CursorGrab::Locked on some compositors).
+            if b == 0 && self.mouse_captured {
+                b |= ui.input(|i| {
+                    let mut eb = 0u8;
+                    for event in &i.events {
+                        if let egui::Event::PointerButton { button, pressed: true, .. } = event {
+                            match button {
+                                egui::PointerButton::Primary => eb |= 1,
+                                egui::PointerButton::Secondary => eb |= 2,
+                                egui::PointerButton::Middle => eb |= 4,
+                                _ => {}
+                            }
+                        }
+                    }
+                    eb
+                });
+            }
+
+            b
         };
 
         self.mouse_debug_counter += 1;
+
+        // Debug: log button state changes with source info
+        if buttons != self.last_mouse_buttons {
+            let src = {
+                #[cfg(target_os = "linux")]
+                {
+                    if self.evdev_input.as_ref().map_or(false, |e| e.is_running() && e.has_mouse()) {
+                        "evdev"
+                    } else {
+                        "egui"
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                { "egui" }
+            };
+            eprintln!("[mouse] buttons changed: {} -> {} (src={})", self.last_mouse_buttons, buttons, src);
+        }
 
         let has_virtio_input = libcorevm::ffi::corevm_has_virtio_input(vm_handle) != 0;
 
@@ -878,12 +924,16 @@ impl DisplayWidget {
             evdev_wheel = 0;
         }
 
-        // Fallback: egui pointer.delta() when evdev provided nothing.
-        // Works on some WMs with CursorGrab::Locked.
+        // Fallback: egui pointer.motion() when evdev provided nothing.
+        // pointer.motion() returns raw device deltas from DeviceEvent::MouseMotion,
+        // which works even with CursorGrab::Locked (unlike pointer.delta() which
+        // relies on CursorMoved position events that stop in Locked mode).
         let (final_dx, final_dy) = if got_evdev {
             (evdev_dx, evdev_dy)
         } else {
-            let d = ui.input(|i| i.pointer.delta());
+            let d = ui.input(|i| {
+                i.pointer.motion().unwrap_or(i.pointer.delta())
+            });
             (d.x as i32, d.y as i32)
         };
 

@@ -17,6 +17,8 @@ pub struct ServerConfig {
     pub vms: VmsSection,
     #[serde(default)]
     pub logging: LoggingSection,
+    #[serde(default)]
+    pub api: ApiSection,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,7 +79,17 @@ pub struct LoggingSection {
     pub file: Option<PathBuf>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ApiSection {
+    #[serde(default = "default_cli_access")]
+    pub cli_access_enabled: bool,
+    #[serde(default)]
+    pub allowed_ips: Vec<String>,
+}
+
 // ── Defaults ─────────────────────────────────────────────────────────────
+
+fn default_cli_access() -> bool { true }
 
 fn default_bind() -> String { "0.0.0.0".into() }
 fn default_port() -> u16 { 8443 }
@@ -123,11 +135,17 @@ impl Default for LoggingSection {
         Self { level: default_log_level(), file: None }
     }
 }
+impl Default for ApiSection {
+    fn default() -> Self {
+        Self { cli_access_enabled: default_cli_access(), allowed_ips: Vec::new() }
+    }
+}
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             server: Default::default(), auth: Default::default(), storage: Default::default(),
             network: Default::default(), vms: Default::default(), logging: Default::default(),
+            api: Default::default(),
         }
     }
 }

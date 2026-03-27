@@ -4,7 +4,7 @@ use std::thread::JoinHandle;
 
 use eframe::egui;
 
-use crate::config::VmConfig;
+use crate::config::{VmConfig, GuestOs};
 use crate::ui::dialogs::{AboutDialog, AddDiskDialog, AddDiskMode, CopyVmDialog, CreateDiskDialog, CreateVmDialog, DiskPoolDialog, SnapshotsDialog};
 use crate::ui::components::display::DisplayWidget;
 use crate::ui::components::filebrowser::FileBrowserDialog;
@@ -741,6 +741,7 @@ impl CoreVmApp {
         let icons: &[(&str, &[u8])] = &[
             ("windows", include_bytes!("../assets/icons/os/windows.png")),
             ("linux", include_bytes!("../assets/icons/os/linux.png")),
+            ("anyos", include_bytes!("../assets/icons/os/anyos.png")),
             ("other", include_bytes!("../assets/icons/os/other.png")),
         ];
         for (name, png_data) in icons {
@@ -756,7 +757,9 @@ impl CoreVmApp {
 
     fn vm_icons(&self) -> HashMap<String, egui::TextureId> {
         self.vms.iter().filter_map(|v| {
-            let key = if v.config.guest_os.is_windows() {
+            let key = if v.config.guest_os == GuestOs::AnyOs {
+                "anyos"
+            } else if v.config.guest_os.is_windows() {
                 "windows"
             } else if v.config.guest_os.is_linux() {
                 "linux"

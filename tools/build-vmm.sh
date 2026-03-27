@@ -18,6 +18,10 @@ echo -e "${CYAN}=== Building vmm-server (Rust) ===${NC}"
 cargo build --release -p vmm-server
 echo -e "${GREEN}✓ vmm-server built${NC}"
 
+echo -e "${CYAN}=== Building vmmctl (CLI) ===${NC}"
+cargo build --release -p vmmctl
+echo -e "${GREEN}✓ vmmctl built${NC}"
+
 # Copy BIOS assets next to the binary
 BIOS_SRC="$ROOT/apps/vmm-server/assets/bios"
 BIOS_DST="$ROOT/target/release/assets/bios"

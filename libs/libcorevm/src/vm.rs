@@ -493,11 +493,14 @@ impl Vm {
             self.io.register(0x80, 0x10, Box::new(DmaPage));   // Page regs: 0x80-0x8F
         }
 
-        // ICH9 SMBus stub — OVMF probes the SMBus host controller registers
-        // in the 0x0CC0-0x0CFF range during platform init.
+        // ICH9 SMBus stub — answers immediately with DEVNACK (no device).
+        // Register at BOTH the default BAR (0x0CC0, used by OVMF) and the
+        // SeaBIOS-assigned BAR (0x0700). SeaBIOS rewrites BAR4 during PCI
+        // resource allocation, so guests using SeaBIOS access 0x0700.
         {
             use crate::devices::smbus::SmBus;
             self.io.register(0x0CC0, 64, Box::new(SmBus::new()));
+            self.io.register(0x0700, 64, Box::new(SmBus::new()));
         }
 
         // Register PIC pair covering both master (0x20-0x21) and slave (0xA0-0xA1).

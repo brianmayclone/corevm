@@ -2,6 +2,7 @@ mod status;
 mod network;
 mod passwords;
 mod ports;
+mod api_access;
 mod certs;
 mod services;
 mod time;
@@ -43,6 +44,7 @@ enum ActiveDialog {
     Network(network::Dialog),
     Passwords(passwords::Dialog),
     Ports(ports::Dialog),
+    ApiAccess(api_access::Dialog),
     Certs(certs::Dialog),
     Services(services::Dialog),
     Time(time::Dialog),
@@ -60,6 +62,7 @@ impl ActiveDialog {
             ActiveDialog::Network(d)    => network(d.handle_key(key)),
             ActiveDialog::Passwords(d)  => passwords(d.handle_key(key)),
             ActiveDialog::Ports(d)      => ports(d.handle_key(key)),
+            ActiveDialog::ApiAccess(d)  => api_access(d.handle_key(key)),
             ActiveDialog::Certs(d)      => certs(d.handle_key(key)),
             ActiveDialog::Services(d)   => services(d.handle_key(key)),
             ActiveDialog::Time(d)       => time(d.handle_key(key)),
@@ -77,6 +80,7 @@ impl ActiveDialog {
             ActiveDialog::Network(d)    => d.render(frame),
             ActiveDialog::Passwords(d)  => d.render(frame),
             ActiveDialog::Ports(d)      => d.render(frame),
+            ActiveDialog::ApiAccess(d)  => d.render(frame),
             ActiveDialog::Certs(d)      => d.render(frame),
             ActiveDialog::Services(d)   => d.render(frame),
             ActiveDialog::Time(d)       => d.render(frame),
@@ -107,6 +111,7 @@ macro_rules! impl_map {
 impl_map!(network);
 impl_map!(passwords);
 impl_map!(ports);
+impl_map!(api_access);
 impl_map!(certs);
 impl_map!(services);
 impl_map!(time);
@@ -157,13 +162,13 @@ fn run_inner(terminal: &mut ratatui::DefaultTerminal) -> anyhow::Result<()> {
 
             // Help line
             let help = Paragraph::new(Line::from(vec![
-                Span::styled(" F9", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(" F10", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
                 Span::raw(":Shell  "),
-                Span::styled("F10", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                Span::raw(":Reboot  "),
                 Span::styled("F11", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw(":Reboot  "),
+                Span::styled("F12", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
                 Span::raw(":Diag  "),
-                Span::styled("F12", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                Span::styled(" r", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
                 Span::raw(":Reset"),
             ]));
             help.render(chunks[3], frame.buffer_mut());
@@ -191,15 +196,16 @@ fn run_inner(terminal: &mut ratatui::DefaultTerminal) -> anyhow::Result<()> {
                         KeyCode::F(6)  => active_dialog = ActiveDialog::Time(time::Dialog::new()),
                         KeyCode::F(7)  => active_dialog = ActiveDialog::Logs(logs::Dialog::new()),
                         KeyCode::F(8)  => active_dialog = ActiveDialog::Update(update::Dialog::new()),
-                        KeyCode::F(9)  => {
+                        KeyCode::F(9)  => active_dialog = ActiveDialog::ApiAccess(api_access::Dialog::new()),
+                        KeyCode::F(10) => {
                             // Special: restore terminal, spawn bash, re-init on return
                             ratatui::restore();
                             let _ = std::process::Command::new("bash").status();
                             *terminal = ratatui::init();
                         }
-                        KeyCode::F(10) => active_dialog = ActiveDialog::Reboot(reboot::Dialog::new()),
-                        KeyCode::F(11) => active_dialog = ActiveDialog::Diagnostics(diagnostics::Dialog::new()),
-                        KeyCode::F(12) => active_dialog = ActiveDialog::Reset(reset::Dialog::new()),
+                        KeyCode::F(11) => active_dialog = ActiveDialog::Reboot(reboot::Dialog::new()),
+                        KeyCode::F(12) => active_dialog = ActiveDialog::Diagnostics(diagnostics::Dialog::new()),
+                        KeyCode::Char('r') => active_dialog = ActiveDialog::Reset(reset::Dialog::new()),
                         KeyCode::Char('q') | KeyCode::Esc => break,
                         _ => {}
                     }
@@ -231,10 +237,10 @@ fn menu_entries() -> Vec<MenuEntry> {
         MenuEntry { key: "F6",  label: "Time/NTP",    color: Color::Cyan },
         MenuEntry { key: "F7",  label: "Logs",        color: Color::Cyan },
         MenuEntry { key: "F8",  label: "Update",      color: Color::Cyan },
-        MenuEntry { key: "F9",  label: "Shell",       color: Color::Yellow },
-        MenuEntry { key: "F10", label: "Reboot",      color: Color::Yellow },
-        MenuEntry { key: "F11", label: "Diagnostics", color: Color::Green },
-        MenuEntry { key: "F12", label: "Reset",       color: Color::Red },
+        MenuEntry { key: "F9",  label: "API Access",  color: Color::Cyan },
+        MenuEntry { key: "F10", label: "Shell",       color: Color::Yellow },
+        MenuEntry { key: "F11", label: "Reboot",      color: Color::Yellow },
+        MenuEntry { key: "F12", label: "Diagnostics", color: Color::Green },
     ]
 }
 

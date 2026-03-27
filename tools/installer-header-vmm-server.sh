@@ -12,8 +12,10 @@
 # the appropriate service configuration.
 #
 # Usage:
-#   sudo ./vmm-server-installer.sh              # Install
-#   sudo ./vmm-server-installer.sh --uninstall  # Remove vmm-server
+#   sudo ./vmm-server-installer.sh                      # Install (interactive)
+#   sudo ./vmm-server-installer.sh --enable-cli-access   # Install with CLI/API access enabled
+#   sudo ./vmm-server-installer.sh --enable-tls          # Install with self-signed TLS
+#   sudo ./vmm-server-installer.sh --uninstall           # Remove vmm-server
 #
 set -e
 
@@ -60,6 +62,18 @@ detect_init_system() {
 }
 
 INIT_SYSTEM=$(detect_init_system)
+
+# ── Parse CLI flags ─────────────────────────────────────────────────────────
+ENABLE_CLI_ACCESS=false
+ENABLE_TLS=false
+for arg in "$@"; do
+    case "$arg" in
+        --enable-cli-access) ENABLE_CLI_ACCESS=true ;;
+        --enable-tls)        ENABLE_TLS=true ;;
+        --uninstall)         ;; # handled below
+        *)                   ;;
+    esac
+done
 
 # ── Root check ───────────────────────────────────────────────────────────────
 if [ "$(id -u)" -ne 0 ]; then
@@ -178,6 +192,15 @@ mkdir -p "$INSTALL_DIR"
 cp "$TMPDIR/vmm-server" "$INSTALL_DIR/vmm-server"
 chmod 755 "$INSTALL_DIR/vmm-server"
 
+# Install vmmctl CLI tool (if included in payload)
+if [ -f "$TMPDIR/vmmctl" ]; then
+    cp "$TMPDIR/vmmctl" "$INSTALL_DIR/vmmctl"
+    chmod 755 "$INSTALL_DIR/vmmctl"
+    # Symlink to /usr/local/bin for system-wide access
+    ln -sf "$INSTALL_DIR/vmmctl" /usr/local/bin/vmmctl
+    echo -e "${GREEN}✓ vmmctl CLI tool installed${NC}"
+fi
+
 # ── Install BIOS assets ─────────────────────────────────────────────────────
 if [ -d "$TMPDIR/assets" ]; then
     mkdir -p "$INSTALL_DIR/assets"
@@ -200,12 +223,44 @@ mkdir -p "$LOG_DIR"
 
 # ── Create config ────────────────────────────────────────────────────────────
 mkdir -p "$CONFIG_DIR"
+
+# ── Generate self-signed TLS certificate if requested ───────────────────────
+TLS_CERT_PATH=""
+TLS_KEY_PATH=""
+if [ "$ENABLE_TLS" = true ]; then
+    TLS_CERT_PATH="$CONFIG_DIR/server.crt"
+    TLS_KEY_PATH="$CONFIG_DIR/server.key"
+    if [ ! -f "$TLS_CERT_PATH" ]; then
+        HOSTNAME=$(hostname -f 2>/dev/null || hostname)
+        HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+        openssl req -x509 -newkey rsa:4096 -keyout "$TLS_KEY_PATH" -out "$TLS_CERT_PATH" \
+            -days 3650 -nodes -subj "/CN=$HOSTNAME" \
+            -addext "subjectAltName=DNS:$HOSTNAME,DNS:localhost,IP:127.0.0.1${HOST_IP:+,IP:$HOST_IP}" \
+            2>/dev/null
+        chmod 600 "$TLS_KEY_PATH"
+        echo -e "${GREEN}✓ Self-signed TLS certificate generated${NC}"
+    else
+        echo -e "${YELLOW}TLS certificate already exists — skipping${NC}"
+    fi
+fi
+
+# ── Interactive CLI access prompt (if not specified via flag) ───────────────
+if [ "$ENABLE_CLI_ACCESS" = false ] && [ -t 0 ] && [ "$1" != "--uninstall" ]; then
+    echo -n -e "  ${CYAN}Enable CLI/API access? [Y/n]:${NC} "
+    read -r CLI_ANSWER
+    if [ -z "$CLI_ANSWER" ] || echo "$CLI_ANSWER" | grep -qi '^y'; then
+        ENABLE_CLI_ACCESS=true
+    fi
+fi
+
 if [ ! -f "$CONFIG_DIR/vmm-server.toml" ]; then
     JWT_SECRET=$(head -c 32 /dev/urandom | base64 | tr -d '=/+' | head -c 32)
     cat > "$CONFIG_DIR/vmm-server.toml" << EOF
 [server]
 bind = "0.0.0.0"
 port = 8443
+$([ -n "$TLS_CERT_PATH" ] && echo "tls_cert = \"$TLS_CERT_PATH\"")
+$([ -n "$TLS_KEY_PATH" ] && echo "tls_key = \"$TLS_KEY_PATH\"")
 
 [auth]
 jwt_secret = "$JWT_SECRET"
@@ -217,6 +272,9 @@ iso_pool = "$DATA_DIR/isos"
 
 [vms]
 config_dir = "$DATA_DIR/vms"
+
+[api]
+cli_access_enabled = $ENABLE_CLI_ACCESS
 
 [logging]
 level = "info"
@@ -537,8 +595,20 @@ else
 fi
 
 echo ""
-echo -e "  ${CYAN}Web UI:${NC}  http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'localhost'):8443"
+HOST_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'localhost')
+PROTO="http"
+[ -n "$TLS_CERT_PATH" ] && PROTO="https"
+echo -e "  ${CYAN}Web UI:${NC}  ${PROTO}://${HOST_IP}:8443"
 echo -e "  ${CYAN}Login:${NC}   admin / admin"
+if [ "$ENABLE_CLI_ACCESS" = true ]; then
+    echo ""
+    echo -e "  ${CYAN}── CLI Access ──────────────────────────────────────${NC}"
+    echo -e "  CLI/API access is ${GREEN}enabled${NC}."
+    echo -e "  Connect from a remote machine:"
+    echo ""
+    echo -e "    vmmctl config set-server ${PROTO}://${HOST_IP}:8443$([ "$ENABLE_TLS" = true ] && echo " --insecure")"
+    echo -e "    vmmctl login"
+fi
 echo ""
 
 exit 0

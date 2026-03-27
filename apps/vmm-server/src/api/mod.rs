@@ -69,6 +69,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/settings/time", get(settings::get_time))
         .route("/api/settings/time/timezone", put(settings::set_timezone))
         .route("/api/settings/security", get(settings::get_security))
+        .route("/api/settings/api-access", get(settings::get_api_access).put(settings::set_api_access))
         .route("/api/settings/groups", get(settings::list_groups).post(settings::create_group))
         .route("/api/settings/groups/{id}", delete(settings::delete_group))
         // WebSocket console + terminal — always allowed

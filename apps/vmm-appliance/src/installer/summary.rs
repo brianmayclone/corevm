@@ -147,6 +147,10 @@ fn build_summary_rows(config: &InstallConfig) -> Vec<(String, String)> {
         rows.push(("Cluster Port:".to_string(), config.cluster_port.to_string()));
     }
 
+    // API Access
+    rows.push(("CLI/API Access:".to_string(),
+        if config.cli_access_enabled { "Enabled".to_string() } else { "Disabled".to_string() }));
+
     // Certs
     let cert_mode = if config.self_signed_cert {
         "Self-signed (generated)".to_string()

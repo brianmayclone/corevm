@@ -5,9 +5,10 @@ import { t } from '../i18n';
 
 interface CTAProps {
   lang: Lang;
+  onDownloadClick: () => void;
 }
 
-export default function CTA({ lang }: CTAProps) {
+export default function CTA({ lang, onDownloadClick }: CTAProps) {
   return (
     <section id="get-started" className="relative py-24 md:py-32">
       <div className="pointer-events-none absolute inset-0">
@@ -41,13 +42,13 @@ export default function CTA({ lang }: CTAProps) {
           transition={{ delay: 0.2 }}
           className="mt-10 flex flex-col items-center justify-center gap-4 sm:flex-row"
         >
-          <a
-            href="#"
-            className="group inline-flex items-center gap-2 rounded-xl bg-primary-500 px-7 py-3.5 text-sm font-semibold text-white shadow-lg shadow-primary-500/25 transition-all hover:bg-primary-400 hover:shadow-xl hover:shadow-primary-500/30 no-underline"
+          <button
+            onClick={onDownloadClick}
+            className="group inline-flex items-center gap-2 rounded-xl bg-primary-500 px-7 py-3.5 text-sm font-semibold text-white shadow-lg shadow-primary-500/25 transition-all hover:bg-primary-400 hover:shadow-xl hover:shadow-primary-500/30 cursor-pointer border-none"
           >
             <Download size={16} />
             {t(lang, 'cta_download')}
-          </a>
+          </button>
           <a
             href="#"
             className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-7 py-3.5 text-sm font-semibold text-surface-300 transition-all hover:border-white/20 hover:bg-white/10 hover:text-white no-underline"
@@ -77,7 +78,7 @@ export default function CTA({ lang }: CTAProps) {
               <code className="text-sm">
                 <span className="text-surface-500">$</span>{' '}
                 <span className="text-accent-400">git</span>{' '}
-                <span className="text-surface-300">clone https://github.com/user/corevm.git</span>
+                <span className="text-surface-300">clone https://github.com/brianmayclone/corevm.git</span>
               </code>
               <br />
               <code className="text-sm">

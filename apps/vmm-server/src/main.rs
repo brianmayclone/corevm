@@ -223,8 +223,10 @@ async fn main() {
     });
 
     // Build router — managed-mode guard blocks /api/* when managed by a cluster
+    // API access guard controls CLI/API access (can be disabled via config)
     let api_router = api::router()
         .layer(axum::middleware::from_fn_with_state(state.clone(), api::guard::managed_mode_guard))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), auth::api_access::api_access_guard))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
@@ -240,58 +242,58 @@ async fn main() {
         api_router
     };
 
-    // Start server
+    // Start server (with optional TLS)
     let bind = format!("{}:{}", state.config.server.bind, state.config.server.port);
-    let listener = tokio::net::TcpListener::bind(&bind).await
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to bind {}: {}", bind, e);
+    let use_tls = state.config.server.tls_cert.is_some() && state.config.server.tls_key.is_some();
+
+    if use_tls {
+        let cert_path = state.config.server.tls_cert.as_ref().unwrap();
+        let key_path = state.config.server.tls_key.as_ref().unwrap();
+        let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path)
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("TLS config error: {} (cert={}, key={})", e, cert_path, key_path);
+                std::process::exit(1);
+            });
+        tracing::info!("Listening on https://{} (TLS enabled)", bind);
+        let addr: std::net::SocketAddr = bind.parse().unwrap_or_else(|e| {
+            eprintln!("Invalid bind address {}: {}", bind, e);
             std::process::exit(1);
         });
-    tracing::info!("Listening on http://{}", bind);
 
     // Start UDP discovery beacon
     discovery::spawn(Arc::clone(&state));
 
-    // Periodic database backup task (every 30 minutes)
-    {
-        let db_path = db_path.clone();
-        let backup_dir = backup_dir.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30 * 60));
-            interval.tick().await; // skip first immediate tick
-            loop {
-                interval.tick().await;
-                let backup_name = format!("vmm-auto-{}.db",
-                    chrono::Local::now().format("%Y%m%d-%H%M%S"));
-                let backup_path = backup_dir.join(&backup_name);
-                match std::fs::copy(&db_path, &backup_path) {
-                    Ok(_) => tracing::info!("Auto-backup: {}", backup_path.display()),
-                    Err(e) => tracing::warn!("Auto-backup failed: {}", e),
-                }
-                // Keep only last 10 auto-backups
-                if let Ok(entries) = std::fs::read_dir(&backup_dir) {
-                    let mut backups: Vec<_> = entries.filter_map(|e| e.ok())
-                        .filter(|e| e.file_name().to_string_lossy().starts_with("vmm-auto-"))
-                        .collect();
-                    backups.sort_by_key(|e| e.file_name());
-                    if backups.len() > 10 {
-                        for old in &backups[..backups.len() - 10] {
-                            let _ = std::fs::remove_file(old.path());
-                        }
-                    }
-                }
-            }
-        });
-    }
+        // Periodic database backup task (every 30 minutes)
+        spawn_backup_task(db_path.clone(), backup_dir.clone());
 
-    // Graceful shutdown on Ctrl+C
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("Server error: {}", e);
-            std::process::exit(1);
-        });
+        axum_server::bind_rustls(addr, tls_config)
+            .serve(app.into_make_service())
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("Server error: {}", e);
+                std::process::exit(1);
+            });
+    } else {
+        let listener = tokio::net::TcpListener::bind(&bind).await
+            .unwrap_or_else(|e| {
+                eprintln!("Failed to bind {}: {}", bind, e);
+                std::process::exit(1);
+            });
+        tracing::info!("Listening on http://{}", bind);
+
+        // Periodic database backup task (every 30 minutes)
+        spawn_backup_task(db_path.clone(), backup_dir.clone());
+
+        // Graceful shutdown on Ctrl+C
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("Server error: {}", e);
+                std::process::exit(1);
+            });
+    }
 
     tracing::info!("Server shut down");
 }
@@ -307,6 +309,36 @@ fn find_ui_dir() -> Option<std::path::PathBuf> {
     } else {
         None
     }
+}
+
+/// Spawn periodic database backup task (every 30 minutes).
+fn spawn_backup_task(db_path: std::path::PathBuf, backup_dir: std::path::PathBuf) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30 * 60));
+        interval.tick().await; // skip first immediate tick
+        loop {
+            interval.tick().await;
+            let backup_name = format!("vmm-auto-{}.db",
+                chrono::Local::now().format("%Y%m%d-%H%M%S"));
+            let backup_path = backup_dir.join(&backup_name);
+            match std::fs::copy(&db_path, &backup_path) {
+                Ok(_) => tracing::info!("Auto-backup: {}", backup_path.display()),
+                Err(e) => tracing::warn!("Auto-backup failed: {}", e),
+            }
+            // Keep only last 10 auto-backups
+            if let Ok(entries) = std::fs::read_dir(&backup_dir) {
+                let mut backups: Vec<_> = entries.filter_map(|e| e.ok())
+                    .filter(|e| e.file_name().to_string_lossy().starts_with("vmm-auto-"))
+                    .collect();
+                backups.sort_by_key(|e| e.file_name());
+                if backups.len() > 10 {
+                    for old in &backups[..backups.len() - 10] {
+                        let _ = std::fs::remove_file(old.path());
+                    }
+                }
+            }
+        }
+    });
 }
 
 async fn shutdown_signal() {

@@ -14,14 +14,14 @@ const translations = {
     hero_badge: 'The Open Hypervisor',
     hero_title_1: 'Your Infrastructure.',
     hero_title_2: 'Your Rules.',
-    hero_subtitle: 'CoreVM is a turnkey bare-metal hypervisor — boot the ISO, run the installer, manage your VMs. Built entirely in Rust with KVM acceleration, enterprise clustering, and a modern web UI. No license fees. No vendor lock-in.',
+    hero_subtitle: 'CoreVM is a turnkey bare-metal hypervisor — boot the ISO, run the installer, manage your VMs. KVM acceleration, enterprise clustering, and a modern web UI. No license fees. No vendor lock-in.',
     hero_cta_primary: 'Download ISO',
     hero_cta_secondary: 'View on GitHub',
     hero_compare: 'Open-source bare-metal hypervisor',
 
     // Stats
     stat_devices: 'Emulated Devices',
-    stat_loc: 'Lines of Rust',
+    stat_loc: 'Lines of Code',
     stat_api: 'REST API Endpoints',
     stat_boot: 'Boot to VMs',
 
@@ -50,7 +50,7 @@ const translations = {
     // Features
     features_badge: 'Platform',
     features_title: 'Enterprise virtualization, reimagined',
-    features_subtitle: 'Everything you expect from a professional hypervisor — built from the ground up in Rust, with no legacy baggage.',
+    features_subtitle: 'Everything you expect from a professional hypervisor — built from the ground up, with no legacy baggage.',
 
     feat_hw_title: 'KVM Hardware Acceleration',
     feat_hw_desc: 'Direct KVM integration for near-native VM performance. No emulation overhead for CPU-intensive workloads.',
@@ -63,7 +63,7 @@ const translations = {
     feat_dcui_title: 'Direct Console (DCUI)',
     feat_dcui_desc: 'Dedicated server console with network config, service management, diagnostics, log viewer, and factory reset — right on the server.',
     feat_security_title: 'Secure by Default',
-    feat_security_desc: 'TLS everywhere, nftables firewall, no root SSH, memory-safe Rust core. Hardened from day one.',
+    feat_security_desc: 'TLS everywhere, nftables firewall, no root SSH, memory-safe core. Hardened from day one.',
 
     // Screenshots
     screenshots_badge: 'Interface',
@@ -100,8 +100,8 @@ const translations = {
 
     // Architecture
     arch_badge: 'Under the Hood',
-    arch_title: 'Pure Rust. From bare metal up.',
-    arch_subtitle: 'CoreVM implements a complete x86 PC — from custom BIOS firmware through PCI bus to high-level device emulation. All in Rust.',
+    arch_title: 'From bare metal up.',
+    arch_subtitle: 'CoreVM implements a complete x86 PC — from custom BIOS firmware through PCI bus to high-level device emulation.',
     arch_cpu_title: 'Full x86 ISA',
     arch_cpu_desc: '16-bit real mode, 32-bit protected mode, 64-bit long mode. Complete instruction set with hardware-accelerated execution via KVM.',
     arch_memory_title: 'Advanced Memory Subsystem',
@@ -111,6 +111,17 @@ const translations = {
     arch_ffi_title: 'C FFI — Embeddable',
     arch_ffi_desc: '58 C-compatible exports. Embed the CoreVM engine in any application via libcorevm dynamic linking.',
 
+    // VMManager
+    vmm_badge: 'For Everyone',
+    vmm_title: 'Desktop Virtualization for Everyone!',
+    vmm_subtitle: 'The CoreVM VMManager brings professional virtualization to your desktop. Run virtual machines on your own PC — intuitive, powerful, and free.',
+    vmm_feat1_title: 'Native Desktop App',
+    vmm_feat1_desc: 'A modern desktop application for Windows and Linux. Manage your VMs with an intuitive graphical interface — no command line required.',
+    vmm_feat2_title: 'For Everyone',
+    vmm_feat2_desc: 'Whether developer, student, or tech enthusiast — VMManager makes creating and running virtual machines as easy as installing an app.',
+    vmm_cta: 'Download VMManager',
+    vmm_platforms: 'Available for Windows and Linux',
+
     // CTA
     cta_title: 'Ready to replace your hypervisor?',
     cta_subtitle: 'Download the ISO, boot it, and have a production-ready hypervisor in minutes. Or build from source if you prefer.',
@@ -118,8 +129,36 @@ const translations = {
     cta_build: 'Build from Source',
     cta_docs: 'Read the Docs',
 
+    // Coming Soon Modal
+    coming_soon_title: 'Coming Soon',
+    coming_soon_desc: 'The CoreVM ISO download is not yet available. We are working hard to deliver the first public release.',
+    coming_soon_hint: 'In the meantime, you can build from source on GitHub.',
+    coming_soon_close: 'Got it',
+
+    // Legal
+    legal_imprint: 'Imprint',
+    legal_privacy: 'Privacy Policy',
+    legal_responsible: 'Responsible persons',
+    legal_country_ch: 'Switzerland',
+    legal_country_de: 'Germany',
+    legal_contact: 'Contact',
+    legal_disclaimer_title: 'Disclaimer',
+    legal_disclaimer_text: 'The content of this website has been prepared with the greatest possible care. However, no guarantee is given for the accuracy, completeness, or timeliness of the content provided.',
+
+    // Privacy
+    privacy_responsible_title: 'Responsible party',
+    privacy_responsible_text: 'The responsible parties for data processing on this website are Mike Strathmann and Christian Möller (see Imprint). Contact: info@corevm.io',
+    privacy_hosting_title: 'Hosting & server logs',
+    privacy_hosting_text: 'This website is hosted by a third-party provider. The hosting provider may collect and store server log files (IP address, date/time, pages requested, browser type) as technically necessary. This data is not merged with other data sources. The legal basis is Art. 6(1)(f) GDPR (legitimate interest in secure and efficient operation).',
+    privacy_cookies_title: 'Cookies & tracking',
+    privacy_cookies_text: 'This website does not use cookies, analytics, or tracking tools of any kind. No personal data is collected beyond what is described above.',
+    privacy_localstorage_title: 'Local storage',
+    privacy_localstorage_text: 'This website stores your language preference (DE/EN) in your browser\'s local storage. This data never leaves your device and is not transmitted to any server.',
+    privacy_rights_title: 'Your rights',
+    privacy_rights_text: 'You have the right to request information about your stored data, as well as the right to correction, deletion, or restriction of processing. Contact: info@corevm.io',
+
     // Footer
-    footer_desc: 'The open bare-metal hypervisor. Built in Rust, powered by KVM, with enterprise clustering and a modern web UI.',
+    footer_desc: 'The open bare-metal hypervisor. Powered by KVM, with enterprise clustering and a modern web UI.',
     footer_product: 'Product',
     footer_resources: 'Resources',
     footer_documentation: 'Documentation',
@@ -140,14 +179,14 @@ const translations = {
     hero_badge: 'Der offene Hypervisor',
     hero_title_1: 'Ihre Infrastruktur.',
     hero_title_2: 'Ihre Regeln.',
-    hero_subtitle: 'CoreVM ist ein schlüsselfertiger Bare-Metal-Hypervisor — ISO booten, Installer durchlaufen, VMs verwalten. Komplett in Rust gebaut, mit KVM-Beschleunigung, Enterprise-Clustering und moderner Web-UI. Keine Lizenzkosten. Kein Vendor-Lock-in.',
+    hero_subtitle: 'CoreVM ist ein schlüsselfertiger Bare-Metal-Hypervisor — ISO booten, Installer durchlaufen, VMs verwalten. KVM-Beschleunigung, Enterprise-Clustering und moderne Web-UI. Keine Lizenzkosten. Kein Vendor-Lock-in.',
     hero_cta_primary: 'ISO herunterladen',
     hero_cta_secondary: 'Auf GitHub ansehen',
     hero_compare: 'Open-Source Bare-Metal-Hypervisor',
 
     // Stats
     stat_devices: 'Emulierte Geräte',
-    stat_loc: 'Zeilen Rust-Code',
+    stat_loc: 'Zeilen Code',
     stat_api: 'REST-API-Endpunkte',
     stat_boot: 'Boot bis zu VMs',
 
@@ -176,7 +215,7 @@ const translations = {
     // Features
     features_badge: 'Plattform',
     features_title: 'Enterprise-Virtualisierung, neu gedacht',
-    features_subtitle: 'Alles, was Sie von einem professionellen Hypervisor erwarten — von Grund auf in Rust gebaut, ohne Legacy-Ballast.',
+    features_subtitle: 'Alles, was Sie von einem professionellen Hypervisor erwarten — von Grund auf gebaut, ohne Legacy-Ballast.',
 
     feat_hw_title: 'KVM-Hardware-Beschleunigung',
     feat_hw_desc: 'Direkte KVM-Integration für nahezu native VM-Performance. Kein Emulations-Overhead für CPU-intensive Workloads.',
@@ -189,7 +228,7 @@ const translations = {
     feat_dcui_title: 'Direkte Konsole (DCUI)',
     feat_dcui_desc: 'Dedizierte Server-Konsole mit Netzwerkkonfiguration, Service-Management, Diagnose, Log-Viewer und Factory-Reset — direkt am Server.',
     feat_security_title: 'Sicher ab Werk',
-    feat_security_desc: 'TLS überall, nftables-Firewall, kein Root-SSH, speichersicherer Rust-Kern. Von Anfang an gehärtet.',
+    feat_security_desc: 'TLS überall, nftables-Firewall, kein Root-SSH, speichersicherer Kern. Von Anfang an gehärtet.',
 
     // Screenshots
     screenshots_badge: 'Oberfläche',
@@ -226,8 +265,8 @@ const translations = {
 
     // Architecture
     arch_badge: 'Unter der Haube',
-    arch_title: 'Pure Rust. Von Bare Metal an.',
-    arch_subtitle: 'CoreVM implementiert einen kompletten x86-PC — vom eigenen BIOS-Firmware über den PCI-Bus bis zur High-Level-Geräteemulation. Alles in Rust.',
+    arch_title: 'Von Bare Metal an.',
+    arch_subtitle: 'CoreVM implementiert einen kompletten x86-PC — vom eigenen BIOS-Firmware über den PCI-Bus bis zur High-Level-Geräteemulation.',
     arch_cpu_title: 'Vollständige x86 ISA',
     arch_cpu_desc: '16-Bit Real Mode, 32-Bit Protected Mode, 64-Bit Long Mode. Kompletter Befehlssatz mit hardware-beschleunigter Ausführung über KVM.',
     arch_memory_title: 'Erweitertes Speicher-Subsystem',
@@ -237,6 +276,17 @@ const translations = {
     arch_ffi_title: 'C-FFI — Einbettbar',
     arch_ffi_desc: '58 C-kompatible Exports. CoreVM-Engine über libcorevm dynamisch in jede Anwendung einbetten.',
 
+    // VMManager
+    vmm_badge: 'Für Jedermann',
+    vmm_title: 'Desktopvirtualisierung für Jedermann!',
+    vmm_subtitle: 'Der CoreVM VMManager bringt professionelle Virtualisierung auf Ihren Desktop. Virtuelle Maschinen auf dem eigenen PC betreiben — intuitiv, leistungsstark und kostenlos.',
+    vmm_feat1_title: 'Native Desktop-App',
+    vmm_feat1_desc: 'Eine moderne Desktop-Anwendung für Windows und Linux. Verwalten Sie Ihre VMs mit einer intuitiven grafischen Oberfläche — keine Kommandozeile nötig.',
+    vmm_feat2_title: 'Für Jedermann',
+    vmm_feat2_desc: 'Ob Entwickler, Student oder Technik-Enthusiast — VMManager macht das Erstellen und Betreiben virtueller Maschinen so einfach wie eine App-Installation.',
+    vmm_cta: 'VMManager herunterladen',
+    vmm_platforms: 'Verfügbar für Windows und Linux',
+
     // CTA
     cta_title: 'Bereit, Ihren Hypervisor zu ersetzen?',
     cta_subtitle: 'ISO herunterladen, booten und in Minuten einen produktionsbereiten Hypervisor haben. Oder aus dem Quellcode bauen, wenn Sie das bevorzugen.',
@@ -244,8 +294,36 @@ const translations = {
     cta_build: 'Aus Quellcode bauen',
     cta_docs: 'Dokumentation lesen',
 
+    // Coming Soon Modal
+    coming_soon_title: 'Demnächst verfügbar',
+    coming_soon_desc: 'Der CoreVM ISO-Download ist noch nicht verfügbar. Wir arbeiten intensiv am ersten öffentlichen Release.',
+    coming_soon_hint: 'In der Zwischenzeit können Sie den Quellcode auf GitHub bauen.',
+    coming_soon_close: 'Verstanden',
+
+    // Legal
+    legal_imprint: 'Impressum',
+    legal_privacy: 'Datenschutzerklärung',
+    legal_responsible: 'Verantwortliche Personen',
+    legal_country_ch: 'Schweiz',
+    legal_country_de: 'Deutschland',
+    legal_contact: 'Kontakt',
+    legal_disclaimer_title: 'Haftungsausschluss',
+    legal_disclaimer_text: 'Die Inhalte dieser Website wurden mit grösstmöglicher Sorgfalt erstellt. Für die Richtigkeit, Vollständigkeit und Aktualität der bereitgestellten Inhalte wird jedoch keine Gewähr übernommen.',
+
+    // Datenschutz
+    privacy_responsible_title: 'Verantwortliche Stelle',
+    privacy_responsible_text: 'Verantwortlich für die Datenverarbeitung auf dieser Website sind Mike Strathmann und Christian Möller (siehe Impressum). Kontakt: info@corevm.io',
+    privacy_hosting_title: 'Hosting & Server-Logfiles',
+    privacy_hosting_text: 'Diese Website wird bei einem externen Anbieter gehostet. Der Hosting-Anbieter kann Server-Logfiles (IP-Adresse, Datum/Uhrzeit, aufgerufene Seiten, Browsertyp) als technisch notwendig erheben und speichern. Diese Daten werden nicht mit anderen Datenquellen zusammengeführt. Rechtsgrundlage ist Art. 6 Abs. 1 lit. f DSGVO (berechtigtes Interesse am sicheren und effizienten Betrieb).',
+    privacy_cookies_title: 'Cookies & Tracking',
+    privacy_cookies_text: 'Diese Website verwendet keine Cookies, Analyse- oder Tracking-Tools jeglicher Art. Über die oben beschriebenen Daten hinaus werden keine personenbezogenen Daten erhoben.',
+    privacy_localstorage_title: 'Lokaler Speicher',
+    privacy_localstorage_text: 'Diese Website speichert Ihre Spracheinstellung (DE/EN) im lokalen Speicher Ihres Browsers. Diese Daten verlassen Ihr Gerät nicht und werden an keinen Server übermittelt.',
+    privacy_rights_title: 'Ihre Rechte',
+    privacy_rights_text: 'Sie haben das Recht auf Auskunft über Ihre gespeicherten Daten sowie das Recht auf Berichtigung, Löschung oder Einschränkung der Verarbeitung. Kontakt: info@corevm.io',
+
     // Footer
-    footer_desc: 'Der offene Bare-Metal-Hypervisor. In Rust gebaut, von KVM angetrieben, mit Enterprise-Clustering und moderner Web-UI.',
+    footer_desc: 'Der offene Bare-Metal-Hypervisor. Von KVM angetrieben, mit Enterprise-Clustering und moderner Web-UI.',
     footer_product: 'Produkt',
     footer_resources: 'Ressourcen',
     footer_documentation: 'Dokumentation',

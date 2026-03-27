@@ -125,6 +125,14 @@ impl Cmos {
         data[0x34] = above_16mb as u8;
         data[0x35] = (above_16mb >> 8) as u8;
 
+        // Boot device priority (SeaBIOS reads CMOS 0x38 for boot order).
+        // High nibble = first boot device, low nibble = second boot device.
+        // Values: 0=none, 1=floppy, 2=hard disk, 3=CD-ROM, 4=network (BEV).
+        // Default: HDD first, CD second (0x23). Can be overridden via
+        // fw_cfg "bootorder" file if the VM daemon provides one.
+        data[0x38] = 0x23; // first=HDD, second=CD
+        data[0x3D] = 0x00; // third=none
+
         // Memory above 4 GB in 64KB units (CMOS registers 0x5B-0x5D, 3 bytes).
         // SeaBIOS reads these for RamSizeOver4G.
         if ram_above_4g > 0 {
@@ -206,6 +214,12 @@ impl Cmos {
             return None;
         }
         Some(1u64 << (rate - 1))
+    }
+
+    /// Set boot device priority in CMOS 0x38.
+    /// `first` and `second`: 0=none, 1=floppy, 2=HDD, 3=CD-ROM, 4=BEV/network.
+    pub fn set_boot_order(&mut self, first: u8, second: u8) {
+        self.data[0x38] = (first << 4) | (second & 0x0F);
     }
 
     fn periodic_irq_enabled(&self) -> bool {

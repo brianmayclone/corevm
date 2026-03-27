@@ -649,6 +649,24 @@ pub extern "C" fn corevm_cmos_advance(handle: u64, ticks_32768: u64) -> u32 {
     }
 }
 
+/// Set CMOS boot device priority.
+/// `first` and `second`: 0=none, 1=floppy, 2=HDD, 3=CD-ROM, 4=BEV/network.
+/// Must be called after `corevm_setup_standard_devices` and before starting the VM.
+#[no_mangle]
+pub extern "C" fn corevm_cmos_set_boot_order(handle: u64, first: u8, second: u8) -> i32 {
+    match get_vm(handle) {
+        Some(vm) => {
+            if let Some(cmos) = vm.cmos_mut() {
+                cmos.set_boot_order(first, second);
+                0
+            } else {
+                -1
+            }
+        }
+        None => -1,
+    }
+}
+
 /// Poll all device IRQ sources and inject any pending interrupts.
 ///
 /// Checks PS/2 keyboard (IRQ 1) and mouse (IRQ 12). Proactively drains

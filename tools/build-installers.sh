@@ -66,15 +66,16 @@ if [ "$BUILD_SERVER" = true ]; then
     echo -e "${CYAN}══════════════════════════════════════════════════════════${NC}"
     echo -e "${CYAN}  Building vmm-server${NC}"
     echo -e "${CYAN}══════════════════════════════════════════════════════════${NC}"
-    cargo build --release -p vmm-server
-    echo -e "${GREEN}✓ vmm-server built${NC}"
+    cargo build --release -p vmm-server -p vmmctl
+    echo -e "${GREEN}✓ vmm-server + vmmctl built${NC}"
 
     echo -e "${CYAN}Packaging vmm-server installer...${NC}"
     rm -rf "$STAGING"
     mkdir -p "$STAGING"
 
-    # Binary
+    # Binaries
     cp "$ROOT/target/release/vmm-server" "$STAGING/"
+    cp "$ROOT/target/release/vmmctl" "$STAGING/"
 
     # BIOS assets
     BIOS_SRC="$ROOT/apps/vmm-server/assets/bios"
