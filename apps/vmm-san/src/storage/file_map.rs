@@ -41,6 +41,27 @@ pub fn find_any_replica(
     ).ok()
 }
 
+/// Find a synced replica on a REMOTE node (excluding local node).
+/// Returns the remote node_id that holds a copy.
+pub fn find_remote_replica(
+    db: &Connection,
+    volume_id: &str,
+    rel_path: &str,
+    local_node_id: &str,
+) -> Option<String> {
+    db.query_row(
+        "SELECT b.node_id
+         FROM file_map fm
+         JOIN file_replicas fr ON fr.file_id = fm.id
+         JOIN backends b ON b.id = fr.backend_id
+         WHERE fm.volume_id = ?1 AND fm.rel_path = ?2
+           AND fr.state = 'synced' AND b.node_id != ?3
+         LIMIT 1",
+        rusqlite::params![volume_id, rel_path, local_node_id],
+        |row| row.get(0),
+    ).ok()
+}
+
 /// Get files that are under-replicated (fewer synced replicas than required).
 pub fn find_under_replicated(db: &Connection) -> Vec<UnderReplicatedFile> {
     let mut stmt = db.prepare(

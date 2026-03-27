@@ -54,25 +54,77 @@ pub async fn list(
 }
 
 /// GET /api/volumes/{id}/files/*path — read/stream a file.
+/// If the file is not on this node, transparently fetches from a peer that has it.
+/// Peer-originated requests (identified by X-CoreSAN-Secret header) only check locally
+/// to prevent recursive peer-to-peer fetch loops.
 pub async fn read(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<CoreSanState>>,
     Path((volume_id, rel_path)): Path<(String, String)>,
 ) -> Result<Vec<u8>, (StatusCode, String)> {
+    let is_peer_request = headers.get(crate::auth::PEER_SECRET_HEADER).is_some();
+
+    // 1. Try local replica first (fast path)
     let local_path = {
         let db = state.db.lock().unwrap();
         file_map::find_local_replica(&db, &volume_id, &rel_path, &state.node_id)
     };
 
-    match local_path {
-        Some(path) => {
-            tokio::fs::read(&path).await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Read error: {}", e)))
-        }
-        None => {
-            // TODO: Fetch from peer node (Phase 2)
-            Err((StatusCode::NOT_FOUND, "File not found on local node".into()))
+    if let Some(path) = local_path {
+        return tokio::fs::read(&path).await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Read error: {}", e)));
+    }
+
+    // Peer-originated requests stop here — no recursive fetching
+    if is_peer_request {
+        return Err((StatusCode::NOT_FOUND, "File not found locally".into()));
+    }
+
+    // 2. No local replica — try known remote replica from local DB first
+    let remote_node_id = {
+        let db = state.db.lock().unwrap();
+        file_map::find_remote_replica(&db, &volume_id, &rel_path, &state.node_id)
+    };
+
+    let client = crate::peer::client::PeerClient::new(&state.config.peer.secret);
+
+    if let Some(ref node_id) = remote_node_id {
+        if let Some(peer) = state.peers.get(node_id) {
+            let addr = peer.address.clone();
+            drop(peer);
+            tracing::debug!("Fetching {}/{} from known peer {} at {}",
+                volume_id, rel_path, node_id, addr);
+            if let Ok(data) = client.pull_file(&addr, &volume_id, &rel_path).await {
+                tracing::debug!("Peer-fetched {}/{} ({} bytes) from {}",
+                    volume_id, rel_path, data.len(), node_id);
+                return Ok(data);
+            }
         }
     }
+
+    // 3. Fallback: ask all online peers (each node's DB is independent,
+    //    so our local DB may not know about replicas on other nodes yet)
+    let online_peers: Vec<(String, String)> = state.peers.iter()
+        .filter(|p| p.status == crate::state::PeerStatus::Online && p.node_id != state.node_id)
+        .map(|p| (p.node_id.clone(), p.address.clone()))
+        .collect();
+
+    for (peer_id, peer_addr) in &online_peers {
+        // Skip the peer we already tried above
+        if remote_node_id.as_deref() == Some(peer_id.as_str()) {
+            continue;
+        }
+        match client.pull_file(peer_addr, &volume_id, &rel_path).await {
+            Ok(data) => {
+                tracing::debug!("Peer-fetched {}/{} ({} bytes) from {} (broadcast)",
+                    volume_id, rel_path, data.len(), peer_id);
+                return Ok(data);
+            }
+            Err(_) => continue,
+        }
+    }
+
+    Err((StatusCode::NOT_FOUND, "File not found on any node".into()))
 }
 
 /// PUT /api/volumes/{id}/files/*path — write a file (creates or overwrites).
