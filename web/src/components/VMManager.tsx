@@ -79,7 +79,7 @@ export default function VMManager({ lang, onDownloadClick }: VMManagerProps) {
           whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true }}
           transition={{ delay: 0.3 }}
-          className="mt-14 grid gap-8 md:grid-cols-2"
+          className="mt-14 mx-auto max-w-2xl"
         >
           {/* Linux screenshot */}
           <div className="group overflow-hidden rounded-xl border border-white/10 bg-surface-900 shadow-2xl shadow-black/40 transition-all hover:border-accent-400/20">
@@ -95,25 +95,6 @@ export default function VMManager({ lang, onDownloadClick }: VMManagerProps) {
               <img
                 src="/screenshots/vmmanager.png"
                 alt="CoreVM VMManager on Linux"
-                className="w-full object-cover transition-transform duration-500 group-hover:scale-[1.02]"
-              />
-            </div>
-          </div>
-
-          {/* Windows screenshot */}
-          <div className="group overflow-hidden rounded-xl border border-white/10 bg-surface-900 shadow-2xl shadow-black/40 transition-all hover:border-accent-400/20">
-            <div className="flex items-center gap-2 border-b border-white/5 bg-surface-800 px-4 py-2.5">
-              <div className="flex gap-1.5">
-                <div className="h-3 w-3 rounded-full bg-red-500/70" />
-                <div className="h-3 w-3 rounded-full bg-yellow-500/70" />
-                <div className="h-3 w-3 rounded-full bg-green-500/70" />
-              </div>
-              <span className="ml-2 text-xs text-surface-400">CoreVM VMManager — Windows</span>
-            </div>
-            <div className="overflow-hidden">
-              <img
-                src="/screenshots/vmmanager_windows.png"
-                alt="CoreVM VMManager on Windows"
                 className="w-full object-cover transition-transform duration-500 group-hover:scale-[1.02]"
               />
             </div>

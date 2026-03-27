@@ -204,6 +204,8 @@ cp "$ROOT/target/release/vmm-appliance" "$ROOTFS_DIR/opt/vmm/"
 cp "$ROOT/target/release/vmm-server" "$ROOTFS_DIR/opt/vmm/"
 cp "$ROOT/target/release/vmm-cluster" "$ROOTFS_DIR/opt/vmm/"
 cp "$ROOT/target/release/vmm-san" "$ROOTFS_DIR/opt/vmm/"
+# Clean old UI build and copy fresh (hashed filenames change between builds)
+rm -rf "$ROOTFS_DIR/opt/vmm/ui"
 cp -r "$ROOT/apps/vmm-ui/dist" "$ROOTFS_DIR/opt/vmm/ui"
 if [ -d "$ROOT/apps/vmm-server/assets/bios" ]; then
     cp -r "$ROOT/apps/vmm-server/assets/bios" "$ROOTFS_DIR/opt/vmm/bios"

@@ -95,11 +95,12 @@ export default function Architecture({ lang }: ArchitectureProps) {
               <tbody className="divide-y divide-white/5">
                 {[
                   ['Storage', 'AHCI (SATA), IDE/ATA, Disk Cache'],
-                  ['Network', 'Intel E1000 (82540EM), SLIRP NAT'],
-                  ['GPU', 'VMware SVGA II, VGA/Bochs VBE'],
+                  ['Network', 'Intel E1000 (82540EM), VirtIO Net, SLIRP NAT'],
+                  ['GPU', 'VGA/Bochs VBE, VirtIO GPU, Intel HD Graphics 530'],
                   ['Audio', 'AC\'97 (ICH, 8086:2415)'],
+                  ['Input', 'PS/2 Keyboard/Mouse, VirtIO Input (Keyboard, Tablet)'],
                   ['Interrupts', 'Dual 8259A PIC, Local APIC, I/O APIC, HPET, 8254 PIT'],
-                  ['I/O', 'PS/2, 16550 UART (COM1-4), Serial'],
+                  ['I/O', '16550 UART (COM1-4), UHCI USB 1.1, DMA, SMBus'],
                   ['System', 'CMOS/RTC, PCI Bus, Q35 MCH, ACPI, APM'],
                   ['Firmware', 'fw_cfg, Custom NASM BIOS, SeaBIOS'],
                 ].map(([cat, devices]) => (

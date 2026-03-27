@@ -170,48 +170,50 @@ pub async fn start(
 ) -> Result<Json<serde_json::Value>, AppError> {
     require_operator(&user)?;
 
-    let host_id = {
+    // Resolve host — auto-place if unassigned
+    let (existing_host_id, needs_placement) = {
         let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock error".into()))?;
         let vm = VmService::get(&db, &id).map_err(|e| AppError(StatusCode::NOT_FOUND, e))?;
         match vm.host_id {
-            Some(hid) => hid,
+            Some(hid) => (Some(hid), None),
             None => {
-                // Auto-place unplaced VMs on start
-                let vm_name = vm.name.clone();
-                let cluster_id = vm.cluster_id.clone();
-                let hid = crate::engine::scheduler::Scheduler::select_host(&db, &cluster_id, vm.ram_mb, vm.cpu_cores, None)
+                let hid = crate::engine::scheduler::Scheduler::select_host(&db, &vm.cluster_id, vm.ram_mb, vm.cpu_cores, None)
                     .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?
                     .ok_or_else(|| AppError(StatusCode::CONFLICT,
                         "No host has enough resources for this VM".into()))?;
-                // Provision on the selected host
                 let config = VmService::get_config(&db, &id)
                     .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-                drop(db);
-                let node = state.nodes.get(&hid)
-                    .ok_or_else(|| AppError(StatusCode::BAD_GATEWAY, "Selected host not connected".into()))?;
-                let client = reqwest::Client::builder()
-                    .danger_accept_invalid_certs(true).build()
-                    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-                let provision_req = vmm_core::cluster::ProvisionVmRequest {
-                    vm_id: id.clone(), config,
-                };
-                let resp = client.post(format!("{}/agent/vms/provision", &node.address))
-                    .header("X-Agent-Token", &node.agent_token)
-                    .json(&provision_req).send().await
-                    .map_err(|e| AppError(StatusCode::BAD_GATEWAY, format!("Cannot reach host: {}", e)))?;
-                if !resp.status().is_success() {
-                    let err = resp.text().await.unwrap_or_default();
-                    return Err(AppError(StatusCode::BAD_GATEWAY, format!("Provisioning failed: {}", err)));
-                }
-                let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock error".into()))?;
-                VmService::assign_host(&db, &id, &hid)
-                    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-                EventService::log(&db, "info", "vm",
-                    &format!("VM '{}' auto-placed on '{}' at start", vm_name, node.hostname),
-                    Some("vm"), Some(&id), Some(&hid));
-                hid
+                (None, Some((hid, vm.name.clone(), config)))
             }
         }
+    };
+    // DB lock is dropped here — safe to await
+
+    let host_id = if let Some((hid, vm_name, config)) = needs_placement {
+        // Provision on auto-selected host
+        let node = state.nodes.get(&hid)
+            .ok_or_else(|| AppError(StatusCode::BAD_GATEWAY, "Selected host not connected".into()))?;
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true).build()
+            .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let provision_req = vmm_core::cluster::ProvisionVmRequest { vm_id: id.clone(), config };
+        let resp = client.post(format!("{}/agent/vms/provision", &node.address))
+            .header("X-Agent-Token", &node.agent_token)
+            .json(&provision_req).send().await
+            .map_err(|e| AppError(StatusCode::BAD_GATEWAY, format!("Cannot reach host: {}", e)))?;
+        if !resp.status().is_success() {
+            let err = resp.text().await.unwrap_or_default();
+            return Err(AppError(StatusCode::BAD_GATEWAY, format!("Provisioning failed: {}", err)));
+        }
+        let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock error".into()))?;
+        VmService::assign_host(&db, &id, &hid)
+            .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        EventService::log(&db, "info", "vm",
+            &format!("VM '{}' auto-placed on '{}' at start", vm_name, node.hostname),
+            Some("vm"), Some(&id), Some(&hid));
+        hid
+    } else {
+        existing_host_id.unwrap()
     };
 
     // Send start command to host

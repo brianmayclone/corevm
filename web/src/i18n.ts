@@ -59,7 +59,7 @@ const translations = {
     feat_api_title: '40+ REST API Endpoints',
     feat_api_desc: 'Complete automation via REST API. JWT authentication, role-based access control, audit logging, and WebSocket streaming.',
     feat_devices_title: '25+ Emulated Devices',
-    feat_devices_desc: 'AHCI/SATA, Intel E1000, VMware SVGA II, AC\'97 audio, APIC, HPET, PS/2, UART, PCI bus, Q35 chipset, and more.',
+    feat_devices_desc: 'AHCI/SATA, Intel E1000, VirtIO GPU/Net/Input, AC\'97 audio, APIC, HPET, PS/2, UART, PCI bus, Q35 chipset, and more.',
     feat_dcui_title: 'Direct Console (DCUI)',
     feat_dcui_desc: 'Dedicated server console with network config, service management, diagnostics, log viewer, and factory reset — right on the server.',
     feat_security_title: 'Secure by Default',
@@ -120,7 +120,7 @@ const translations = {
     vmm_feat2_title: 'For Everyone',
     vmm_feat2_desc: 'Whether developer, student, or tech enthusiast — VMManager makes creating and running virtual machines as easy as installing an app.',
     vmm_cta: 'Download VMManager',
-    vmm_platforms: 'Available for Windows and Linux',
+    vmm_platforms: 'Available for Linux',
 
     // CTA
     cta_title: 'Ready to replace your hypervisor?',
@@ -134,6 +134,12 @@ const translations = {
     coming_soon_desc: 'The CoreVM ISO download is not yet available. We are working hard to deliver the first public release.',
     coming_soon_hint: 'In the meantime, you can build from source on GitHub.',
     coming_soon_close: 'Got it',
+
+    // Download Error Modal
+    download_error_title: 'Download Unavailable',
+    download_error_desc: 'The ISO download could not be started. There may be no release available yet, or the download server is temporarily unreachable.',
+    download_error_hint: 'You can build from source on GitHub or try again later.',
+    download_error_close: 'Got it',
 
     // Legal
     legal_imprint: 'Imprint',
@@ -224,7 +230,7 @@ const translations = {
     feat_api_title: '40+ REST-API-Endpunkte',
     feat_api_desc: 'Vollständige Automatisierung via REST-API. JWT-Authentifizierung, rollenbasierte Zugriffskontrolle, Audit-Logging und WebSocket-Streaming.',
     feat_devices_title: '25+ Emulierte Geräte',
-    feat_devices_desc: 'AHCI/SATA, Intel E1000, VMware SVGA II, AC\'97 Audio, APIC, HPET, PS/2, UART, PCI-Bus, Q35-Chipsatz und mehr.',
+    feat_devices_desc: 'AHCI/SATA, Intel E1000, VirtIO GPU/Net/Input, AC\'97 Audio, APIC, HPET, PS/2, UART, PCI-Bus, Q35-Chipsatz und mehr.',
     feat_dcui_title: 'Direkte Konsole (DCUI)',
     feat_dcui_desc: 'Dedizierte Server-Konsole mit Netzwerkkonfiguration, Service-Management, Diagnose, Log-Viewer und Factory-Reset — direkt am Server.',
     feat_security_title: 'Sicher ab Werk',
@@ -285,7 +291,7 @@ const translations = {
     vmm_feat2_title: 'Für Jedermann',
     vmm_feat2_desc: 'Ob Entwickler, Student oder Technik-Enthusiast — VMManager macht das Erstellen und Betreiben virtueller Maschinen so einfach wie eine App-Installation.',
     vmm_cta: 'VMManager herunterladen',
-    vmm_platforms: 'Verfügbar für Windows und Linux',
+    vmm_platforms: 'Verfügbar für Linux',
 
     // CTA
     cta_title: 'Bereit, Ihren Hypervisor zu ersetzen?',
@@ -299,6 +305,12 @@ const translations = {
     coming_soon_desc: 'Der CoreVM ISO-Download ist noch nicht verfügbar. Wir arbeiten intensiv am ersten öffentlichen Release.',
     coming_soon_hint: 'In der Zwischenzeit können Sie den Quellcode auf GitHub bauen.',
     coming_soon_close: 'Verstanden',
+
+    // Download Error Modal
+    download_error_title: 'Download nicht verfügbar',
+    download_error_desc: 'Der ISO-Download konnte nicht gestartet werden. Möglicherweise ist noch kein Release verfügbar oder der Download-Server ist vorübergehend nicht erreichbar.',
+    download_error_hint: 'Sie können den Quellcode auf GitHub bauen oder es später erneut versuchen.',
+    download_error_close: 'Verstanden',
 
     // Legal
     legal_imprint: 'Impressum',
