@@ -37,7 +37,7 @@ fi
 
 # Must run as root (debootstrap, chroot, mount all require it)
 # Use: sudo -E env "PATH=$PATH" ./tools/build-iso.sh
-# Add --clean for a full rebuild (otherwise reuses existing rootfs)
+# Add --reset for a full rebuild (otherwise reuses cached rootfs + live-root)
 if [ "$(id -u)" -ne 0 ]; then
     echo "ERROR: This script must be run as root."
     echo "Usage: sudo -E env \"PATH=\$PATH\" ./tools/build-iso.sh"
@@ -86,9 +86,15 @@ cleanup_mounts() {
 }
 trap cleanup_mounts EXIT ERR
 
-# Only clean if explicitly requested with --clean
-if [[ " $* " == *" --clean "* ]] && [ -d "$BUILD_DIR" ]; then
-    echo "Cleaning previous build directory (--clean requested)..."
+# --reset: full rebuild (delete cached rootfs + live-root)
+# --clean: alias for --reset (backwards compat)
+RESET=false
+if [[ " $* " == *" --reset "* ]] || [[ " $* " == *" --clean "* ]]; then
+    RESET=true
+fi
+
+if $RESET && [ -d "$BUILD_DIR" ]; then
+    echo "Cleaning previous build directory (--reset requested)..."
     cleanup_mounts
     sleep 1
     # Safety check: refuse to rm if any mounts are still active
@@ -99,7 +105,7 @@ if [[ " $* " == *" --clean "* ]] && [ -d "$BUILD_DIR" ]; then
     fi
     rm -rf "$BUILD_DIR"
 elif [ -d "$BUILD_DIR" ]; then
-    echo "Reusing existing build directory (use --clean for full rebuild)"
+    echo "Reusing existing build directory (use --reset for full rebuild)"
     # Always ensure stale mounts from a previous crashed build are gone
     cleanup_mounts
 fi
@@ -392,14 +398,18 @@ echo "[4/9] Packing rootfs tarball..."
 tar czf "$BUILD_DIR/rootfs.tar.gz" -C "$ROOTFS_DIR" .
 
 # Step 4: Build live environment
-echo "[5/9] Building live environment..."
 LIVE_DIR="$BUILD_DIR/live-root"
-debootstrap --variant=minbase --include=\
+if [ -d "$LIVE_DIR/usr" ]; then
+    echo "[5/9] Reusing existing live environment (use --reset to rebuild)"
+else
+    echo "[5/9] Building live environment..."
+    debootstrap --variant=minbase --include=\
 linux-image-amd64,live-boot,live-boot-initramfs-tools,\
 initramfs-tools,systemd,systemd-sysv,udev,\
 parted,e2fsprogs,dosfstools,tar,openssl,ncurses-base,iproute2,\
 grub-pc,grub-efi-amd64-bin \
     bookworm "$LIVE_DIR" http://deb.debian.org/debian
+fi
 
 # Ensure squashfs module is loaded in initramfs
 echo "squashfs" >> "$LIVE_DIR/etc/initramfs-tools/modules"
@@ -563,6 +573,8 @@ echo "[9/9] Done!"
 echo "ISO: $ISO_OUTPUT"
 ls -lh "$ISO_OUTPUT"
 
-# Cleanup build directory
-echo "Cleaning up build directory..."
-rm -rf "$BUILD_DIR"
+# Cleanup temporary staging (keep rootfs + live-root cached for next build)
+echo "Cleaning up staging directory..."
+rm -rf "$ISO_STAGING"
+rm -f "$BUILD_DIR/rootfs.tar.gz"
+echo "Cached rootfs and live-root kept in $BUILD_DIR (use --reset to purge)"

@@ -20,4 +20,5 @@ libs/libcorevm/bios/listing.txt
 .DS_Store
 Thumbs.db
 
-.vmm
+.vmm/
+.vms/
