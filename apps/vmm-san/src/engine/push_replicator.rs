@@ -88,8 +88,9 @@ async fn run_push_replicator(
                     event.data.as_ref().clone(),
                 ).await {
                     Ok(_) => {
-                        tracing::debug!("Push-replicated {}/{} v{} → {}",
-                            event.volume_id, event.rel_path, event.version, target_node_id);
+                        tracing::info!("Replicated {}/{} v{} → {} ({} bytes)",
+                            event.volume_id, event.rel_path, event.version,
+                            target_node_id, event.data.len());
                         Some(target_node_id)
                     }
                     Err(e) => {

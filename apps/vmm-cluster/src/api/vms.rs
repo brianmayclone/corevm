@@ -105,11 +105,24 @@ pub async fn create(
             Some("vm"), Some(&vm_id), None);
     }
 
-    // Step 2: Provision on host (if host specified or scheduler picks one)
-    if let Some(host_id) = &body.host_id {
-        // Provision on specified host via Agent API
-        let node = state.nodes.get(host_id)
-            .ok_or_else(|| AppError(StatusCode::BAD_REQUEST, "Host not found or offline".into()))?;
+    // Step 2: Determine target host — explicit or via scheduler (Best Fit)
+    let target_host_id = if let Some(host_id) = &body.host_id {
+        host_id.clone()
+    } else {
+        // Auto-placement: use scheduler to pick the best host
+        let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock error".into()))?;
+        let ram_mb = config.get("ram_mb").and_then(|v| v.as_u64()).unwrap_or(2048) as u32;
+        let cpu_cores = config.get("cpu_cores").and_then(|v| v.as_u64()).unwrap_or(2) as u32;
+        crate::engine::scheduler::Scheduler::select_host(&db, &body.cluster_id, ram_mb, cpu_cores, None)
+            .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?
+            .ok_or_else(|| AppError(StatusCode::CONFLICT,
+                "No host has enough resources for this VM. Free up resources or add hosts.".into()))?
+    };
+
+    // Step 3: Provision on the target host
+    {
+        let node = state.nodes.get(&target_host_id)
+            .ok_or_else(|| AppError(StatusCode::BAD_REQUEST, "Target host not found or offline".into()))?;
 
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
@@ -134,10 +147,14 @@ pub async fn create(
 
         // Assign host in cluster DB
         let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock error".into()))?;
-        VmService::assign_host(&db, &vm_id, host_id)
+        VmService::assign_host(&db, &vm_id, &target_host_id)
             .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+        let host_name = node.hostname.clone();
+        EventService::log(&db, "info", "vm",
+            &format!("VM '{}' placed on host '{}'", body.name, host_name),
+            Some("vm"), Some(&vm_id), Some(&target_host_id));
     }
-    // else: VM stays unplaced, scheduler will handle it (Phase 5)
 
     Ok(Json(serde_json::json!({
         "id": vm_id,
@@ -156,7 +173,47 @@ pub async fn start(
     let host_id = {
         let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock error".into()))?;
         let vm = VmService::get(&db, &id).map_err(|e| AppError(StatusCode::NOT_FOUND, e))?;
-        vm.host_id.ok_or_else(|| AppError(StatusCode::BAD_REQUEST, "VM is not assigned to a host".into()))?
+        match vm.host_id {
+            Some(hid) => hid,
+            None => {
+                // Auto-place unplaced VMs on start
+                let ram_mb = serde_json::from_str::<serde_json::Value>(&vm.config_json)
+                    .ok().and_then(|c| c.get("ram_mb").and_then(|v| v.as_u64()))
+                    .unwrap_or(2048) as u32;
+                let cpu_cores = serde_json::from_str::<serde_json::Value>(&vm.config_json)
+                    .ok().and_then(|c| c.get("cpu_cores").and_then(|v| v.as_u64()))
+                    .unwrap_or(2) as u32;
+                let hid = crate::engine::scheduler::Scheduler::select_host(&db, &vm.cluster_id, ram_mb, cpu_cores, None)
+                    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?
+                    .ok_or_else(|| AppError(StatusCode::CONFLICT,
+                        "No host has enough resources for this VM".into()))?;
+                // Provision on the selected host
+                drop(db);
+                let node = state.nodes.get(&hid)
+                    .ok_or_else(|| AppError(StatusCode::BAD_GATEWAY, "Selected host not connected".into()))?;
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true).build()
+                    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                let provision_req = vmm_core::cluster::ProvisionVmRequest {
+                    vm_id: id.clone(), config: serde_json::from_str(&vm.config_json).unwrap_or_default(),
+                };
+                let resp = client.post(format!("{}/agent/vms/provision", &node.address))
+                    .header("X-Agent-Token", &node.agent_token)
+                    .json(&provision_req).send().await
+                    .map_err(|e| AppError(StatusCode::BAD_GATEWAY, format!("Cannot reach host: {}", e)))?;
+                if !resp.status().is_success() {
+                    let err = resp.text().await.unwrap_or_default();
+                    return Err(AppError(StatusCode::BAD_GATEWAY, format!("Provisioning failed: {}", err)));
+                }
+                let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock error".into()))?;
+                VmService::assign_host(&db, &id, &hid)
+                    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+                EventService::log(&db, "info", "vm",
+                    &format!("VM '{}' auto-placed on '{}' at start", vm.name, node.hostname),
+                    Some("vm"), Some(&id), Some(&hid));
+                hid
+            }
+        }
     };
 
     // Send start command to host

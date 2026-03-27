@@ -191,7 +191,7 @@ pub async fn write(
         writer_node_id: state.node_id.clone(),
     });
 
-    tracing::debug!("Wrote file {}/{} v{} ({} bytes)", volume_id, rel_path, new_version, size);
+    tracing::info!("Wrote file {}/{} v{} ({} bytes)", volume_id, rel_path, new_version, size);
 
     Ok(Json(FileEntry {
         rel_path,
