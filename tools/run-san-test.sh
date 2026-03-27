@@ -15,6 +15,22 @@ set -e
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 
+# ── Ensure cargo is in PATH (when called via sudo) ────────────────────
+
+if ! command -v cargo >/dev/null 2>&1; then
+    for CARGO_HOME in "$HOME/.cargo" "/home/${SUDO_USER:-$USER}/.cargo" "/root/.cargo"; do
+        if [ -f "$CARGO_HOME/env" ]; then
+            . "$CARGO_HOME/env"
+            break
+        fi
+    done
+    if ! command -v cargo >/dev/null 2>&1; then
+        echo "ERROR: cargo not found in PATH."
+        echo "If running with sudo, use: sudo -E env \"PATH=\$PATH\" $0 $*"
+        exit 1
+    fi
+fi
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -76,7 +92,10 @@ done
 # ── Step 1: Build vmm-san ─────────────────────────────────────
 
 info "Building vmm-san..."
-cargo build -p vmm-san 2>&1 | tail -3
+if ! cargo build -p vmm-san; then
+    fail "vmm-san build failed"
+    exit 1
+fi
 ok "vmm-san built"
 
 # ── Step 2: Run unit tests (if requested) ─────────────────────
@@ -107,7 +126,10 @@ fi
 # ── Step 3: Build san-testbed ─────────────────────────────────
 
 info "Building san-testbed..."
-cargo build -p san-testbed 2>&1 | tail -3
+if ! cargo build -p san-testbed; then
+    fail "san-testbed build failed"
+    exit 1
+fi
 ok "san-testbed built"
 
 TESTBED="$ROOT/target/debug/san-testbed"
