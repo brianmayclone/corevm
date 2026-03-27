@@ -26,8 +26,8 @@ impl SanClient {
     pub fn new(san_address: &str) -> Self {
         let http = Client::builder()
             .danger_accept_invalid_certs(true)
-            .timeout(Duration::from_secs(30))
-            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(3600))
+            .connect_timeout(Duration::from_secs(10))
             .build()
             .expect("Failed to build SAN HTTP client");
 
@@ -125,6 +125,7 @@ impl SanClient {
     pub async fn upload_file(&self, volume_id: &str, path: &str, data: Vec<u8>) -> Result<Value, String> {
         let url = format!("{}/api/volumes/{}/files/{}", self.base_url, volume_id, path);
         let resp = self.http.put(&url)
+            .header("Content-Type", "application/octet-stream")
             .body(data)
             .send().await
             .map_err(|e| format!("SAN request failed ({}): {}", url, e))?;

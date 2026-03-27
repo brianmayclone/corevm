@@ -1,6 +1,6 @@
 //! API router assembly — all REST endpoints for CoreSAN.
 
-use axum::{Router, routing::{get, post, put, delete}};
+use axum::{Router, extract::DefaultBodyLimit, routing::{get, post, put, delete}};
 use std::sync::Arc;
 use crate::state::CoreSanState;
 
@@ -55,4 +55,6 @@ pub fn router() -> Router<Arc<CoreSanState>> {
         .route("/api/benchmark/matrix", get(benchmark::matrix))
         .route("/api/benchmark/ping", get(benchmark::ping))
         .route("/api/benchmark/echo", post(benchmark::echo))
+        // Allow uploads up to 10 GB (ISOs, disk images)
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024 * 1024))
 }
