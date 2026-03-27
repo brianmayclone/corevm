@@ -172,6 +172,7 @@ impl Drop for NodeHandle {
 pub fn find_vmm_san_binary() -> PathBuf {
     // Try common locations
     let candidates = [
+        PathBuf::from("/tmp/corevm-target/debug/vmm-san"),
         PathBuf::from("target/debug/vmm-san"),
         PathBuf::from("../../target/debug/vmm-san"),
         PathBuf::from("/tmp/cargo-build-san/debug/vmm-san"),
