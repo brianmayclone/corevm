@@ -1,0 +1,1 @@
+//! Mock witness HTTP server.
