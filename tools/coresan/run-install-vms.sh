@@ -199,8 +199,8 @@ cleanup_on_exit() {
     if $CREATED_BRIDGE; then
         iptables -t nat -D POSTROUTING -s "${SUBNET}.0/24" ! -o "$BRIDGE_NAME" -j MASQUERADE 2>/dev/null || true
         iptables -D FORWARD -i "$BRIDGE_NAME" -o "$BRIDGE_NAME" -j ACCEPT 2>/dev/null || true
-        iptables -D INPUT -i "$BRIDGE_NAME" -p udp -j ACCEPT 2>/dev/null || true
-        iptables -D OUTPUT -o "$BRIDGE_NAME" -p udp -j ACCEPT 2>/dev/null || true
+        iptables -D INPUT -i "$BRIDGE_NAME" -s "${SUBNET}.0/24" -j ACCEPT 2>/dev/null || true
+        iptables -D OUTPUT -o "$BRIDGE_NAME" -d "${SUBNET}.0/24" -j ACCEPT 2>/dev/null || true
         ip link set "$BRIDGE_NAME" down 2>/dev/null || true
         ip link delete "$BRIDGE_NAME" 2>/dev/null || true
         info "Removed bridge $BRIDGE_NAME and iptables rules"
@@ -229,10 +229,13 @@ setup_bridge_network() {
             sysctl -q -w net.ipv4.ip_forward=1
             iptables -t nat -A POSTROUTING -s "${SUBNET}.0/24" ! -o "$BRIDGE_NAME" -j MASQUERADE
             iptables -A FORWARD -i "$BRIDGE_NAME" -o "$BRIDGE_NAME" -j ACCEPT
-            # Allow all UDP on the bridge subnet (beacons, broadcasts, multicast)
-            iptables -A INPUT -i "$BRIDGE_NAME" -p udp -j ACCEPT
-            iptables -A OUTPUT -o "$BRIDGE_NAME" -p udp -j ACCEPT
+            # Allow all traffic between host and guests on the bridge
+            iptables -A INPUT -i "$BRIDGE_NAME" -s "${SUBNET}.0/24" -j ACCEPT
+            iptables -A OUTPUT -o "$BRIDGE_NAME" -d "${SUBNET}.0/24" -j ACCEPT
             ok "Bridge $BRIDGE_NAME up with ${SUBNET}.1/24"
+
+            # Ensure host can reach its own bridge IP (hairpin / loopback)
+            ip route replace "${SUBNET}.0/24" dev "$BRIDGE_NAME" src "${SUBNET}.1"
         else
             info "Bridge $BRIDGE_NAME already exists, reusing."
         fi

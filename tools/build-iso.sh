@@ -147,8 +147,14 @@ mkdir -p "$ROOTFS_DIR/build"
 mount --bind "$ROOT" "$ROOTFS_DIR/build"
 
 # Install Rust in chroot and build
+# Use a separate target dir inside the chroot to avoid glibc mismatch with
+# host build artifacts (host glibc may be newer than Debian 12 bookworm's).
+CHROOT_TARGET_DIR="$ROOTFS_DIR/tmp/cargo-target"
+mkdir -p "$CHROOT_TARGET_DIR"
+
 chroot "$ROOTFS_DIR" bash -c '
     export HOME=/root
+    export CARGO_TARGET_DIR=/tmp/cargo-target
 
     # Install build-only dependencies for CoreSAN (FUSE headers needed by fuser crate)
     apt-get update -qq
@@ -165,9 +171,16 @@ chroot "$ROOTFS_DIR" bash -c '
     apt-get clean
 '
 
-# Unmount source and cleanup Rust toolchain from rootfs
+# Copy chroot-built binaries to where the rest of the script expects them
+mkdir -p "$ROOT/target/release"
+for bin in vmm-appliance vmm-server vmm-cluster vmm-san; do
+    cp "$CHROOT_TARGET_DIR/release/$bin" "$ROOT/target/release/"
+done
+
+# Unmount source and cleanup Rust toolchain + chroot build cache from rootfs
 umount "$ROOTFS_DIR/build" 2>/dev/null || umount -l "$ROOTFS_DIR/build" 2>/dev/null || true
 rmdir "$ROOTFS_DIR/build" 2>/dev/null || true
+rm -rf "$CHROOT_TARGET_DIR"
 chroot "$ROOTFS_DIR" bash -c 'rm -rf /root/.cargo /root/.rustup' 2>/dev/null || true
 umount "$ROOTFS_DIR/dev"  2>/dev/null || umount -l "$ROOTFS_DIR/dev"  2>/dev/null || true
 umount "$ROOTFS_DIR/sys"  2>/dev/null || umount -l "$ROOTFS_DIR/sys"  2>/dev/null || true
@@ -346,13 +359,49 @@ level = "info"
 log_file = "/var/log/vmm/vmm-san.log"
 SAN_CONF
 
-# Create CoreSAN data directories and log directory
+# Create default vmm-server config
+tee "$ROOTFS_DIR/etc/vmm/vmm-server.toml" > /dev/null <<'SERVER_CONF'
+[server]
+bind = "0.0.0.0"
+port = 8443
+
+[storage]
+default_pool = "/var/lib/vmm/images"
+iso_pool = "/var/lib/vmm/isos"
+
+[network]
+default_mode = "slirp"
+
+[vms]
+config_dir = "/var/lib/vmm/vms"
+
+[logging]
+level = "info"
+log_file = "/var/log/vmm/vmm-server.log"
+SERVER_CONF
+
+# Create default vmm-cluster config
+tee "$ROOTFS_DIR/etc/vmm/vmm-cluster.toml" > /dev/null <<'CLUSTER_CONF'
+[server]
+bind = "0.0.0.0"
+port = 9443
+
+[data]
+data_dir = "/var/lib/vmm-cluster"
+
+[logging]
+level = "info"
+log_file = "/var/log/vmm/vmm-cluster.log"
+CLUSTER_CONF
+
+# Create data and log directories
 mkdir -p "$ROOTFS_DIR/var/lib/vmm-san"
+mkdir -p "$ROOTFS_DIR/var/lib/vmm/images"
+mkdir -p "$ROOTFS_DIR/var/lib/vmm/isos"
+mkdir -p "$ROOTFS_DIR/var/lib/vmm/vms"
+mkdir -p "$ROOTFS_DIR/var/lib/vmm-cluster"
 mkdir -p "$ROOTFS_DIR/var/log/vmm"
 mkdir -p "$ROOTFS_DIR/vmm/san"
-
-# Open UDP discovery port in firewall
-# (will be picked up by nftables if the config supports it)
 
 # Copy GRUB defaults and nftables config
 cp "$SCRIPT_DIR/iso/grub-installed.cfg" "$ROOTFS_DIR/etc/default/grub"
@@ -360,6 +409,8 @@ cp "$SCRIPT_DIR/iso/nftables.conf" "$ROOTFS_DIR/etc/nftables.conf"
 
 # Enable services (use --root= since systemd is not PID 1 in the chroot)
 systemctl --root="$ROOTFS_DIR" enable vmm-dcui.service
+systemctl --root="$ROOTFS_DIR" enable vmm-server.service
+systemctl --root="$ROOTFS_DIR" enable vmm-cluster.service
 systemctl --root="$ROOTFS_DIR" enable vmm-san.service
 systemctl --root="$ROOTFS_DIR" enable nftables.service
 systemctl --root="$ROOTFS_DIR" enable ssh.service
