@@ -1,5 +1,6 @@
 import { Server, AlertTriangle } from 'lucide-react'
-import type { CoreSanStatus, Host } from '../../api/types'
+import type { CoreSanStatus, CoreSanVolume, Host } from '../../api/types'
+import { formatBytes } from '../../utils/format'
 import Dialog from '../Dialog'
 import FormField from '../FormField'
 import TextInput from '../TextInput'
@@ -15,6 +16,8 @@ interface Props {
   availableHosts: Host[]
   newVolName: string
   setNewVolName: (v: string) => void
+  newVolSizeGb: number
+  setNewVolSizeGb: (v: number) => void
   newVolFtt: number
   setNewVolFtt: (v: number) => void
   newVolRaid: string
@@ -22,13 +25,18 @@ interface Props {
   newVolSelectedHosts: string[]
   setNewVolSelectedHosts: (v: string[] | ((prev: string[]) => string[])) => void
   newVolError: string
+  volumes: CoreSanVolume[]
 }
 
 export default function CreateVolumeDialog({
   open, onClose, onSubmit, status, sanHosts, availableHosts,
-  newVolName, setNewVolName, newVolFtt, setNewVolFtt, newVolRaid, setNewVolRaid,
-  newVolSelectedHosts, setNewVolSelectedHosts, newVolError,
+  newVolName, setNewVolName, newVolSizeGb, setNewVolSizeGb, newVolFtt, setNewVolFtt, newVolRaid, setNewVolRaid,
+  newVolSelectedHosts, setNewVolSelectedHosts, newVolError, volumes,
 }: Props) {
+  const totalCapacity = volumes.reduce((sum, v) => sum + v.total_bytes, 0)
+  const totalUsed = volumes.reduce((sum, v) => sum + (v.total_bytes - v.free_bytes), 0)
+  const totalAllocated = volumes.reduce((sum, v) => sum + (v.max_size_bytes || 0), 0)
+  const freeAfterAlloc = totalCapacity > 0 ? Math.max(0, totalCapacity - totalAllocated) : 0
   return (
     <Dialog open={open} title="Create Volume" onClose={onClose} width="max-w-xl">
       <div className="space-y-4">
@@ -39,6 +47,16 @@ export default function CreateVolumeDialog({
         )}
         <FormField label="Volume Name">
           <TextInput value={newVolName} onChange={(e) => setNewVolName(e.target.value)} placeholder="e.g. pool-a" />
+        </FormField>
+        <FormField label="Maximum Size (GB)">
+          <input type="number" min={1} value={newVolSizeGb}
+            onChange={(e) => setNewVolSizeGb(Math.max(1, Number(e.target.value)))}
+            className="w-full px-3 py-2 rounded-lg bg-vmm-input border border-vmm-border text-vmm-text text-sm
+              focus:outline-none focus:ring-1 focus:ring-vmm-accent focus:border-vmm-accent" />
+          <p className="text-[10px] text-vmm-text-muted mt-1">
+            Available: {formatBytes(freeAfterAlloc)} of {formatBytes(totalCapacity)} total
+            {totalAllocated > 0 && ` (${formatBytes(totalAllocated)} allocated to existing volumes)`}
+          </p>
         </FormField>
         <FormField label="Failures To Tolerate (FTT)">
           <Select value={String(newVolFtt)} onChange={(e) => setNewVolFtt(Number(e.target.value))} options={[

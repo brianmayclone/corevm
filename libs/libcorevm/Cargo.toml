@@ -1,6 +1,6 @@
 [package]
 name = "libcorevm"
-version = "0.2.9"
+version = "0.2.10"
 edition = "2021"
 description = "CoreVM — pure-software x86 virtual machine engine"
 

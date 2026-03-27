@@ -56,6 +56,7 @@ export default function StorageCoresan() {
 
   // Create volume form
   const [newVolName, setNewVolName] = useState('')
+  const [newVolSizeGb, setNewVolSizeGb] = useState(10)
   const [newVolFtt, setNewVolFtt] = useState(1)
   const [newVolRaid, setNewVolRaid] = useState('stripe')
   const [newVolSelectedHosts, setNewVolSelectedHosts] = useState<string[]>([])
@@ -137,7 +138,7 @@ export default function StorageCoresan() {
     const resp = await sanFetch(sanApi('/api/volumes'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: newVolName, ftt: newVolFtt, local_raid: newVolRaid }),
+      body: JSON.stringify({ name: newVolName, max_size_bytes: newVolSizeGb * 1024 * 1024 * 1024, ftt: newVolFtt, local_raid: newVolRaid }),
     })
     if (!resp.ok) { setNewVolError(await resp.text() || 'Failed to create volume'); return }
     const volData = await resp.json()
@@ -539,11 +540,10 @@ export default function StorageCoresan() {
       {/* ── Tab: Volumes ───────────────────────────────────────── */}
       {activeTab === 'volumes' && <>
 
-      {/* Volumes + Volume Detail */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Volume List */}
-        <div className="space-y-3">
-          <SectionLabel>Volumes</SectionLabel>
+      {/* Volume List */}
+      <div>
+        <SectionLabel>Volumes</SectionLabel>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 mt-3">
           {volumes.length === 0 ? (
             <Card><p className="text-sm text-vmm-text-dim text-center py-4">No volumes yet</p></Card>
           ) : volumes.map(vol => {
@@ -581,9 +581,10 @@ export default function StorageCoresan() {
             )
           })}
         </div>
+      </div>
 
-        {/* Volume Detail */}
-        <div className="lg:col-span-2 space-y-4">
+      {/* Volume Detail */}
+      <div className="space-y-4">
           {sel ? (
             <>
               <Card>
@@ -677,7 +678,6 @@ export default function StorageCoresan() {
             </Card>
           )}
 
-        </div>
       </div>
 
       </>}
@@ -732,10 +732,12 @@ export default function StorageCoresan() {
         sanHosts={sanHosts}
         availableHosts={availableHosts}
         newVolName={newVolName} setNewVolName={setNewVolName}
+        newVolSizeGb={newVolSizeGb} setNewVolSizeGb={setNewVolSizeGb}
         newVolFtt={newVolFtt} setNewVolFtt={setNewVolFtt}
         newVolRaid={newVolRaid} setNewVolRaid={setNewVolRaid}
         newVolSelectedHosts={newVolSelectedHosts} setNewVolSelectedHosts={setNewVolSelectedHosts}
         newVolError={newVolError}
+        volumes={volumes}
       />
 
       <AddHostDialog
