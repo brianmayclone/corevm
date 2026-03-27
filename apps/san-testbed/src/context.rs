@@ -303,6 +303,24 @@ impl TestContext {
         }
     }
 
+    /// Wait until a file is readable from a specific peer node (polls with GET).
+    pub async fn wait_readable(&self, index: usize, vol: &str, path: &str, timeout_secs: u64)
+        -> Result<Vec<u8>, String>
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        loop {
+            if let Ok((status, body)) = self.read_file(index, vol, path).await {
+                if status == 200 {
+                    return Ok(body);
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                return Err(format!("File {} not readable on node {} within {}s", path, index, timeout_secs));
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+
     pub async fn wait_secs(&self, secs: u64) {
         tracing::debug!("Waiting {}s...", secs);
         tokio::time::sleep(tokio::time::Duration::from_secs(secs)).await;
