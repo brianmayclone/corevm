@@ -72,6 +72,9 @@ pub async fn claim(
             }
         }
         disk::DiskStatus::Available => { /* Good to go */ }
+        disk::DiskStatus::OsDisk => {
+            return Err((StatusCode::FORBIDDEN, "Cannot claim the OS disk".into()));
+        }
     }
 
     let disk_id = Uuid::new_v4().to_string();
