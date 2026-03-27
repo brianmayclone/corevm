@@ -51,6 +51,11 @@ pub async fn run_all() -> Vec<ScenarioResult> {
     results.push(run_scenario!("partition-witness-2node", 2, scenario_partition_witness_2node));
     results.push(run_scenario!("replication-basic", 3, scenario_replication_basic));
     results.push(run_scenario!("repair-leader-only", 3, scenario_repair_leader_only));
+    results.push(run_scenario!("transfer-small", 3, scenario_transfer_small));
+    results.push(run_scenario!("transfer-large", 3, scenario_transfer_large));
+    results.push(run_scenario!("transfer-throughput", 3, scenario_transfer_throughput));
+    results.push(run_scenario!("cross-node-read", 3, scenario_cross_node_read));
+    results.push(run_scenario!("replication-verify", 3, scenario_replication_verify));
 
     results
 }
@@ -67,6 +72,11 @@ pub async fn run_single(name: &str) -> Option<ScenarioResult> {
         "partition-witness-2node" => Some(run_scenario!(name, 2, scenario_partition_witness_2node)),
         "replication-basic" => Some(run_scenario!(name, 3, scenario_replication_basic)),
         "repair-leader-only" => Some(run_scenario!(name, 3, scenario_repair_leader_only)),
+        "transfer-small" => Some(run_scenario!(name, 3, scenario_transfer_small)),
+        "transfer-large" => Some(run_scenario!(name, 3, scenario_transfer_large)),
+        "transfer-throughput" => Some(run_scenario!(name, 3, scenario_transfer_throughput)),
+        "cross-node-read" => Some(run_scenario!(name, 3, scenario_cross_node_read)),
+        "replication-verify" => Some(run_scenario!(name, 3, scenario_replication_verify)),
         _ => None,
     }
 }
@@ -80,8 +90,34 @@ async fn scenario_quorum_degraded(ctx: &mut TestContext) -> Result<(), String> {
     let s2 = ctx.get_status(2).await?;
     if s1.quorum_status != "degraded" { return Err(format!("node 1 expected degraded, got {}", s1.quorum_status)); }
     if s2.quorum_status != "degraded" { return Err(format!("node 2 expected degraded, got {}", s2.quorum_status)); }
-    if !(s1.is_leader ^ s2.is_leader) { return Err("expected exactly one leader".into()); }
-    Ok(())
+
+    // Leader election may take a few more heartbeat cycles — poll with timeout
+    for attempt in 0..6 {
+        let s1 = ctx.get_status(1).await?;
+        let s2 = ctx.get_status(2).await?;
+        if s1.is_leader ^ s2.is_leader {
+            tracing::debug!("Leader found after {} extra polls", attempt);
+            return Ok(());
+        }
+        tracing::debug!("No unique leader yet (s1.leader={}, s2.leader={}), waiting 5s...", s1.is_leader, s2.is_leader);
+        ctx.wait_secs(5).await;
+    }
+    let s1 = ctx.get_status(1).await?;
+    let s2 = ctx.get_status(2).await?;
+
+    // Dump node logs for debugging leader election
+    for i in 1..=2 {
+        let log = ctx.read_log(i);
+        let leader_lines: Vec<&str> = log.lines()
+            .filter(|l| l.contains("Leader calc") || l.contains("leader") || l.contains("is now the leader"))
+            .collect();
+        tracing::warn!("Node {} leader-related log lines ({} total):", i, leader_lines.len());
+        for line in leader_lines.iter().rev().take(10).rev() {
+            tracing::warn!("  {}", line);
+        }
+    }
+
+    Err(format!("expected exactly one leader, got s1.leader={} s2.leader={}", s1.is_leader, s2.is_leader))
 }
 
 async fn scenario_quorum_fenced(ctx: &mut TestContext) -> Result<(), String> {
@@ -174,6 +210,8 @@ async fn scenario_leader_failover(ctx: &mut TestContext) -> Result<(), String> {
 }
 
 async fn scenario_partition_majority(ctx: &mut TestContext) -> Result<(), String> {
+    // Deny witness so isolated node 3 can't get witness-based quorum
+    ctx.set_witness_mode(WitnessMode::DenyAll);
     ctx.partition(&[1, 2], &[3]).await?;
     ctx.wait_secs(25).await;
 
@@ -233,6 +271,153 @@ async fn scenario_repair_leader_only(ctx: &mut TestContext) -> Result<(), String
     if !log.contains("skipping repair") && !log.contains("Not leader") {
         return Err(format!("non-leader node {} log doesn't contain repair skip message", non_leader_idx));
     }
+    Ok(())
+}
+
+// ── File transfer & performance scenarios ────────────────────
+
+/// Small file write + read with timing.
+async fn scenario_transfer_small(ctx: &mut TestContext) -> Result<(), String> {
+    let data = vec![0xABu8; 1024]; // 1 KB
+    let (status, write_dur, write_bps) = ctx.write_file_timed(1, "testbed-vol", "small.bin", &data).await?;
+    if status >= 400 { return Err(format!("write failed: HTTP {}", status)); }
+
+    let (status, body, read_dur, read_bps) = ctx.read_file_timed(1, "testbed-vol", "small.bin").await?;
+    if status != 200 { return Err(format!("read failed: HTTP {}", status)); }
+    if body != data { return Err("read content mismatch".into()); }
+
+    tracing::info!("Small file (1 KB): write {:.1}ms, read {:.1}ms",
+        write_dur.as_secs_f64() * 1000.0, read_dur.as_secs_f64() * 1000.0);
+    let _ = (write_bps, read_bps); // logged inside helpers
+    Ok(())
+}
+
+/// Large file write + read with timing (512 KB — safe under Axum 2 MiB default).
+async fn scenario_transfer_large(ctx: &mut TestContext) -> Result<(), String> {
+    let size = 512 * 1024; // 512 KB
+    // Deterministic pattern so we can verify integrity
+    let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+
+    let (status, write_dur, _) = ctx.write_file_timed(1, "testbed-vol", "large.bin", &data).await?;
+    if status >= 400 { return Err(format!("write failed: HTTP {}", status)); }
+
+    let (status, body, read_dur, _) = ctx.read_file_timed(1, "testbed-vol", "large.bin").await?;
+    if status != 200 { return Err(format!("read failed: HTTP {}", status)); }
+    if body.len() != data.len() {
+        return Err(format!("size mismatch: wrote {} bytes, read {} bytes", data.len(), body.len()));
+    }
+    if body != data { return Err("content mismatch (data corruption)".into()); }
+
+    tracing::info!("Large file (512 KB): write {:.1}ms, read {:.1}ms",
+        write_dur.as_secs_f64() * 1000.0, read_dur.as_secs_f64() * 1000.0);
+    Ok(())
+}
+
+/// Throughput test: write multiple files sequentially and measure aggregate speed.
+async fn scenario_transfer_throughput(ctx: &mut TestContext) -> Result<(), String> {
+    let file_size = 64 * 1024; // 64 KB per file
+    let num_files = 10;
+    let data: Vec<u8> = (0..file_size).map(|i| (i % 199) as u8).collect();
+
+    let start = std::time::Instant::now();
+    for i in 0..num_files {
+        let path = format!("throughput/file-{}.bin", i);
+        let (status, _, _) = ctx.write_file_timed(1, "testbed-vol", &path, &data).await?;
+        if status >= 400 { return Err(format!("write {} failed: HTTP {}", path, status)); }
+    }
+    let write_elapsed = start.elapsed();
+    let total_bytes = file_size * num_files;
+    let write_mbps = (total_bytes as f64 / 1_048_576.0) / write_elapsed.as_secs_f64();
+
+    // Read them all back
+    let start = std::time::Instant::now();
+    for i in 0..num_files {
+        let path = format!("throughput/file-{}.bin", i);
+        let (status, body, _, _) = ctx.read_file_timed(1, "testbed-vol", &path).await?;
+        if status != 200 { return Err(format!("read {} failed: HTTP {}", path, status)); }
+        if body.len() != file_size { return Err(format!("size mismatch on {}", path)); }
+    }
+    let read_elapsed = start.elapsed();
+    let read_mbps = (total_bytes as f64 / 1_048_576.0) / read_elapsed.as_secs_f64();
+
+    tracing::info!(
+        "Throughput ({} x {} KB = {} KB): write {:.1} MB/s ({:.0}ms), read {:.1} MB/s ({:.0}ms)",
+        num_files, file_size / 1024, total_bytes / 1024,
+        write_mbps, write_elapsed.as_secs_f64() * 1000.0,
+        read_mbps, read_elapsed.as_secs_f64() * 1000.0,
+    );
+
+    // Sanity check: at least 1 MB/s write and read on localhost
+    if write_mbps < 1.0 {
+        return Err(format!("write throughput too low: {:.2} MB/s", write_mbps));
+    }
+    if read_mbps < 1.0 {
+        return Err(format!("read throughput too low: {:.2} MB/s", read_mbps));
+    }
+    Ok(())
+}
+
+/// Write on node 1, read from node 2 and node 3 after replication.
+async fn scenario_cross_node_read(ctx: &mut TestContext) -> Result<(), String> {
+    let data: Vec<u8> = (0..4096).map(|i| (i % 173) as u8).collect(); // 4 KB
+
+    let (status, _, _) = ctx.write_file_timed(1, "testbed-vol", "cross-read.bin", &data).await?;
+    if status >= 400 { return Err(format!("write failed: HTTP {}", status)); }
+
+    // Wait for replication to complete (synced to at least 2 nodes)
+    ctx.wait_replication(1, "testbed-vol", "cross-read.bin", 2, 30).await?;
+
+    // Read from node 2
+    let (s2, body2, dur2, _) = ctx.read_file_timed(2, "testbed-vol", "cross-read.bin").await?;
+    if s2 != 200 { return Err(format!("read from node 2: HTTP {}", s2)); }
+    if body2 != data { return Err("node 2 content mismatch".into()); }
+
+    // Read from node 3
+    let (s3, body3, dur3, _) = ctx.read_file_timed(3, "testbed-vol", "cross-read.bin").await?;
+    if s3 != 200 { return Err(format!("read from node 3: HTTP {}", s3)); }
+    if body3 != data { return Err("node 3 content mismatch".into()); }
+
+    tracing::info!("Cross-node read: node 2 in {:.1}ms, node 3 in {:.1}ms",
+        dur2.as_secs_f64() * 1000.0, dur3.as_secs_f64() * 1000.0);
+    Ok(())
+}
+
+/// Write files on different nodes, verify replication count via file list API.
+async fn scenario_replication_verify(ctx: &mut TestContext) -> Result<(), String> {
+    // Write from node 1
+    let data1 = b"from-node-1";
+    let s = ctx.write_file(1, "testbed-vol", "repl-v/a.txt", data1).await?;
+    if s >= 400 { return Err(format!("write a.txt failed: HTTP {}", s)); }
+
+    // Write from node 2
+    let data2 = b"from-node-2";
+    let s = ctx.write_file(2, "testbed-vol", "repl-v/b.txt", data2).await?;
+    if s >= 400 { return Err(format!("write b.txt failed: HTTP {}", s)); }
+
+    // Wait for replication
+    ctx.wait_replication(1, "testbed-vol", "repl-v/a.txt", 2, 30).await?;
+    ctx.wait_replication(2, "testbed-vol", "repl-v/b.txt", 2, 30).await?;
+
+    // Verify cross-reads
+    let (s, body, _, _) = ctx.read_file_timed(2, "testbed-vol", "repl-v/a.txt").await?;
+    if s != 200 { return Err(format!("read a.txt from node 2: HTTP {}", s)); }
+    if body != data1 { return Err("a.txt content mismatch on node 2".into()); }
+
+    let (s, body, _, _) = ctx.read_file_timed(1, "testbed-vol", "repl-v/b.txt").await?;
+    if s != 200 { return Err(format!("read b.txt from node 1: HTTP {}", s)); }
+    if body != data2 { return Err("b.txt content mismatch on node 1".into()); }
+
+    // Check replica counts via list API
+    let files = ctx.list_files(1, "testbed-vol").await?;
+    for (path, _, synced) in &files {
+        if path.starts_with("repl-v/") {
+            tracing::info!("File {}: synced to {} nodes", path, synced);
+            if *synced < 2 {
+                return Err(format!("{} only synced to {} nodes, expected >= 2", path, synced));
+            }
+        }
+    }
+
     Ok(())
 }
 

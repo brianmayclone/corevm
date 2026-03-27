@@ -134,8 +134,15 @@ async fn heartbeat_all_peers(state: &CoreSanState, client: &PeerClient) {
     }
 
     let uptime = state.started_at.elapsed().as_secs();
-    let our_address = format!("http://{}:{}",
-        crate::engine::discovery::get_local_ip_cached(), state.config.server.port);
+    // Use configured bind address if it's a specific IP (not 0.0.0.0),
+    // otherwise auto-detect. Prevents address mismatch when bound to 127.0.0.1.
+    let bind_ip = &state.config.server.bind;
+    let ip = if bind_ip != "0.0.0.0" && !bind_ip.is_empty() {
+        bind_ip.clone()
+    } else {
+        crate::engine::discovery::get_local_ip_cached()
+    };
+    let our_address = format!("http://{}:{}", ip, state.config.server.port);
     let is_leader = state.is_leader.load(std::sync::atomic::Ordering::Relaxed);
 
     for peer_id in peer_ids {
@@ -241,7 +248,12 @@ fn compute_is_leader(state: &CoreSanState, quorum: QuorumStatus) -> bool {
         .map(|p| p.node_id.clone())
         .collect();
     let refs: Vec<&str> = online_ids.iter().map(|s| s.as_str()).collect();
-    calculate_is_leader(&state.node_id, &refs, quorum, total_peers)
+    let result = calculate_is_leader(&state.node_id, &refs, quorum, total_peers);
+    tracing::trace!(
+        "Leader calc: node={}, online_peers={:?}, quorum={:?}, total_peers={}, result={}",
+        state.node_id, online_ids, quorum, total_peers, result
+    );
+    result
 }
 
 #[cfg(test)]

@@ -60,6 +60,15 @@ impl TestContext {
             )?;
         }
 
+        // Cross-register all backends so push replication can discover peer backends
+        let all_nodes: Vec<(String, Vec<String>)> = nodes.iter()
+            .map(|n| (n.node_id.clone(), n.disk_paths.clone()))
+            .collect();
+        for node in &nodes {
+            let db_path = node.data_dir.join("vmm-san.db");
+            db_init::cross_register_backends(&db_path, &all_nodes, &node.node_id)?;
+        }
+
         // Start witness
         let witness = witness::spawn(WITNESS_PORT).await;
 
@@ -195,6 +204,103 @@ impl TestContext {
     pub fn set_witness_mode(&self, mode: WitnessMode) {
         tracing::debug!("Setting witness mode: {:?}", mode);
         witness::set_mode(&self.witness, mode);
+    }
+
+    /// Write a file and return (status, duration, bytes_per_sec).
+    pub async fn write_file_timed(&self, index: usize, vol: &str, path: &str, content: &[u8])
+        -> Result<(u16, std::time::Duration, f64), String>
+    {
+        let node = &self.nodes[index - 1];
+        let url = format!("{}/api/volumes/{}/files/{}", node.address(), vol, path);
+        let size = content.len();
+        tracing::debug!("Writing file (timed): PUT {} ({} bytes)", url, size);
+        let start = std::time::Instant::now();
+        let resp = self.http.put(&url)
+            .body(content.to_vec())
+            .send().await
+            .map_err(|e| format!("write to node {}: {}", index, e))?;
+        let elapsed = start.elapsed();
+        let status = resp.status().as_u16();
+        let bps = if elapsed.as_secs_f64() > 0.0 {
+            size as f64 / elapsed.as_secs_f64()
+        } else {
+            0.0
+        };
+        if status >= 400 {
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!("Write failed: HTTP {} — {}", status, body);
+        } else {
+            tracing::info!("Write OK: {} bytes in {:.1}ms ({:.1} MB/s)",
+                size, elapsed.as_millis(), bps / 1_048_576.0);
+        }
+        Ok((status, elapsed, bps))
+    }
+
+    /// Read a file and return (status, body, duration, bytes_per_sec).
+    pub async fn read_file_timed(&self, index: usize, vol: &str, path: &str)
+        -> Result<(u16, Vec<u8>, std::time::Duration, f64), String>
+    {
+        let node = &self.nodes[index - 1];
+        let url = format!("{}/api/volumes/{}/files/{}", node.address(), vol, path);
+        tracing::debug!("Reading file (timed): GET {}", url);
+        let start = std::time::Instant::now();
+        let resp = self.http.get(&url)
+            .send().await
+            .map_err(|e| format!("read from node {}: {}", index, e))?;
+        let status = resp.status().as_u16();
+        let body = resp.bytes().await
+            .map_err(|e| format!("read body from node {}: {}", index, e))?;
+        let elapsed = start.elapsed();
+        let size = body.len();
+        let bps = if elapsed.as_secs_f64() > 0.0 {
+            size as f64 / elapsed.as_secs_f64()
+        } else {
+            0.0
+        };
+        tracing::info!("Read: {} bytes in {:.1}ms ({:.1} MB/s)",
+            size, elapsed.as_millis(), bps / 1_048_576.0);
+        Ok((status, body.to_vec(), elapsed, bps))
+    }
+
+    /// List files in a volume, returns Vec of (rel_path, size_bytes, synced_count).
+    pub async fn list_files(&self, index: usize, vol: &str)
+        -> Result<Vec<(String, u64, u32)>, String>
+    {
+        let node = &self.nodes[index - 1];
+        let url = format!("{}/api/volumes/{}/files", node.address(), vol);
+        let resp = self.http.get(&url).send().await
+            .map_err(|e| format!("list files on node {}: {}", index, e))?;
+        if !resp.status().is_success() {
+            return Err(format!("list files HTTP {}", resp.status()));
+        }
+        let files: Vec<serde_json::Value> = resp.json().await
+            .map_err(|e| format!("parse file list: {}", e))?;
+        Ok(files.iter().map(|f| (
+            f["rel_path"].as_str().unwrap_or("").to_string(),
+            f["size_bytes"].as_u64().unwrap_or(0),
+            f["synced_count"].as_u64().unwrap_or(0) as u32,
+        )).collect())
+    }
+
+    /// Wait until a file is replicated to at least `min_synced` nodes (polls file list).
+    pub async fn wait_replication(&self, index: usize, vol: &str, path: &str, min_synced: u32, timeout_secs: u64)
+        -> Result<u32, String>
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        loop {
+            if let Ok(files) = self.list_files(index, vol).await {
+                if let Some((_, _, synced)) = files.iter().find(|(p, _, _)| p == path) {
+                    if *synced >= min_synced {
+                        tracing::debug!("File {} synced to {} nodes", path, synced);
+                        return Ok(*synced);
+                    }
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                return Err(format!("File {} not replicated to {} nodes within {}s", path, min_synced, timeout_secs));
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
     }
 
     pub async fn wait_secs(&self, secs: u64) {

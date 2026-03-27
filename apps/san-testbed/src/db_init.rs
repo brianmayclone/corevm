@@ -76,3 +76,29 @@ pub fn init_node_db(
 
     Ok(())
 }
+
+/// Cross-register backends from all other nodes into this node's DB.
+/// This is needed so push replication can discover peer backends.
+pub fn cross_register_backends(
+    db_path: &Path,
+    all_nodes: &[(String, Vec<String>)],  // (node_id, disk_paths)
+    this_node_id: &str,
+) -> Result<(), String> {
+    let conn = Connection::open(db_path)
+        .map_err(|e| format!("Cannot open DB {}: {}", db_path.display(), e))?;
+
+    for (peer_node_id, disk_paths) in all_nodes {
+        if peer_node_id == this_node_id { continue; }
+        for (idx, disk_path) in disk_paths.iter().enumerate() {
+            let backend_id = format!("backend-{}-{}", peer_node_id, idx);
+            let disk_id = format!("disk-x-{}-{}", peer_node_id, idx);
+            conn.execute(
+                "INSERT OR REPLACE INTO backends (id, node_id, path, total_bytes, free_bytes, status, claimed_disk_id)
+                 VALUES (?1, ?2, ?3, 107374182400, 107374182400, 'online', ?4)",
+                rusqlite::params![&backend_id, peer_node_id, disk_path, &disk_id],
+            ).map_err(|e| format!("cross-register backend: {}", e))?;
+        }
+    }
+
+    Ok(())
+}

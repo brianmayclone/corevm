@@ -29,10 +29,15 @@ async fn main() {
         println!("  san-testbed [--nodes N]               Interactive mode with N nodes (default: 3)");
         println!("  san-testbed --scenario <name|all>     Run automated test scenario(s)");
         println!();
-        println!("Scenarios: quorum-degraded, quorum-fenced, quorum-recovery,");
-        println!("  fenced-write-denied, fenced-read-allowed, leader-failover,");
-        println!("  partition-majority, partition-witness-2node, replication-basic,");
-        println!("  repair-leader-only, all");
+        println!("Scenarios:");
+        println!("  Quorum:    quorum-degraded, quorum-fenced, quorum-recovery");
+        println!("  Fencing:   fenced-write-denied, fenced-read-allowed");
+        println!("  Failover:  leader-failover");
+        println!("  Partition: partition-majority, partition-witness-2node");
+        println!("  Repl:      replication-basic, replication-verify");
+        println!("  Transfer:  transfer-small, transfer-large, transfer-throughput");
+        println!("  Cross:     cross-node-read");
+        println!("  Other:     repair-leader-only, all");
         return;
     }
 
@@ -65,10 +70,7 @@ async fn main() {
                 }
                 None => {
                     eprintln!("Unknown scenario: {}", scenario_name);
-                    eprintln!("Available: quorum-degraded, quorum-fenced, quorum-recovery,");
-                    eprintln!("  fenced-write-denied, fenced-read-allowed, leader-failover,");
-                    eprintln!("  partition-majority, partition-witness-2node, replication-basic,");
-                    eprintln!("  repair-leader-only, all");
+                    eprintln!("Run with --help for available scenarios.");
                     std::process::exit(1);
                 }
             }
