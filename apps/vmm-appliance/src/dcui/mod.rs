@@ -74,7 +74,7 @@ impl ActiveDialog {
         }
     }
 
-    fn render(&self, frame: &mut Frame) {
+    fn render(&mut self, frame: &mut Frame) {
         match self {
             ActiveDialog::None          => {}
             ActiveDialog::Network(d)    => d.render(frame),

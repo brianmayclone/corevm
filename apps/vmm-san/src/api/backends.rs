@@ -154,7 +154,7 @@ pub async fn remove(
 }
 
 /// Get filesystem stats (total, free) for a path using statvfs.
-fn get_fs_stats(path: &str) -> (u64, u64) {
+pub fn get_fs_stats(path: &str) -> (u64, u64) {
     use std::ffi::CString;
     let c_path = match CString::new(path) {
         Ok(p) => p,

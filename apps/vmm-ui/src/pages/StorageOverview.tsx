@@ -213,7 +213,7 @@ export default function Storage() {
                           'bg-vmm-danger/20 text-vmm-danger border-vmm-danger/30'
                         }`}>{vol.status}</span>
                         <span className="px-1.5 py-0.5 rounded text-[9px] font-bold border tracking-wider uppercase bg-vmm-surface text-vmm-text-muted border-vmm-border">
-                          {vol.resilience_mode === 'mirror' ? `${vol.replica_count}x mirror` : vol.resilience_mode}
+                          FTT={vol.ftt}
                         </span>
                       </div>
                       <div className="w-full h-1 bg-vmm-border rounded-full overflow-hidden">
@@ -222,7 +222,7 @@ export default function Storage() {
                       </div>
                       <div className="flex justify-between mt-1 text-[10px] text-vmm-text-muted">
                         <span>{formatBytes(used)} / {formatBytes(vol.total_bytes)}</span>
-                        <span>{vol.files_syncing > 0 ? `${vol.files_syncing} syncing` : `${vol.files_synced} synced`}</span>
+                        <span>{vol.stale_chunks > 0 ? `${vol.stale_chunks} syncing` : `${vol.synced_chunks} synced`}</span>
                       </div>
                     </div>
                   </div>

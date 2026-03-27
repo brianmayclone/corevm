@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS volumes (
     ftt             INTEGER NOT NULL DEFAULT 1,       -- Failures To Tolerate: 0, 1, 2
     chunk_size_bytes INTEGER NOT NULL DEFAULT 67108864, -- 64MB default
     local_raid      TEXT NOT NULL DEFAULT 'stripe',   -- stripe, mirror, stripe_mirror
+    max_size_bytes  INTEGER NOT NULL DEFAULT 0,       -- 0 = unlimited (legacy)
     -- Status
     status          TEXT NOT NULL DEFAULT 'creating',
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
@@ -260,4 +261,6 @@ fn migrate(db: &Connection) {
 
     // Volume sync mode policy
     db.execute_batch("ALTER TABLE volumes ADD COLUMN sync_mode TEXT NOT NULL DEFAULT 'async';").ok();
+    // Volume size limit
+    db.execute_batch("ALTER TABLE volumes ADD COLUMN max_size_bytes INTEGER NOT NULL DEFAULT 0;").ok();
 }

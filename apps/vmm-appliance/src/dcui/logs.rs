@@ -56,6 +56,7 @@ struct TabState {
     log_path: String,
     lines: Vec<String>,
     scroll: usize,
+    auto_scroll: bool,
 }
 
 impl Dialog {
@@ -66,7 +67,7 @@ impl Dialog {
                 .find(|p| Path::new(p).exists())
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| src.paths[0].to_string());
-            let mut tab = TabState { log_path, lines: Vec::new(), scroll: 0 };
+            let mut tab = TabState { log_path, lines: Vec::new(), scroll: 0, auto_scroll: true };
             tab.refresh();
             tab
         }).collect();
@@ -103,6 +104,7 @@ impl Dialog {
             KeyCode::Up => {
                 let tab = &mut self.tabs[self.active_tab];
                 if tab.scroll > 0 { tab.scroll -= 1; }
+                tab.auto_scroll = false;
             }
             KeyCode::Down => {
                 let tab = &mut self.tabs[self.active_tab];
@@ -111,6 +113,7 @@ impl Dialog {
             KeyCode::PageUp => {
                 let tab = &mut self.tabs[self.active_tab];
                 tab.scroll = tab.scroll.saturating_sub(20);
+                tab.auto_scroll = false;
             }
             KeyCode::PageDown => {
                 let tab = &mut self.tabs[self.active_tab];
@@ -118,11 +121,14 @@ impl Dialog {
                 tab.scroll = (tab.scroll + 20).min(max);
             }
             KeyCode::Home => {
-                self.tabs[self.active_tab].scroll = 0;
+                let tab = &mut self.tabs[self.active_tab];
+                tab.scroll = 0;
+                tab.auto_scroll = false;
             }
             KeyCode::End => {
                 let tab = &mut self.tabs[self.active_tab];
                 tab.scroll = tab.lines.len().saturating_sub(1);
+                tab.auto_scroll = true;
             }
             KeyCode::Char('d') | KeyCode::Char('D') => {
                 self.toggle_debug_mode();
@@ -159,7 +165,12 @@ impl Dialog {
         ));
     }
 
-    pub fn render(&self, frame: &mut Frame) {
+    pub fn render(&mut self, frame: &mut Frame) {
+        // Auto-refresh on each render cycle if enough time has elapsed
+        if self.last_refresh.elapsed() >= REFRESH_INTERVAL {
+            self.refresh_all();
+        }
+
         let area = frame.area();
         let popup_width = area.width.saturating_sub(4).max(40);
         let popup_height = area.height.saturating_sub(4).max(10);
@@ -257,8 +268,9 @@ impl Dialog {
 impl TabState {
     fn refresh(&mut self) {
         self.lines = read_last_lines(&self.log_path, TAIL_LINES);
-        // Auto-scroll to bottom
-        self.scroll = self.lines.len().saturating_sub(1);
+        if self.auto_scroll {
+            self.scroll = self.lines.len().saturating_sub(1);
+        }
     }
 }
 

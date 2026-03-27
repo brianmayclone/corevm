@@ -402,6 +402,7 @@ export interface CoreSanVolume {
   ftt: number
   local_raid: 'stripe' | 'mirror' | 'stripe_mirror'
   chunk_size_bytes: number
+  max_size_bytes: number
   status: 'creating' | 'online' | 'degraded' | 'offline'
   total_bytes: number
   free_bytes: number

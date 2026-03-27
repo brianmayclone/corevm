@@ -168,19 +168,19 @@ chroot "$ROOTFS_DIR" bash -c '
     export HOME=/root
     export CARGO_TARGET_DIR=/tmp/cargo-target
 
-    # Install build-only dependencies for CoreSAN (FUSE headers needed by fuser crate)
+    # Ensure build tools are present (may have been purged by a previous build)
     apt-get update -qq
-    apt-get install -y --no-install-recommends libfuse3-dev 2>/dev/null || true
+    apt-get install -y --no-install-recommends \
+        gcc libc6-dev pkg-config libssl-dev make libfuse3-dev 2>/dev/null || true
 
-    curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable 2>&1
+    # Install Rust if not already present
+    if [ ! -f /root/.cargo/env ]; then
+        curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable 2>&1
+    fi
     source /root/.cargo/env
+
     cd /build
     cargo build --release -p vmm-appliance -p vmm-server -p vmm-cluster -p vmm-san
-
-    # Remove build-only dependencies (not needed at runtime, saves ~50MB)
-    apt-get purge -y libfuse3-dev 2>/dev/null || true
-    apt-get autoremove -y 2>/dev/null || true
-    apt-get clean
 '
 
 # Copy chroot-built binaries to where the rest of the script expects them
@@ -420,10 +420,10 @@ cp "$SCRIPT_DIR/iso/grub-installed.cfg" "$ROOTFS_DIR/etc/default/grub"
 cp "$SCRIPT_DIR/iso/nftables.conf" "$ROOTFS_DIR/etc/nftables.conf"
 
 # Enable services (use --root= since systemd is not PID 1 in the chroot)
+# Enable base services — vmm-dcui always runs (TUI management console).
+# vmm-server, vmm-cluster, vmm-san are enabled by the installer based on
+# the selected role (Standalone Server vs Cluster Controller).
 systemctl --root="$ROOTFS_DIR" enable vmm-dcui.service
-systemctl --root="$ROOTFS_DIR" enable vmm-server.service
-systemctl --root="$ROOTFS_DIR" enable vmm-cluster.service
-systemctl --root="$ROOTFS_DIR" enable vmm-san.service
 systemctl --root="$ROOTFS_DIR" enable nftables.service
 systemctl --root="$ROOTFS_DIR" enable ssh.service
 
@@ -562,8 +562,9 @@ cp "$LIVE_DIR/initrd.img" "$ISO_STAGING/live/" 2>/dev/null || \
 mksquashfs "$LIVE_DIR" "$ISO_STAGING/live/filesystem.squashfs" -comp xz -noappend
 
 # Copy boot configs
-cp "$SCRIPT_DIR/iso/grub.cfg" "$ISO_STAGING/boot/grub/"
-cp "$SCRIPT_DIR/iso/isolinux.cfg" "$ISO_STAGING/isolinux/"
+# Copy boot configs and patch version placeholder
+sed "s/__VERSION__/${COREVM_VERSION}/g" "$SCRIPT_DIR/iso/grub.cfg" > "$ISO_STAGING/boot/grub/grub.cfg"
+sed "s/__VERSION__/${COREVM_VERSION}/g" "$SCRIPT_DIR/iso/isolinux.cfg" > "$ISO_STAGING/isolinux/isolinux.cfg"
 
 # Copy isolinux/syslinux boot files (search standard package paths first)
 find_and_copy() {

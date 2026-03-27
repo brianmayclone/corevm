@@ -266,22 +266,39 @@ pub struct MigrationProgress {
 pub struct CoreSanVolumeStatus {
     pub volume_id: String,
     pub volume_name: String,
-    pub resilience_mode: String,    // none, mirror, erasure
-    pub replica_count: u32,
+    #[serde(default)]
+    pub ftt: u32,
+    #[serde(default)]
+    pub local_raid: String,
+    #[serde(default)]
+    pub chunk_size_bytes: u64,
     pub total_bytes: u64,
     pub free_bytes: u64,
     pub status: String,             // online, degraded, offline
+    #[serde(default)]
     pub backend_count: u32,
-    pub files_synced: u64,
-    pub files_syncing: u64,
+    #[serde(default)]
+    pub total_chunks: u64,
+    #[serde(default)]
+    pub synced_chunks: u64,
+    #[serde(default)]
+    pub stale_chunks: u64,
+    #[serde(default)]
+    pub protected_files: u64,
+    #[serde(default)]
+    pub degraded_files: u64,
 }
 
 /// CoreSAN node status, included in HostStatus heartbeat.
+///
+/// Deserialized from the vmm-san `/api/status` response — extra fields
+/// (hostname, uptime_secs, quorum_status, is_leader, …) are silently ignored.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CoreSanNodeStatus {
     pub running: bool,
     pub address: String,
     pub node_id: String,
+    #[serde(default)]
     pub volumes: Vec<CoreSanVolumeStatus>,
     #[serde(default)]
     pub peer_count: u32,
@@ -289,6 +306,7 @@ pub struct CoreSanNodeStatus {
     pub available_disks: u32,
     #[serde(default)]
     pub claimed_disks: u32,
+    #[serde(default)]
     pub benchmark_summary: Option<CoreSanBenchmarkSummary>,
 }
 

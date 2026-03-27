@@ -39,8 +39,8 @@ pub async fn run_benchmarks(state: &CoreSanState) {
         return;
     }
 
-    tracing::info!("Running benchmarks against {} peers ({}MB test)",
-        peer_list.len(), state.config.benchmark.bandwidth_test_size_mb);
+    tracing::info!("Running benchmarks against {} peers ({}× 8KB = {}MB)",
+        peer_list.len(), test_size / 8192, state.config.benchmark.bandwidth_test_size_mb);
 
     for (peer_id, peer_address) in &peer_list {
         // --- Latency test (multiple pings) ---
@@ -62,28 +62,46 @@ pub async fn run_benchmarks(state: &CoreSanState) {
             (avg, variance.sqrt())
         };
 
-        // --- Throughput test (echo data) ---
-        let test_data = vec![0xABu8; test_size];
-        let (bandwidth_mbps, packet_loss_pct) = match client.echo(peer_address, &test_data).await {
-            Ok((duration, received_bytes)) => {
-                let secs = duration.as_secs_f64();
-                let mbps = if secs > 0.0 {
-                    (received_bytes as f64 * 8.0) / (secs * 1_000_000.0)
-                } else {
-                    0.0
-                };
-                let loss = if test_data.len() > 0 {
-                    (1.0 - (received_bytes as f64 / test_data.len() as f64)) * 100.0
-                } else {
-                    0.0
-                };
-                (mbps, loss.max(0.0))
+        // --- Throughput test (many small 8KB echo requests) ---
+        // Using small payloads avoids HTTP timeout issues on virtual/slow links
+        // while still measuring realistic throughput.
+        const CHUNK_SIZE: usize = 8192;
+        let iterations = test_size / CHUNK_SIZE;
+        let chunk = vec![0xABu8; CHUNK_SIZE];
+
+        let mut total_sent: u64 = 0;
+        let mut total_received: u64 = 0;
+        let mut failed: u64 = 0;
+        let start = std::time::Instant::now();
+
+        for _ in 0..iterations {
+            total_sent += CHUNK_SIZE as u64;
+            match client.echo(peer_address, &chunk).await {
+                Ok((_dur, received_bytes)) => {
+                    total_received += received_bytes as u64;
+                }
+                Err(_) => {
+                    failed += 1;
+                }
             }
-            Err(e) => {
-                tracing::warn!("Benchmark echo failed for {}: {}", peer_id, e);
-                (0.0, 100.0)
-            }
+        }
+
+        let elapsed = start.elapsed().as_secs_f64();
+        let bandwidth_mbps = if elapsed > 0.0 {
+            (total_received as f64 * 8.0) / (elapsed * 1_000_000.0)
+        } else {
+            0.0
         };
+        let packet_loss_pct = if total_sent > 0 {
+            ((1.0 - (total_received as f64 / total_sent as f64)) * 100.0).max(0.0)
+        } else {
+            0.0
+        };
+
+        if failed > 0 {
+            tracing::warn!("Benchmark echo: {}/{} requests failed for {}",
+                failed, iterations, peer_id);
+        }
 
         // Store results
         let db = state.db.lock().unwrap();

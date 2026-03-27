@@ -11,6 +11,8 @@ use crate::state::CoreSanState;
 #[derive(Deserialize)]
 pub struct CreateVolumeRequest {
     pub name: String,
+    /// Maximum volume size in bytes (required).
+    pub max_size_bytes: u64,
     #[serde(default = "default_ftt")]
     pub ftt: u32,
     #[serde(default = "default_local_raid")]
@@ -36,6 +38,7 @@ pub struct VolumeResponse {
     pub ftt: u32,
     pub local_raid: String,
     pub chunk_size_bytes: u64,
+    pub max_size_bytes: u64,
     pub status: String,
     pub total_bytes: u64,
     pub free_bytes: u64,
@@ -71,6 +74,12 @@ pub async fn create(
         }
     }
 
+    // Validate volume size
+    if body.max_size_bytes == 0 {
+        return Err((StatusCode::BAD_REQUEST,
+            "max_size_bytes is required and must be > 0".into()));
+    }
+
     // Validate enough nodes for FTT
     let total_nodes = 1 + state.peers.iter()
         .filter(|p| p.status == crate::state::PeerStatus::Online)
@@ -86,16 +95,43 @@ pub async fn create(
     let id = Uuid::new_v4().to_string();
     let db = state.db.lock().unwrap();
 
+    // Check available capacity on local backends
+    let available_bytes: u64 = db.query_row(
+        "SELECT COALESCE(SUM(free_bytes), 0) FROM backends WHERE node_id = ?1 AND status = 'online'",
+        rusqlite::params![&state.node_id], |row| row.get(0),
+    ).unwrap_or(0);
+
+    // Each node needs to store at least max_size_bytes (before replication overhead)
+    if available_bytes < body.max_size_bytes {
+        return Err((StatusCode::BAD_REQUEST,
+            format!("Not enough local storage. Volume needs {} but only {} available.",
+                format_size(body.max_size_bytes), format_size(available_bytes))));
+    }
+
     db.execute(
-        "INSERT INTO volumes (id, name, ftt, chunk_size_bytes, local_raid, status)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'online')",
-        rusqlite::params![&id, &body.name, body.ftt, body.chunk_size_bytes, &body.local_raid],
+        "INSERT INTO volumes (id, name, ftt, chunk_size_bytes, local_raid, max_size_bytes, status)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'online')",
+        rusqlite::params![&id, &body.name, body.ftt, body.chunk_size_bytes, &body.local_raid, body.max_size_bytes],
     ).map_err(|e| (StatusCode::CONFLICT, format!("Failed to create volume: {}", e)))?;
 
+    // Create FUSE mount point for this volume
     let fuse_path = state.config.data.fuse_root.join(&body.name);
     if !fuse_path.exists() {
         std::fs::create_dir_all(&fuse_path).ok();
     }
+
+    // Auto-create a local data backend for this volume
+    let data_path = format!("/vmm/san-data/{}", &body.name);
+    std::fs::create_dir_all(&data_path).ok();
+    let (total_bytes, free_bytes) = crate::api::backends::get_fs_stats(&data_path);
+    let backend_id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    db.execute(
+        "INSERT INTO backends (id, node_id, path, total_bytes, free_bytes, status, last_check)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'online', ?6)",
+        rusqlite::params![&backend_id, &state.node_id, &data_path, total_bytes, free_bytes, &now],
+    ).ok();
+    tracing::info!("Auto-created backend '{}' for volume '{}'", data_path, body.name);
 
     tracing::info!("Created volume '{}' (id={}, ftt={}, local_raid={}, chunk={}MB)",
         body.name, id, body.ftt, body.local_raid, body.chunk_size_bytes / (1024 * 1024));
@@ -106,6 +142,7 @@ pub async fn create(
     let vol_json = serde_json::json!({
         "id": &id, "name": &body.name, "ftt": body.ftt,
         "chunk_size_bytes": body.chunk_size_bytes, "local_raid": &body.local_raid,
+        "max_size_bytes": body.max_size_bytes,
     });
     let peers: Vec<String> = state.peers.iter()
         .filter(|p| p.status == crate::state::PeerStatus::Online)
@@ -128,6 +165,7 @@ pub async fn create(
         ftt: body.ftt,
         local_raid: body.local_raid,
         chunk_size_bytes: body.chunk_size_bytes,
+        max_size_bytes: body.max_size_bytes,
         status: "online".into(),
         total_bytes: 0,
         free_bytes: 0,
@@ -157,7 +195,7 @@ pub async fn list(
     ).unwrap_or(0);
 
     let mut stmt = db.prepare(
-        "SELECT id, name, ftt, local_raid, chunk_size_bytes, status, created_at
+        "SELECT id, name, ftt, local_raid, chunk_size_bytes, status, created_at, max_size_bytes
          FROM volumes ORDER BY name"
     ).unwrap();
 
@@ -170,6 +208,7 @@ pub async fn list(
             chunk_size_bytes: row.get(4)?,
             status: row.get(5)?,
             created_at: row.get(6)?,
+            max_size_bytes: row.get(7)?,
             total_bytes,
             free_bytes,
             backend_count,
@@ -200,7 +239,7 @@ pub async fn get(
     ).unwrap_or(0);
 
     let vol = db.query_row(
-        "SELECT id, name, ftt, local_raid, chunk_size_bytes, status, created_at
+        "SELECT id, name, ftt, local_raid, chunk_size_bytes, status, created_at, max_size_bytes
          FROM volumes WHERE id = ?1",
         rusqlite::params![&id],
         |row| Ok(VolumeResponse {
@@ -211,6 +250,7 @@ pub async fn get(
             chunk_size_bytes: row.get(4)?,
             status: row.get(5)?,
             created_at: row.get(6)?,
+            max_size_bytes: row.get(7)?,
             total_bytes,
             free_bytes,
             backend_count,
@@ -328,6 +368,8 @@ pub struct SyncVolumeRequest {
     pub chunk_size_bytes: u64,
     #[serde(default = "default_local_raid")]
     pub local_raid: String,
+    #[serde(default)]
+    pub max_size_bytes: u64,
 }
 
 /// POST /api/volumes/sync — receive a volume definition from a peer.
@@ -351,14 +393,27 @@ pub async fn sync(
 
     // Create the volume locally
     db.execute(
-        "INSERT INTO volumes (id, name, ftt, chunk_size_bytes, local_raid, status)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'online')",
-        rusqlite::params![&body.id, &body.name, body.ftt, body.chunk_size_bytes, &body.local_raid],
+        "INSERT INTO volumes (id, name, ftt, chunk_size_bytes, local_raid, max_size_bytes, status)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'online')",
+        rusqlite::params![&body.id, &body.name, body.ftt, body.chunk_size_bytes, &body.local_raid, body.max_size_bytes],
     ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)))?;
 
     // Create FUSE mount directory
     let fuse_path = state.config.data.fuse_root.join(&body.name);
     std::fs::create_dir_all(&fuse_path).ok();
+
+    // Auto-create a local data backend for the synced volume
+    let data_path = format!("/vmm/san-data/{}", &body.name);
+    std::fs::create_dir_all(&data_path).ok();
+    let (total_bytes, free_bytes) = crate::api::backends::get_fs_stats(&data_path);
+    let backend_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    db.execute(
+        "INSERT INTO backends (id, node_id, path, total_bytes, free_bytes, status, last_check)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'online', ?6)",
+        rusqlite::params![&backend_id, &state.node_id, &data_path, total_bytes, free_bytes, &now],
+    ).ok();
+    tracing::info!("Auto-created backend '{}' for synced volume '{}'", data_path, body.name);
 
     drop(db);
 
@@ -397,4 +452,14 @@ pub async fn sync(
         body.name, body.id, body.ftt, body.local_raid);
 
     Ok(Json(serde_json::json!({ "synced": true, "already_exists": false })))
+}
+
+fn format_size(bytes: u64) -> String {
+    const GB: u64 = 1024 * 1024 * 1024;
+    const MB: u64 = 1024 * 1024;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else {
+        format!("{:.0} MB", bytes as f64 / MB as f64)
+    }
 }
