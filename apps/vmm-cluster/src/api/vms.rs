@@ -177,17 +177,15 @@ pub async fn start(
             Some(hid) => hid,
             None => {
                 // Auto-place unplaced VMs on start
-                let ram_mb = serde_json::from_str::<serde_json::Value>(&vm.config_json)
-                    .ok().and_then(|c| c.get("ram_mb").and_then(|v| v.as_u64()))
-                    .unwrap_or(2048) as u32;
-                let cpu_cores = serde_json::from_str::<serde_json::Value>(&vm.config_json)
-                    .ok().and_then(|c| c.get("cpu_cores").and_then(|v| v.as_u64()))
-                    .unwrap_or(2) as u32;
-                let hid = crate::engine::scheduler::Scheduler::select_host(&db, &vm.cluster_id, ram_mb, cpu_cores, None)
+                let vm_name = vm.name.clone();
+                let cluster_id = vm.cluster_id.clone();
+                let hid = crate::engine::scheduler::Scheduler::select_host(&db, &cluster_id, vm.ram_mb, vm.cpu_cores, None)
                     .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?
                     .ok_or_else(|| AppError(StatusCode::CONFLICT,
                         "No host has enough resources for this VM".into()))?;
                 // Provision on the selected host
+                let config = VmService::get_config(&db, &id)
+                    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
                 drop(db);
                 let node = state.nodes.get(&hid)
                     .ok_or_else(|| AppError(StatusCode::BAD_GATEWAY, "Selected host not connected".into()))?;
@@ -195,7 +193,7 @@ pub async fn start(
                     .danger_accept_invalid_certs(true).build()
                     .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
                 let provision_req = vmm_core::cluster::ProvisionVmRequest {
-                    vm_id: id.clone(), config: serde_json::from_str(&vm.config_json).unwrap_or_default(),
+                    vm_id: id.clone(), config,
                 };
                 let resp = client.post(format!("{}/agent/vms/provision", &node.address))
                     .header("X-Agent-Token", &node.agent_token)
@@ -209,7 +207,7 @@ pub async fn start(
                 VmService::assign_host(&db, &id, &hid)
                     .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
                 EventService::log(&db, "info", "vm",
-                    &format!("VM '{}' auto-placed on '{}' at start", vm.name, node.hostname),
+                    &format!("VM '{}' auto-placed on '{}' at start", vm_name, node.hostname),
                     Some("vm"), Some(&id), Some(&hid));
                 hid
             }
