@@ -437,6 +437,10 @@ export interface CoreSanStatus {
   uptime_secs: number
   volumes: CoreSanVolumeStatus[]
   peer_count: number
+  available_disks: number
+  claimed_disks: number
+  quorum_status: string
+  is_leader: boolean
   benchmark_summary: CoreSanBenchmarkSummary | null
 }
 

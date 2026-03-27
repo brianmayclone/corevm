@@ -63,9 +63,27 @@ async fn check_all_san_hosts(state: &ClusterState) {
                     let backend_count = volumes.map(|vols| {
                         vols.first().and_then(|v| v.get("backend_count").and_then(|b| b.as_u64())).unwrap_or(0)
                     }).unwrap_or(0);
+                    let quorum_status = status.get("quorum_status").and_then(|q| q.as_str()).unwrap_or("unknown").to_string();
+                    let is_leader = status.get("is_leader").and_then(|l| l.as_bool()).unwrap_or(false);
+
+                    // Resync/repair metrics across all volumes on this host
+                    let (total_stale, total_degraded, total_synced, total_chunks) = volumes.map(|vols| {
+                        vols.iter().fold((0u64, 0u64, 0u64, 0u64), |(s, d, sy, tc), v| {
+                            (
+                                s + v.get("stale_chunks").and_then(|x| x.as_u64()).unwrap_or(0),
+                                d + v.get("degraded_files").and_then(|x| x.as_u64()).unwrap_or(0),
+                                sy + v.get("synced_chunks").and_then(|x| x.as_u64()).unwrap_or(0),
+                                tc + v.get("total_chunks").and_then(|x| x.as_u64()).unwrap_or(0),
+                            )
+                        })
+                    }).unwrap_or((0, 0, 0, 0));
+
+                    let resyncing = total_stale > 0;
 
                     let health = if !degraded_volumes.is_empty() {
                         "degraded"
+                    } else if resyncing {
+                        "resyncing"
                     } else {
                         "healthy"
                     };
@@ -79,6 +97,13 @@ async fn check_all_san_hosts(state: &ClusterState) {
                         "peer_count": peer_count,
                         "backend_count": backend_count,
                         "degraded_volumes": degraded_volumes,
+                        "quorum_status": quorum_status,
+                        "is_leader": is_leader,
+                        "resyncing": resyncing,
+                        "stale_chunks": total_stale,
+                        "synced_chunks": total_synced,
+                        "total_chunks": total_chunks,
+                        "degraded_files": total_degraded,
                         "uptime_secs": status.get("uptime_secs").and_then(|u| u.as_u64()).unwrap_or(0),
                     })
                 }
@@ -133,6 +158,19 @@ async fn check_all_san_hosts(state: &ClusterState) {
                     &format!("CoreSAN on {} recovered", hostname),
                     Some("host"), Some(host_id), Some(host_id));
                 tracing::info!("SAN health: {} ({}) recovered", hostname, host_id);
+            } else if prev_health != "resyncing" && health == "resyncing" {
+                let stale = host.get("stale_chunks").and_then(|s| s.as_u64()).unwrap_or(0);
+                let db = state.db.lock().unwrap();
+                EventService::log(&db, "info", "san",
+                    &format!("CoreSAN on {} is resyncing ({} chunks pending)", hostname, stale),
+                    Some("host"), Some(host_id), Some(host_id));
+                tracing::info!("SAN health: {} is resyncing ({} stale chunks)", hostname, stale);
+            } else if prev_health == "resyncing" && health == "healthy" {
+                let db = state.db.lock().unwrap();
+                EventService::log(&db, "info", "san",
+                    &format!("CoreSAN on {} resync complete", hostname),
+                    Some("host"), Some(host_id), Some(host_id));
+                tracing::info!("SAN health: {} resync complete", hostname);
             } else if prev_health != "degraded" && health == "degraded" {
                 let degraded = host.get("degraded_volumes").and_then(|d| d.as_array())
                     .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))

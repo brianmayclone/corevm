@@ -186,9 +186,17 @@ export default function Storage() {
                 <Boxes size={16} className="text-vmm-accent" />
               </div>
               <div>
-                <h2 className="text-sm font-bold text-vmm-text">CoreSAN</h2>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-sm font-bold text-vmm-text">CoreSAN</h2>
+                  <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold border tracking-wider uppercase ${
+                    sanStatus.quorum_status === 'healthy' ? 'bg-vmm-success/20 text-vmm-success border-vmm-success/30' :
+                    sanStatus.quorum_status === 'degraded' ? 'bg-vmm-warning/20 text-vmm-warning border-vmm-warning/30' :
+                    sanStatus.quorum_status === 'fenced' ? 'bg-vmm-danger/20 text-vmm-danger border-vmm-danger/30' :
+                    'bg-vmm-surface text-vmm-text-muted border-vmm-border'
+                  }`}>{sanStatus.quorum_status || 'unknown'}</span>
+                </div>
                 <p className="text-[10px] text-vmm-text-muted">
-                  {sanStatus.volumes.length} volume{sanStatus.volumes.length !== 1 ? 's' : ''} &middot; {sanStatus.peer_count} peer{sanStatus.peer_count !== 1 ? 's' : ''} &middot; {sanStatus.hostname}
+                  {sanStatus.volumes.length} volume{sanStatus.volumes.length !== 1 ? 's' : ''} &middot; {sanStatus.peer_count + 1} node{sanStatus.peer_count !== 0 ? 's' : ''} &middot; {sanStatus.hostname}{sanStatus.is_leader ? ' (leader)' : ''}
                 </p>
               </div>
             </div>

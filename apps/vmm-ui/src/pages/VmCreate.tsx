@@ -86,7 +86,7 @@ export default function VmCreate() {
   const [isoBrowserOpen, setIsoBrowserOpen] = useState(false)
   const [diskBrowserOpen, setDiskBrowserOpen] = useState(false)
   const [createDiskOpen, setCreateDiskOpen] = useState(false)
-  const [sanIsoBrowserOpen, setSanIsoBrowserOpen] = useState(false)
+  // sanIsoBrowserOpen removed — PoolBrowser now includes SAN volumes
   const [sanDiskBrowserOpen, setSanDiskBrowserOpen] = useState(false)
 
   // Cluster-mode: cluster and host selection
@@ -276,9 +276,7 @@ export default function VmCreate() {
                   <TextInput value={form.iso_image} onChange={(e) => set('iso_image', e.target.value)}
                     placeholder="/path/to/image.iso" className="flex-1" />
                   <Button variant="outline" size="md" icon={<Search size={14} />}
-                    onClick={() => setIsoBrowserOpen(true)}>Local</Button>
-                  <Button variant="outline" size="md" icon={<Boxes size={14} />}
-                    onClick={() => setSanIsoBrowserOpen(true)}>SAN</Button>
+                    onClick={() => setIsoBrowserOpen(true)}>Browse</Button>
                 </div>
               </FormField>
             </div>
@@ -467,11 +465,7 @@ export default function VmCreate() {
         clusterId={isCluster ? selectedClusterId : undefined}
         onCreated={(path) => set('disk_images', [...form.disk_images, path])} />
 
-      {/* CoreSAN File Pickers */}
-      <CoreSanFilePicker open={sanIsoBrowserOpen} onClose={() => setSanIsoBrowserOpen(false)}
-        title="Select ISO from CoreSAN" filterExt=".iso"
-        onSelect={(path) => set('iso_image', path)} />
-
+      {/* CoreSAN Disk Picker */}
       <CoreSanFilePicker open={sanDiskBrowserOpen} onClose={() => setSanDiskBrowserOpen(false)}
         title="Select Disk from CoreSAN" filterExt=".raw"
         onSelect={(path) => set('disk_images', [...form.disk_images, path])} />

@@ -31,6 +31,7 @@ export default function StorageCoresan() {
   const [disks, setDisks] = useState<DiscoveredDisk[]>([])
   const [loading, setLoading] = useState(true)
   const [sanAvailable, setSanAvailable] = useState(true)
+  const [sanHealth, setSanHealth] = useState<any>(null)
 
   // Disk claim dialog
   const [claimDisk, setClaimDisk] = useState<DiscoveredDisk | null>(null)
@@ -38,6 +39,7 @@ export default function StorageCoresan() {
   const [claimError, setClaimError] = useState('')
   const [resetDisk, setResetDisk] = useState<DiscoveredDisk | null>(null)
   const [browseVolume, setBrowseVolume] = useState<CoreSanVolume | null>(null)
+  const [backendsExpanded, setBackendsExpanded] = useState(false)
 
   // Auto-claim dialog
   const [autoClaimOpen, setAutoClaimOpen] = useState(false)
@@ -104,6 +106,9 @@ export default function StorageCoresan() {
       setPeers(await pRes.json())
       if (vols.length > 0 && !selectedVolume) setSelectedVolume(vols[0].id)
       sanFetch(sanApi('/api/disks')).then(r => r.json()).then(setDisks).catch(() => setDisks([]))
+      if (isCluster) {
+        sanFetch(sanApi('/api/health')).then(r => r.ok ? r.json() : null).then(setSanHealth).catch(() => {})
+      }
       setLoading(false)
     } catch {
       setSanAvailable(false)
@@ -350,23 +355,81 @@ export default function StorageCoresan() {
         </div>
       </div>
 
+      {/* Cluster Health Banner */}
+      {(() => {
+        const q = status?.quorum_status || 'unknown'
+        const degradedVolumes = volumes.filter(v => v.status === 'degraded').length
+        const offlineVolumes = volumes.filter(v => v.status === 'offline').length
+        const totalStaleChunks = (status?.volumes || []).reduce((sum, v) => sum + (v.stale_chunks || 0), 0)
+        const totalDegradedFiles = (status?.volumes || []).reduce((sum, v) => sum + (v.degraded_files || 0), 0)
+        const isResyncing = totalStaleChunks > 0
+        const hasProblem = q === 'fenced' || q === 'degraded' || degradedVolumes > 0 || offlineVolumes > 0 || onlineNodes < totalNodes || isResyncing || totalDegradedFiles > 0
+        const isCritical = q === 'fenced' || offlineVolumes > 0
+
+        if (hasProblem) {
+          return (
+            <div className={`flex items-center gap-3 px-4 py-3 rounded-lg border ${
+              isCritical
+                ? 'bg-vmm-danger/10 border-vmm-danger/30 text-vmm-danger'
+                : isResyncing && !degradedVolumes && onlineNodes >= totalNodes
+                  ? 'bg-vmm-accent/10 border-vmm-accent/30 text-vmm-accent'
+                  : 'bg-vmm-warning/10 border-vmm-warning/30 text-vmm-warning'
+            }`}>
+              {isResyncing && !isCritical && !degradedVolumes
+                ? <RefreshCw size={18} className="shrink-0 animate-spin" />
+                : <AlertTriangle size={18} className="shrink-0" />}
+              <div className="flex-1 text-sm">
+                {q === 'fenced' && <strong>FENCED — </strong>}
+                {q === 'degraded' && <strong>DEGRADED — </strong>}
+                {isResyncing && !isCritical && <strong>RESYNCING — </strong>}
+                {onlineNodes < totalNodes && `${totalNodes - onlineNodes} of ${totalNodes} node${totalNodes > 1 ? 's' : ''} offline. `}
+                {degradedVolumes > 0 && `${degradedVolumes} volume${degradedVolumes > 1 ? 's' : ''} degraded. `}
+                {offlineVolumes > 0 && `${offlineVolumes} volume${offlineVolumes > 1 ? 's' : ''} offline. `}
+                {totalDegradedFiles > 0 && `${totalDegradedFiles} file${totalDegradedFiles > 1 ? 's' : ''} with reduced protection. `}
+                {isResyncing && `${totalStaleChunks} chunk${totalStaleChunks > 1 ? 's' : ''} syncing. `}
+                {q === 'fenced' && 'Writes are blocked — restore quorum to resume operations.'}
+                {q === 'degraded' && onlineNodes >= totalNodes && 'Cluster is operating with reduced redundancy.'}
+                {isResyncing && !isCritical && !degradedVolumes && 'Data is being redistributed across nodes.'}
+              </div>
+            </div>
+          )
+        }
+        return null
+      })()}
+
       {/* Status Overview */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+        <Card>
+          <div className="text-xs text-vmm-text-muted mb-1">Cluster Status</div>
+          <div className={`text-lg font-bold capitalize ${
+            status?.quorum_status === 'healthy' ? 'text-vmm-success' :
+            status?.quorum_status === 'degraded' ? 'text-vmm-warning' :
+            status?.quorum_status === 'fenced' ? 'text-vmm-danger' :
+            'text-vmm-text'
+          }`}>{status?.quorum_status || '—'}</div>
+          <div className="text-xs text-vmm-text-muted mt-1">
+            {status?.is_leader ? 'Leader' : 'Follower'}
+          </div>
+        </Card>
         <Card>
           <div className="text-xs text-vmm-text-muted mb-1">Total Capacity</div>
-          <div className="text-xl font-bold text-vmm-text">{formatBytes(totalBytes)}</div>
+          <div className="text-lg font-bold text-vmm-text">{formatBytes(totalBytes)}</div>
           <ProgressBar value={usedPct} detail={`${formatBytes(usedBytes)} used`}
             color={usedPct > 80 ? 'bg-vmm-danger' : usedPct > 60 ? 'bg-vmm-warning' : 'bg-vmm-accent'} />
         </Card>
         <Card>
           <div className="text-xs text-vmm-text-muted mb-1">Volumes</div>
-          <div className="text-xl font-bold text-vmm-text">{volumes.length}</div>
+          <div className="text-lg font-bold text-vmm-text">{volumes.length}</div>
           <div className="text-xs text-vmm-text-muted mt-1">{volumes.filter(v => v.status === 'online').length} online</div>
         </Card>
         <Card>
           <div className="text-xs text-vmm-text-muted mb-1">Nodes</div>
-          <div className="text-xl font-bold text-vmm-text">{totalNodes}</div>
-          <div className="text-xs text-vmm-text-muted mt-1">{onlineNodes} online</div>
+          <div className={`text-lg font-bold ${onlineNodes < totalNodes ? 'text-vmm-warning' : 'text-vmm-text'}`}>
+            {onlineNodes}/{totalNodes}
+          </div>
+          <div className="text-xs text-vmm-text-muted mt-1">
+            {status?.claimed_disks || 0} disks claimed
+          </div>
         </Card>
         <Card>
           <div className="text-xs text-vmm-text-muted mb-1">This Node</div>
@@ -481,32 +544,54 @@ export default function StorageCoresan() {
               <div className="flex items-center gap-2">
                 <span className="text-sm font-medium text-vmm-text">{status?.hostname}</span>
                 <Badge label="online" color={statusColors.online} />
+                {status?.is_leader && <Badge label="leader" color="bg-vmm-accent/20 text-vmm-accent border-vmm-accent/30" />}
                 <span className="text-[10px] text-vmm-text-muted">(this node)</span>
               </div>
               <div className="text-xs text-vmm-text-muted font-mono">{status?.node_id?.slice(0, 12)}...</div>
             </div>
-            <span className="text-xs text-vmm-text-muted">
-              {backendsByNode[status?.node_id || '']?.length || 0} backend{(backendsByNode[status?.node_id || '']?.length || 0) !== 1 ? 's' : ''}
-            </span>
+            <div className="text-right">
+              <div className="text-xs text-vmm-text-muted">
+                {backendsByNode[status?.node_id || '']?.length || 0} backends
+              </div>
+              {(status?.volumes || []).some(v => v.stale_chunks > 0) && (
+                <div className="flex items-center gap-1 text-[10px] text-vmm-accent mt-0.5">
+                  <RefreshCw size={10} className="animate-spin" /> resyncing
+                </div>
+              )}
+            </div>
           </div>
-          {peers.map(p => (
+          {peers.map(p => {
+            const hostHealth = sanHealth?.hosts?.find((h: any) => h.hostname === p.hostname)
+            const peerResyncing = hostHealth?.resyncing
+            const peerIsLeader = hostHealth?.is_leader
+            return (
             <div key={p.node_id} className="flex items-center gap-3 p-3 rounded-lg bg-vmm-bg/50 border border-vmm-border">
               <Server size={16} className={p.status === 'online' ? 'text-vmm-success' : 'text-vmm-danger'} />
               <div className="flex-1">
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-medium text-vmm-text">{p.hostname}</span>
                   <Badge label={p.status} color={statusColors[p.status] || statusColors.offline} />
+                  {peerIsLeader && <Badge label="leader" color="bg-vmm-accent/20 text-vmm-accent border-vmm-accent/30" />}
+                  {hostHealth?.health === 'degraded' && <Badge label="degraded" color={statusColors.degraded} />}
                 </div>
                 <div className="text-xs text-vmm-text-muted">{p.address}</div>
               </div>
-              <span className="text-xs text-vmm-text-muted">
-                {backendsByNode[p.node_id]?.length || 0} backend{(backendsByNode[p.node_id]?.length || 0) !== 1 ? 's' : ''}
-              </span>
-              {p.last_heartbeat && (
-                <span className="text-xs text-vmm-text-muted">{new Date(p.last_heartbeat).toLocaleTimeString()}</span>
-              )}
+              <div className="text-right">
+                <div className="text-xs text-vmm-text-muted">
+                  {backendsByNode[p.node_id]?.length || 0} backends
+                </div>
+                {peerResyncing && (
+                  <div className="flex items-center gap-1 text-[10px] text-vmm-accent mt-0.5">
+                    <RefreshCw size={10} className="animate-spin" /> {hostHealth?.stale_chunks || 0} chunks
+                  </div>
+                )}
+                {p.last_heartbeat && (
+                  <div className="text-[10px] text-vmm-text-muted mt-0.5">{new Date(p.last_heartbeat).toLocaleTimeString()}</div>
+                )}
+              </div>
             </div>
-          ))}
+            )
+          })}
           {peers.length === 0 && (
             <p className="text-xs text-vmm-text-muted py-2 px-3">
               Single-node mode — {isCluster ? 'add cluster hosts above for redundancy.' : 'add peers for redundancy.'}
@@ -614,60 +699,70 @@ export default function StorageCoresan() {
                 </div>
               </Card>
 
-              {/* Backends grouped by node */}
+              {/* Backends grouped by node — collapsible */}
               <Card>
-                <div className="flex items-center justify-between mb-3">
-                  <SectionLabel>Storage Backends</SectionLabel>
-                  {isCluster && availableHosts.length > 0 && (
-                    <Button variant="primary" onClick={() => { setAddHostOpen(true); setAddHostId(availableHosts[0]?.id || '') }}>
-                      <Plus size={13} /> Add Host
-                    </Button>
-                  )}
-                </div>
-                {backends.length === 0 ? (
-                  <div className="text-center py-6">
-                    <p className="text-sm text-vmm-text-dim">No backends configured.</p>
-                    <p className="text-xs text-vmm-text-muted mt-1">
-                      {isCluster ? 'Add cluster hosts to contribute storage to this volume.' : 'Add a local mountpoint to provide storage.'}
-                    </p>
+                <button
+                  onClick={() => setBackendsExpanded(prev => !prev)}
+                  className="flex items-center justify-between w-full cursor-pointer">
+                  <div className="flex items-center gap-2">
+                    <SectionLabel>Storage Backends</SectionLabel>
+                    <span className="text-xs text-vmm-text-muted">({backends.length})</span>
                   </div>
-                ) : (
-                  <div className="space-y-3">
-                    {Object.entries(backendsByNode).map(([nodeId, nodeBackends]) => {
-                      const isLocal = nodeId === status?.node_id
-                      const peer = peers.find(p => p.node_id === nodeId)
-                      const nodeName = isLocal ? status?.hostname : peer?.hostname || nodeId.slice(0, 8)
-                      return (
-                        <div key={nodeId}>
-                          <div className="flex items-center gap-2 mb-1.5">
-                            <Server size={12} className={isLocal || peer?.status === 'online' ? 'text-vmm-success' : 'text-vmm-danger'} />
-                            <span className="text-xs font-semibold text-vmm-text-muted uppercase tracking-wider">{nodeName}</span>
-                            {isLocal && <span className="text-[9px] text-vmm-text-muted">(local)</span>}
-                          </div>
-                          {nodeBackends.map(b => {
-                            const bUsed = b.total_bytes - b.free_bytes
-                            const bPct = b.total_bytes > 0 ? (bUsed / b.total_bytes) * 100 : 0
-                            return (
-                              <div key={b.id} className="flex items-center gap-3 p-3 ml-4 rounded-lg bg-vmm-bg/50 border border-vmm-border mb-1.5">
-                                <HardDrive size={14} className="text-vmm-text-muted shrink-0" />
-                                <div className="flex-1 min-w-0">
-                                  <div className="flex items-center gap-2 mb-1">
-                                    <span className="text-xs font-medium text-vmm-text truncate">{b.path}</span>
-                                    <Badge label={b.status} color={statusColors[b.status] || statusColors.offline} />
-                                  </div>
-                                  <ProgressBar value={bPct} detail={`${formatBytes(bUsed)} / ${formatBytes(b.total_bytes)}`}
-                                    color={bPct > 80 ? 'bg-vmm-danger' : 'bg-vmm-accent'} />
-                                </div>
-                                <button onClick={() => setDeleteBackend(b)}
-                                  className="p-1.5 rounded hover:bg-vmm-danger/10 text-vmm-text-muted hover:text-vmm-danger transition-colors cursor-pointer">
-                                  <Trash2 size={14} />
-                                </button>
+                  <span className={`text-vmm-text-muted transition-transform ${backendsExpanded ? 'rotate-180' : ''}`}>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                  </span>
+                </button>
+                {backendsExpanded && (
+                  <div className="mt-3">
+                    {backends.length === 0 ? (
+                      <div className="text-center py-4">
+                        <p className="text-sm text-vmm-text-dim">No backends configured.</p>
+                        <p className="text-xs text-vmm-text-muted mt-1">
+                          {isCluster ? 'Add cluster hosts to contribute storage to this volume.' : 'Add a local mountpoint to provide storage.'}
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        {Object.entries(backendsByNode).map(([nodeId, nodeBackends]) => {
+                          const isLocal = nodeId === status?.node_id
+                          const peer = peers.find(p => p.node_id === nodeId)
+                          const nodeName = isLocal ? status?.hostname : peer?.hostname || nodeId.slice(0, 8)
+                          return (
+                            <div key={nodeId}>
+                              <div className="flex items-center gap-2 mb-1.5">
+                                <Server size={12} className={isLocal || peer?.status === 'online' ? 'text-vmm-success' : 'text-vmm-danger'} />
+                                <span className="text-xs font-semibold text-vmm-text-muted uppercase tracking-wider">{nodeName}</span>
+                                {isLocal && <span className="text-[9px] text-vmm-text-muted">(local)</span>}
                               </div>
-                            )
-                          })}
-                        </div>
-                      )
-                    })}
+                              {nodeBackends.map(b => {
+                                const bUsed = b.total_bytes - b.free_bytes
+                                const bPct = b.total_bytes > 0 ? (bUsed / b.total_bytes) * 100 : 0
+                                return (
+                                  <div key={b.id} className="flex items-center gap-3 p-3 ml-4 rounded-lg bg-vmm-bg/50 border border-vmm-border mb-1.5">
+                                    <HardDrive size={14} className="text-vmm-text-muted shrink-0" />
+                                    <div className="flex-1 min-w-0">
+                                      <div className="flex items-center gap-2 mb-1">
+                                        <span className="text-xs font-medium text-vmm-text truncate">{b.path}</span>
+                                        <Badge label={b.status} color={statusColors[b.status] || statusColors.offline} />
+                                      </div>
+                                      <ProgressBar value={bPct} detail={`${formatBytes(bUsed)} / ${formatBytes(b.total_bytes)}`}
+                                        color={bPct > 80 ? 'bg-vmm-danger' : 'bg-vmm-accent'} />
+                                    </div>
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
+                    {isCluster && availableHosts.length > 0 && (
+                      <div className="mt-3 pt-3 border-t border-vmm-border">
+                        <Button variant="outline" size="sm" onClick={() => { setAddHostOpen(true); setAddHostId(availableHosts[0]?.id || '') }}>
+                          <Plus size={13} /> Add Host
+                        </Button>
+                      </div>
+                    )}
                   </div>
                 )}
               </Card>
