@@ -19,7 +19,7 @@ exclude = [
 resolver = "2"
 
 [workspace.package]
-version = "0.2.14"
+version = "0.2.16"
 
 [profile.release]
 debug = 2                # Full DWARF debug info

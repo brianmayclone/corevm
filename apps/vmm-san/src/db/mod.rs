@@ -76,6 +76,9 @@ CREATE TABLE IF NOT EXISTS file_map (
     -- Chunk tracking
     chunk_count     INTEGER NOT NULL DEFAULT 0,
     protection_status TEXT NOT NULL DEFAULT 'unprotected', -- protected, degraded, unprotected
+    -- Split-brain conflict resolution
+    ownership_epoch INTEGER NOT NULL DEFAULT 0,
+    ownership_tick  INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(volume_id, rel_path)
@@ -138,6 +141,8 @@ CREATE TABLE IF NOT EXISTS write_log (
     writer_node_id  TEXT NOT NULL,
     size_bytes      INTEGER NOT NULL DEFAULT 0,
     sha256          TEXT NOT NULL DEFAULT '',
+    ownership_epoch INTEGER NOT NULL DEFAULT 0,
+    ownership_tick  INTEGER NOT NULL DEFAULT 0,
     written_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -217,11 +222,12 @@ pub fn init(db: &Connection) -> Result<(), String> {
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
         .map_err(|e| format!("Failed to set PRAGMA: {}", e))?;
 
-    // Migrate existing databases BEFORE creating schema (so new columns exist for indexes)
-    migrate(db);
-
+    // Create schema first (CREATE TABLE IF NOT EXISTS), then migrate existing DBs
     db.execute_batch(SCHEMA)
         .map_err(|e| format!("Failed to create schema: {}", e))?;
+
+    // Migrate existing databases (adds columns that may not exist in older schemas)
+    migrate(db);
 
     Ok(())
 }
