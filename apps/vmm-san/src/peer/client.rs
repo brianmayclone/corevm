@@ -14,8 +14,8 @@ pub struct PeerClient {
 impl PeerClient {
     pub fn new(secret: &str) -> Self {
         let http = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(3600))
+            .connect_timeout(Duration::from_secs(10))
             .build()
             .expect("Failed to build HTTP client");
         Self { http, secret: secret.to_string() }

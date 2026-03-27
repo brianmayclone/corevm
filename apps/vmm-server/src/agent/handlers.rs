@@ -166,8 +166,8 @@ pub async fn provision_vm(
         .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     db.execute(
-        "INSERT OR REPLACE INTO vms (id, name, config_json) VALUES (?1, ?2, ?3)",
-        rusqlite::params![&req.vm_id, &config.name, &config_json],
+        "INSERT OR REPLACE INTO vms (id, name, config_json, owner_id) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![&req.vm_id, &config.name, &config_json, 1],
     ).map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Add to in-memory state
@@ -522,8 +522,8 @@ pub async fn migration_receive(
     // Provision VM locally
     let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
     db.execute(
-        "INSERT OR REPLACE INTO vms (id, name, config_json) VALUES (?1, ?2, ?3)",
-        rusqlite::params![&req.vm_id, &config.name, &config_json],
+        "INSERT OR REPLACE INTO vms (id, name, config_json, owner_id) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![&req.vm_id, &config.name, &config_json, 1],
     ).map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     drop(db);
 

@@ -51,32 +51,20 @@ async fn run_push_replicator(
             continue;
         }
 
-        // Find all peers that have backends for this volume
-        let targets = {
-            let db = state.db.lock().unwrap();
-            let mut stmt = db.prepare(
-                "SELECT DISTINCT b.node_id FROM backends b
-                 WHERE b.node_id != ?1 AND b.status = 'online'"
-            ).unwrap();
-            let nodes: Vec<String> = stmt.query_map(
-                rusqlite::params![&event.writer_node_id],
-                |row| row.get(0),
-            ).unwrap().filter_map(|r| r.ok()).collect();
-            nodes
-        };
+        // Find all online peers to replicate to
+        let targets: Vec<(String, String)> = state.peers.iter()
+            .filter(|p| p.status == crate::state::PeerStatus::Online)
+            .filter(|p| p.node_id != event.writer_node_id)
+            .map(|p| (p.node_id.clone(), p.address.clone()))
+            .collect();
 
         if targets.is_empty() {
             continue;
         }
 
-        // Push to all target nodes concurrently
+        // Push to all target peers concurrently
         let mut handles = Vec::new();
-        for target_node_id in targets {
-            let peer_addr = match state.peers.get(&target_node_id) {
-                Some(p) => p.address.clone(),
-                None => continue,
-            };
-
+        for (target_node_id, peer_addr) in targets {
             let client = PeerClient::new(&state.config.peer.secret);
             let event = event.clone();
 
