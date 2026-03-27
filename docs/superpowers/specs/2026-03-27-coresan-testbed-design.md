@@ -141,8 +141,12 @@ The existing `compute_quorum()` and `compute_is_leader()` call these pure functi
      enabled = false
      ```
 3. Pre-initialize each node's SQLite database:
-   - Run vmm-san's `db::init()` schema (import as library, or replicate the schema SQL)
-   - Insert `node_settings` with a deterministic `node_id` (e.g., `node-1`, `node-2`, ...)
+   - Run vmm-san's `db::init()` schema (replicate the SCHEMA SQL constant from `db/mod.rs`)
+   - Create `node_settings` table and insert `node_id`:
+     ```sql
+     CREATE TABLE IF NOT EXISTS node_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+     INSERT INTO node_settings (key, value) VALUES ('node_id', 'node-1');
+     ```
    - Insert `peers` rows for all other nodes (address = `http://127.0.0.1:<port>`)
    - Insert `claimed_disks` rows pointing to the temp directories
    - Insert `backends` rows (status = "online") linked to the claimed disks
@@ -165,9 +169,14 @@ VALUES ('disk-0', '/fake/dev/sda', '/tmp/.../node-1/disk-0', 'ext4', 10737418240
 INSERT INTO backends (id, node_id, path, total_bytes, free_bytes, status, claimed_disk_id)
 VALUES ('backend-node1-0', 'node-1', '/tmp/.../node-1/disk-0', 107374182400, 107374182400, 'online', 'disk-0');
 
--- Default test volume
+-- Default test volume (backends are node-pool, not per-volume —
+-- the volume-to-backend association happens through file_map → file_replicas → backends)
 INSERT INTO volumes (id, name, ftt, status)
 VALUES ('testbed-vol', 'testbed-vol', 1, 'online');
+
+-- node_settings table (normally created in main.rs, not db::init)
+CREATE TABLE IF NOT EXISTS node_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+INSERT INTO node_settings (key, value) VALUES ('node_id', 'node-1');
 ```
 
 This is done per-node before the vmm-san process starts.
@@ -209,20 +218,9 @@ Uses `rustyline` for readline with history. Commands:
 
 **Network partition simulation:**
 
-When `partition 1,2 vs 3` is executed:
-1. On Node 3's DB: `UPDATE peers SET address = 'http://127.0.0.1:1' WHERE node_id IN ('node-1', 'node-2')`
-2. On Node 1's DB: `UPDATE peers SET address = 'http://127.0.0.1:1' WHERE node_id = 'node-3'`
-3. On Node 2's DB: `UPDATE peers SET address = 'http://127.0.0.1:1' WHERE node_id = 'node-3'`
+When `partition 1,2 vs 3` is executed, the testbed calls `POST /api/peers/join` on each affected node with an invalid address (`http://127.0.0.1:1`) for the partitioned peers. This updates both the in-memory DashMap and the DB. Heartbeats to `127.0.0.1:1` fail (connection refused), causing the peer monitor to mark those peers offline after 3 missed heartbeats (15s), then fencing after 2 hysteresis cycles (10s more).
 
-Heartbeats to `127.0.0.1:1` will fail (connection refused), causing the peer monitor to mark those peers offline after 3 missed heartbeats (15s).
-
-When `heal` is executed: all peer addresses are restored to their correct `http://127.0.0.1:<port>` values.
-
-**Limitation:** This approach requires that vmm-san re-reads peer addresses from DB on each heartbeat cycle. Currently `heartbeat_all_peers` reads from the in-memory `DashMap`, not the DB. Two options:
-- **Option A (recommended):** The testbed also updates the in-memory DashMap by calling `POST /api/peers/join` with the invalid/valid address. This triggers the peer to update its in-memory map.
-- **Option B:** Add a `POST /api/peers/update-address` internal endpoint. More code but cleaner.
-
-We use **Option A** — the testbed calls each node's `/api/peers/join` to update the peer address in both DB and memory.
+When `heal` is executed: the testbed calls `POST /api/peers/join` on each node with the correct `http://127.0.0.1:<port>` addresses, restoring connectivity.
 
 #### 2.5 Automated Scenarios
 
@@ -238,8 +236,8 @@ async fn scenario_quorum_degraded(ctx: &TestContext) -> ScenarioResult {
     // Action: kill node 3
     ctx.kill_node(3).await?;
 
-    // Wait for quorum to update (2 heartbeat cycles + hysteresis)
-    ctx.wait_secs(15).await;
+    // Wait for quorum to update (3 missed heartbeats + 2 hysteresis cycles = ~25s)
+    ctx.wait_secs(25).await;
 
     // Assert
     let s1 = ctx.get_status(1).await?;
@@ -259,16 +257,18 @@ async fn scenario_quorum_degraded(ctx: &TestContext) -> ScenarioResult {
 
 | # | Name | Nodes | Steps | Assertions |
 |---|------|-------|-------|------------|
-| 1 | `quorum-degraded` | 3 | Kill node 3, wait 15s | Nodes 1+2 = Degraded |
-| 2 | `quorum-fenced` | 3 | Kill nodes 2+3, wait 15s | Node 1 = Fenced |
-| 3 | `quorum-recovery` | 3 | Fence node 1 (kill 2+3), start node 2, wait 15s | Node 1+2 = Degraded |
+| 1 | `quorum-degraded` | 3 | Kill node 3, wait 25s | Nodes 1+2 = Degraded |
+| 2 | `quorum-fenced` | 3 | Kill nodes 2+3, wait 25s | Node 1 = Fenced |
+| 3 | `quorum-recovery` | 3 | Fence node 1 (kill 2+3), start node 2, wait 25s | Node 1+2 = Degraded |
 | 4 | `fenced-write-denied` | 3 | Fence node 1, try write | HTTP 503 |
 | 5 | `fenced-read-allowed` | 3 | Write file, fence node, try read | HTTP 200 + correct data |
-| 6 | `leader-failover` | 3 | Identify leader, kill it, wait 15s | New leader elected |
-| 7 | `partition-majority` | 3 | Partition {1,2} vs {3}, wait 15s | Nodes 1+2 Degraded, Node 3 Fenced |
-| 8 | `partition-witness-2node` | 2 | Partition {1} vs {2}, witness smart mode, wait 15s | Lowest node_id = Degraded, other = Fenced |
+| 6 | `leader-failover` | 3 | Identify leader, kill it, wait 25s | New leader elected |
+| 7 | `partition-majority` | 3 | Partition {1,2} vs {3}, wait 25s | Nodes 1+2 Degraded, Node 3 Fenced |
+| 8 | `partition-witness-2node` | 2 | Partition {1} vs {2}, witness smart mode, wait 25s | Lowest node_id = Degraded, other = Fenced |
 | 9 | `replication-basic` | 3 | Write on node 1, wait 10s, read on node 2 | Same content |
-| 10 | `repair-leader-only` | 3 | Check logs of non-leader for "skipping repair" | Log message found |
+| 10 | `repair-leader-only` | 3 | Check log file of non-leader for "skipping repair" | Log message found |
+
+**Log capture:** Each node's child process has its stdout/stderr piped to a log file at `<temp_dir>/node-N/output.log`. Scenarios that check log content (like #10) read these files after the wait period. The testbed passes `RUST_LOG=vmm_san=trace` to child processes to ensure trace-level messages are captured.
 
 Each scenario:
 1. Starts fresh (new temp dir, new processes)
