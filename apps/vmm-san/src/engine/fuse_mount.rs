@@ -120,7 +120,7 @@ impl CoreSanFS {
     /// Find the local filesystem path for a file, or fetch from peer.
     /// Returns the path to the local file (possibly a cache copy fetched from a peer).
     fn resolve_file(&self, rel_path: &str) -> Option<PathBuf> {
-        // Try local replica first
+        // Try local replica via DB first
         let local = {
             let db = self.state.db.lock().unwrap();
             db.query_row(
@@ -142,7 +142,24 @@ impl CoreSanFS {
             }
         }
 
-        // No local replica — fetch from peer
+        // Scan all local backends directly (file may exist but not be in file_replicas)
+        let backend_paths: Vec<String> = {
+            let db = self.state.db.lock().unwrap();
+            db.prepare("SELECT path FROM backends WHERE node_id = ?1 AND status = 'online'")
+                .ok().map(|mut stmt| {
+                    stmt.query_map(rusqlite::params![&self.state.node_id], |row| row.get(0))
+                        .ok().map(|rows| rows.filter_map(|r| r.ok()).collect())
+                        .unwrap_or_default()
+                }).unwrap_or_default()
+        };
+        for bp in &backend_paths {
+            let full = Path::new(bp).join(rel_path);
+            if full.exists() && full.is_file() {
+                return Some(full);
+            }
+        }
+
+        // No local copy at all — fetch from peer
         self.fetch_from_peer(rel_path)
     }
 
@@ -859,9 +876,35 @@ impl Filesystem for CoreSanFS {
                     }
                 } else if !suffix.is_empty() {
                     // This is a direct file
-                    result.push((suffix.to_string(), false));
+                    if seen.insert(suffix.to_string()) {
+                        result.push((suffix.to_string(), false));
+                    }
                 }
             }
+
+            // Also scan backend directories on disk (files/dirs not yet in file_map)
+            let backend_paths: Vec<String> = db.prepare(
+                "SELECT path FROM backends WHERE node_id = ?1 AND status = 'online'"
+            ).ok().map(|mut stmt| {
+                stmt.query_map(rusqlite::params![&self.state.node_id], |row| row.get(0))
+                    .ok().map(|rows| rows.filter_map(|r| r.ok()).collect())
+                    .unwrap_or_default()
+            }).unwrap_or_default();
+
+            for bp in &backend_paths {
+                let scan_dir = Path::new(bp).join(&entry.rel_path);
+                if let Ok(read) = std::fs::read_dir(&scan_dir) {
+                    for fs_entry in read.flatten() {
+                        let name = fs_entry.file_name().to_string_lossy().to_string();
+                        if name.starts_with('.') { continue; } // skip hidden / .coresan
+                        if seen.insert(name.clone()) {
+                            let is_dir = fs_entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                            result.push((name, is_dir));
+                        }
+                    }
+                }
+            }
+
             result
         };
 
