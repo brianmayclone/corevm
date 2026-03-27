@@ -122,8 +122,11 @@ impl TestContext {
         let url = format!("{}/api/status", node.address());
         let resp = self.http.get(&url).send().await
             .map_err(|e| format!("status request to node {}: {}", index, e))?;
-        resp.json::<NodeStatus>().await
-            .map_err(|e| format!("status parse for node {}: {}", index, e))
+        let status: NodeStatus = resp.json().await
+            .map_err(|e| format!("status parse for node {}: {}", index, e))?;
+        tracing::debug!("Node {} status: quorum={}, leader={}, peers={}",
+            index, status.quorum_status, status.is_leader, status.peer_count);
+        Ok(status)
     }
 
     pub async fn kill_node(&mut self, index: usize) {
@@ -138,6 +141,7 @@ impl TestContext {
     }
 
     pub async fn partition(&mut self, group_a: &[usize], group_b: &[usize]) -> Result<(), String> {
+        tracing::debug!("Applying partition: {:?} vs {:?}", group_a, group_b);
         let node_info: Vec<(usize, u16, String)> = self.nodes.iter()
             .map(|n| (n.index, n.port, n.node_id.clone()))
             .collect();
@@ -179,10 +183,12 @@ impl TestContext {
     }
 
     pub fn set_witness_mode(&self, mode: WitnessMode) {
+        tracing::debug!("Setting witness mode: {:?}", mode);
         witness::set_mode(&self.witness, mode);
     }
 
     pub async fn wait_secs(&self, secs: u64) {
+        tracing::debug!("Waiting {}s...", secs);
         tokio::time::sleep(tokio::time::Duration::from_secs(secs)).await;
     }
 

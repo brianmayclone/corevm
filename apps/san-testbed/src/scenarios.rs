@@ -14,11 +14,17 @@ pub struct ScenarioResult {
 /// Run a single scenario with fresh context, timing, and error capture.
 macro_rules! run_scenario {
     ($name:expr, $num_nodes:expr, $body:expr) => {{
+        tracing::info!("━━━ Scenario: {} ({} nodes) ━━━", $name, $num_nodes);
         let start = std::time::Instant::now();
         let result: Result<(), String> = async {
             let mut ctx = TestContext::new($num_nodes).await?;
             ctx.wait_all_healthy().await?;
+            tracing::debug!("All nodes healthy, running scenario logic...");
             let r = $body(&mut ctx).await;
+            match &r {
+                Ok(_) => tracing::debug!("Scenario logic completed successfully"),
+                Err(e) => tracing::warn!("Scenario logic failed: {}", e),
+            }
             ctx.shutdown();
             r
         }.await;
