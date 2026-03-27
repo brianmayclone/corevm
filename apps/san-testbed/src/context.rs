@@ -195,6 +195,9 @@ impl TestContext {
         for node in &mut self.nodes {
             node.stop();
         }
+        witness::shutdown(&self.witness);
+        // Give OS a moment to release the port
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }
 
