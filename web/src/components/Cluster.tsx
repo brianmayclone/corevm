@@ -116,13 +116,15 @@ export default function Cluster({ lang }: ClusterProps) {
             <div className="text-center text-xs font-semibold uppercase tracking-wider text-surface-500 mb-8">Cluster Architecture</div>
 
             {/* Central Authority */}
-            <div className="mx-auto mb-8 w-fit rounded-xl border border-accent-400/30 bg-accent-400/10 px-8 py-4">
-              <div className="text-sm font-bold text-accent-400">Cluster Authority</div>
-              <div className="mt-1 flex gap-3 text-xs text-surface-400">
-                <span className="rounded bg-accent-400/10 px-1.5 py-0.5">DRS</span>
-                <span className="rounded bg-accent-400/10 px-1.5 py-0.5">HA</span>
-                <span className="rounded bg-accent-400/10 px-1.5 py-0.5">SDN</span>
-                <span className="rounded bg-accent-400/10 px-1.5 py-0.5">Migration</span>
+            <div className="mx-auto mb-8 max-w-2xl rounded-xl border border-accent-400/30 bg-accent-400/10 px-10 py-5">
+              <div className="text-center text-sm font-bold text-accent-400">Cluster Authority</div>
+              <div className="mt-2 flex justify-center gap-4 text-xs text-surface-400">
+                <span className="rounded bg-accent-400/10 px-2 py-0.5">DRS</span>
+                <span className="rounded bg-accent-400/10 px-2 py-0.5">HA</span>
+                <span className="rounded bg-accent-400/10 px-2 py-0.5">SDN</span>
+                <span className="rounded bg-accent-400/10 px-2 py-0.5">Migration</span>
+                <span className="rounded bg-accent-400/10 px-2 py-0.5">LDAP</span>
+                <span className="rounded bg-accent-400/10 px-2 py-0.5">Monitoring</span>
               </div>
             </div>
 
@@ -143,6 +145,33 @@ export default function Cluster({ lang }: ClusterProps) {
                         <div>CPU {node.cpu} &middot; RAM {node.mem}</div>
                       </div>
                     </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* CoreSAN Shared Storage */}
+            <div className="flex justify-center mt-2">
+              <div className="grid grid-cols-3 gap-6 md:gap-10">
+                {[1, 2, 3].map((n) => (
+                  <div key={n} className="mx-auto h-8 w-px bg-gradient-to-b from-primary-500/30 to-primary-400/50" />
+                ))}
+              </div>
+            </div>
+            <div className="mt-2 mx-auto max-w-2xl rounded-xl border border-primary-400/30 bg-primary-400/10 px-8 py-5">
+              <div className="text-center text-sm font-bold text-primary-400">CoreSAN</div>
+              <div className="text-center text-[11px] text-surface-400 mt-1">Software-Defined Storage</div>
+              <div className="mt-3 flex justify-center gap-3 text-xs text-surface-400">
+                <span className="rounded bg-primary-400/10 px-2 py-0.5">Replication</span>
+                <span className="rounded bg-primary-400/10 px-2 py-0.5">FUSE</span>
+                <span className="rounded bg-primary-400/10 px-2 py-0.5">Volumes</span>
+                <span className="rounded bg-primary-400/10 px-2 py-0.5">Snapshots</span>
+              </div>
+              <div className="mt-3 grid grid-cols-3 gap-3">
+                {['Disk 1', 'Disk 2', 'Disk 3'].map((disk) => (
+                  <div key={disk} className="rounded-lg border border-primary-400/15 bg-primary-400/5 px-3 py-2 text-center">
+                    <HardDrive size={14} className="mx-auto text-primary-400/60" />
+                    <div className="mt-1 text-[10px] text-surface-500">{disk}</div>
                   </div>
                 ))}
               </div>

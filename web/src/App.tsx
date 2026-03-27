@@ -7,6 +7,7 @@ import Appliance from './components/Appliance';
 import Features from './components/Features';
 import Screenshots from './components/Screenshots';
 import Cluster from './components/Cluster';
+import CoreSAN from './components/CoreSAN';
 import Architecture from './components/Architecture';
 import VMManager from './components/VMManager';
 import CTA from './components/CTA';
@@ -51,6 +52,7 @@ export default function App() {
         <Features lang={lang} />
         <Screenshots lang={lang} />
         <Cluster lang={lang} />
+        <CoreSAN lang={lang} />
         <Architecture lang={lang} />
         <VMManager lang={lang} onDownloadClick={() => setShowComingSoon(true)} />
         <CTA lang={lang} onDownloadClick={onDownloadClick} />

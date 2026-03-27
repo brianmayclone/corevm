@@ -18,6 +18,7 @@ export default function Navbar({ lang, onLangChange, onDownloadClick }: NavbarPr
     { href: '#features', label: t(lang, 'nav_features') },
     { href: '#screenshots', label: t(lang, 'nav_screenshots') },
     { href: '#cluster', label: t(lang, 'nav_cluster') },
+    { href: '#coresan', label: 'CoreSAN' },
     { href: '#architecture', label: t(lang, 'nav_architecture') },
     { href: '#vmmanager', label: 'VMManager' },
   ];
