@@ -206,8 +206,12 @@ pub fn handle_keyboard_events(ctx: &egui::Context, vm_handle: u64, display_focus
     ctx.input_mut(|i| {
         for event in &i.events {
             match event {
-                egui::Event::Key { key, pressed, repeat, .. } => {
-                    if let Some((scancode, extended)) = scancode_for_key(*key) {
+                egui::Event::Key { key, physical_key, pressed, repeat, .. } => {
+                    // Prefer physical_key over logical key so that non-US layouts
+                    // (e.g. Swiss German) send the correct PS/2 scancode regardless
+                    // of which character Shift/AltGr would produce.
+                    let effective_key = physical_key.unwrap_or(*key);
+                    if let Some((scancode, extended)) = scancode_for_key(effective_key) {
                         let idx = scancode as usize;
                         unsafe {
                             if *pressed {
