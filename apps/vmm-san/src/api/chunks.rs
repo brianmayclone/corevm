@@ -132,7 +132,7 @@ pub async fn write_chunk(
         db.execute("COMMIT", []).ok();
     }
 
-    tracing::debug!("Received chunk {}/{}/idx{} ({} bytes, sha256={})",
+    tracing::info!("Received chunk {}/{}/idx{} ({} bytes, sha256={})",
         volume_id, file_id, chunk_index, body.len(), &actual_sha256[..8]);
     Ok(StatusCode::OK)
 }
@@ -245,7 +245,7 @@ pub async fn sync_file_meta(
 
     db.execute("COMMIT", []).ok();
 
-    tracing::debug!("Synced file metadata: {}/{} v{} ({} chunks)",
+    tracing::info!("Synced file metadata: {}/{} v{} ({} chunks)",
         volume_id, rel_path, version, chunk_count);
     Ok(StatusCode::OK)
 }

@@ -137,7 +137,7 @@ async fn run_push_replicator(
                     &peer_addr, &event.volume_id, event.file_id, *chunk_index, data,
                 ).await {
                     Ok(_) => {
-                        tracing::debug!("Replicated chunk {}/{}/idx{} → {}",
+                        tracing::info!("Replicated chunk {}/{}/idx{} → {}",
                             event.volume_id, event.file_id, chunk_index, target_node_id);
                     }
                     Err(e) => {

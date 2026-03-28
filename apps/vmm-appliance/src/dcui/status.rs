@@ -394,45 +394,24 @@ fn fetch_san_status() -> Option<SanStatus> {
     let body = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&body).ok()?;
 
+    // Dashboard response has nested structure: { status: { ... }, total_capacity_bytes, ... }
+    let st = &json["status"];
+
     // Check if there are claimed disks — only show SAN status if disks are claimed
-    let claimed_disks = json["claimed_disks"].as_u64().unwrap_or(0) as u32;
+    let claimed_disks = st["claimed_disks"].as_u64().unwrap_or(0) as u32;
     if claimed_disks == 0 {
-        // Also try the status endpoint for claimed_disks count
-        let status_url = format!("http://127.0.0.1:{}/api/status", san_port);
-        let status_output = Command::new("curl")
-            .args(["-s", "-m", "2", &status_url])
-            .output()
-            .ok()?;
-        if status_output.status.success() {
-            let status_body = String::from_utf8_lossy(&status_output.stdout);
-            let status_json: serde_json::Value = serde_json::from_str(&status_body).ok()?;
-            let disks_from_status = status_json["claimed_disks"].as_u64().unwrap_or(0) as u32;
-            if disks_from_status == 0 {
-                return None;
-            }
-        } else {
-            return None;
-        }
+        return None;
     }
 
-    let quorum = json["quorum_status"].as_str()
-        .or_else(|| json["quorum"].as_str())
-        .unwrap_or("unknown").to_string();
-    let peers = json["peer_count"].as_u64()
-        .or_else(|| json["peers"].as_u64())
-        .unwrap_or(0) as u32;
-    let volumes = json["volume_count"].as_u64()
-        .or_else(|| json["volumes"].as_u64())
-        .unwrap_or(0) as u32;
-    let is_leader = json["is_leader"].as_bool().unwrap_or(false);
+    let quorum = st["quorum_status"].as_str().unwrap_or("unknown").to_string();
+    let peers = st["peer_count"].as_u64().unwrap_or(0) as u32;
+    let volumes = st["volumes"].as_array().map(|a| a.len() as u32).unwrap_or(0);
+    let is_leader = st["is_leader"].as_bool().unwrap_or(false);
 
-    // Storage capacity
-    let free_bytes = json["free_bytes"].as_u64()
-        .or_else(|| json["storage_free_bytes"].as_u64())
-        .unwrap_or(0);
-    let total_bytes = json["total_bytes"].as_u64()
-        .or_else(|| json["storage_total_bytes"].as_u64())
-        .unwrap_or(0);
+    // Storage capacity from top-level dashboard fields
+    let total_bytes = json["total_capacity_bytes"].as_u64().unwrap_or(0);
+    let used_bytes = json["used_capacity_bytes"].as_u64().unwrap_or(0);
+    let free_bytes = total_bytes.saturating_sub(used_bytes);
 
     Some(SanStatus {
         quorum,

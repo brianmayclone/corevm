@@ -425,6 +425,16 @@ pub async fn browse_volume_root(
     client.browse_volume(&id, "").await.map(Json).map_err(san_err)
 }
 
+/// GET /api/san/volumes/{id}/chunk-map — chunk allocation map for visualization
+pub async fn chunk_map(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let (client, _) = any_san_client(&state)?;
+    client.chunk_map(&id).await.map(Json).map_err(san_err)
+}
+
 /// POST /api/san/volumes/{id}/mkdir
 pub async fn mkdir_volume(
     State(state): State<Arc<ClusterState>>,

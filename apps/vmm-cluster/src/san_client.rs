@@ -114,6 +114,10 @@ impl SanClient {
         self.get(&format!("/api/volumes/{}/browse{}", volume_id, encoded)).await
     }
 
+    pub async fn chunk_map(&self, volume_id: &str) -> Result<Value, String> {
+        self.get(&format!("/api/volumes/{}/chunk-map", volume_id)).await
+    }
+
     pub async fn mkdir_volume(&self, volume_id: &str, body: &Value) -> Result<Value, String> {
         self.post(&format!("/api/volumes/{}/mkdir", volume_id), body).await
     }

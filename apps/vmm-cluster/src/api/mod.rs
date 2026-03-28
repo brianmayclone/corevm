@@ -155,6 +155,7 @@ pub fn router() -> Router<Arc<ClusterState>> {
         .route("/api/san/disks/claim", post(san::claim_disk))
         .route("/api/san/disks/release", post(san::release_disk))
         .route("/api/san/disks/reset", post(san::reset_disk))
+        .route("/api/san/volumes/{id}/chunk-map", get(san::chunk_map))
         .route("/api/san/volumes/{id}/browse", get(san::browse_volume_root))
         .route("/api/san/volumes/{id}/browse/{*path}", get(san::browse_volume))
         .route("/api/san/volumes/{id}/mkdir", post(san::mkdir_volume))
