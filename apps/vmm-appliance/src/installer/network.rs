@@ -2,8 +2,8 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
-use crate::common::network::{apply_and_verify, detect_interfaces, NetworkConfig, NetworkInterface};
-use crate::common::widgets::{SelectList, TextInput};
+use crate::common::network::{apply_and_verify, detect_interfaces, generate_default_hostname, NetworkConfig, NetworkInterface};
+use crate::common::widgets::{SelectList, TextInput, render_installer_frame};
 use super::{InstallConfig, ScreenResult};
 use std::sync::mpsc;
 
@@ -81,7 +81,7 @@ impl NetworkState {
         );
 
         let mut hostname = TextInput::new("Hostname:");
-        hostname.value = "corevm".to_string();
+        hostname.value = generate_default_hostname();
         hostname.cursor = hostname.value.chars().count();
 
         Self {
@@ -252,94 +252,81 @@ impl NetworkState {
         let area = frame.area();
         let buf = frame.buffer_mut();
 
-        ratatui::widgets::Block::default()
-            .style(Style::default().bg(Color::Black))
-            .render(area, buf);
+        let help = if self.verifying {
+            "Verifying network configuration..."
+        } else {
+            "[Tab] Next field  [↑↓] Select/type  [Enter] Continue  [Esc] Back"
+        };
+
+        let content = render_installer_frame(
+            area, buf,
+            "Network Configuration",
+            help,
+            Some((2, 8)),
+        );
 
         let dhcp = self.is_dhcp();
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .margin(2)
             .constraints([
-                Constraint::Length(1),   // 0: title
+                Constraint::Length(5),   // 0: interface list
                 Constraint::Length(1),   // 1: gap
-                Constraint::Length(5),   // 2: interface list
+                Constraint::Length(4),   // 2: mode list
                 Constraint::Length(1),   // 3: gap
-                Constraint::Length(4),   // 4: mode list
-                Constraint::Length(1),   // 5: gap
-                Constraint::Length(4),   // 6: address
-                Constraint::Length(4),   // 7: gateway
-                Constraint::Length(4),   // 8: dns
-                Constraint::Length(4),   // 9: hostname
-                Constraint::Min(0),      // 10: spacer
-                Constraint::Length(1),   // 11: error
-                Constraint::Length(1),   // 12: help
+                Constraint::Length(4),   // 4: address
+                Constraint::Length(4),   // 5: gateway
+                Constraint::Length(4),   // 6: dns
+                Constraint::Length(4),   // 7: hostname
+                Constraint::Min(0),      // 8: spacer
+                Constraint::Length(1),   // 9: error/status
             ])
-            .split(area);
+            .split(content);
 
-        Paragraph::new("Network Configuration")
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-            .alignment(Alignment::Center)
-            .render(chunks[0], buf);
+        let col = centered_horizontal(content, 70);
 
-        let col = centered_horizontal(area, 70);
-
-        let iface_area = Rect { y: chunks[2].y, height: chunks[2].height, x: col.x, width: col.width };
+        let iface_area = Rect { y: chunks[0].y, height: chunks[0].height, x: col.x, width: col.width };
         self.iface_list.render(iface_area, buf);
 
-        let mode_area = Rect { y: chunks[4].y, height: chunks[4].height, x: col.x, width: col.width };
+        let mode_area = Rect { y: chunks[2].y, height: chunks[2].height, x: col.x, width: col.width };
         self.mode_list.render(mode_area, buf);
 
         let grey = Style::default().fg(Color::DarkGray);
 
-        // Static-only fields — render greyed when DHCP
-        let addr_area = Rect { y: chunks[6].y, height: chunks[6].height, x: col.x, width: col.width };
+        let addr_area = Rect { y: chunks[4].y, height: chunks[4].height, x: col.x, width: col.width };
         if dhcp {
             render_greyed_field("IP Address (CIDR, e.g. 192.168.1.10/24):", addr_area, buf, grey);
         } else {
             self.address.render(addr_area, buf);
         }
 
-        let gw_area = Rect { y: chunks[7].y, height: chunks[7].height, x: col.x, width: col.width };
+        let gw_area = Rect { y: chunks[5].y, height: chunks[5].height, x: col.x, width: col.width };
         if dhcp {
             render_greyed_field("Default Gateway:", gw_area, buf, grey);
         } else {
             self.gateway.render(gw_area, buf);
         }
 
-        let dns_area = Rect { y: chunks[8].y, height: chunks[8].height, x: col.x, width: col.width };
+        let dns_area = Rect { y: chunks[6].y, height: chunks[6].height, x: col.x, width: col.width };
         if dhcp {
             render_greyed_field("DNS Server(s) (comma separated):", dns_area, buf, grey);
         } else {
             self.dns.render(dns_area, buf);
         }
 
-        let host_area = Rect { y: chunks[9].y, height: chunks[9].height, x: col.x, width: col.width };
+        let host_area = Rect { y: chunks[7].y, height: chunks[7].height, x: col.x, width: col.width };
         self.hostname.render(host_area, buf);
 
         if let Some(status) = &self.verify_status {
             Paragraph::new(status.as_str())
                 .style(Style::default().fg(Color::Yellow))
                 .alignment(Alignment::Center)
-                .render(chunks[11], buf);
+                .render(chunks[9], buf);
         } else if let Some(err) = &self.error {
             Paragraph::new(err.as_str())
                 .style(Style::default().fg(Color::Red))
                 .alignment(Alignment::Center)
-                .render(chunks[11], buf);
-        }
-
-        if self.verifying {
-            Paragraph::new("Verifying network configuration...")
-                .style(Style::default().fg(Color::Yellow))
-                .alignment(Alignment::Center)
-                .render(chunks[12], buf);
-        } else {
-            Paragraph::new("[Tab] Next field  [↑↓] Select/type  [Enter] Continue  [Esc] Back")
-                .style(Style::default().fg(Color::DarkGray))
-                .alignment(Alignment::Center)
-                .render(chunks[12], buf);
+                .render(chunks[9], buf);
         }
     }
 }

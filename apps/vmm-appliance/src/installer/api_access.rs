@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
-use crate::common::widgets::SelectList;
+use crate::common::widgets::{SelectList, render_installer_frame};
 use super::{InstallConfig, ScreenResult};
 
 pub struct ApiAccessState {
@@ -40,32 +40,26 @@ impl ApiAccessState {
         let area = frame.area();
         let buf = frame.buffer_mut();
 
-        ratatui::widgets::Block::default()
-            .style(Style::default().bg(Color::Black))
-            .render(area, buf);
+        let content = render_installer_frame(
+            area, buf,
+            "CLI / API Access",
+            "[Up/Down] Select  [Enter] Continue  [Esc] Back",
+            Some((6, 8)),
+        );
+
+        let col = centered_horizontal(content, 60);
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .margin(2)
             .constraints([
-                Constraint::Length(1),   // 0: title
+                Constraint::Length(2),   // 0: description
                 Constraint::Length(1),   // 1: gap
-                Constraint::Length(2),   // 2: description
-                Constraint::Length(1),   // 3: gap
-                Constraint::Length(6),   // 4: select list
-                Constraint::Min(0),      // 5: spacer
-                Constraint::Length(2),   // 6: info
-                Constraint::Length(1),   // 7: error
-                Constraint::Length(1),   // 8: help
+                Constraint::Length(6),   // 2: select list
+                Constraint::Min(0),      // 3: spacer
+                Constraint::Length(2),   // 4: info
+                Constraint::Length(1),   // 5: error
             ])
-            .split(area);
-
-        Paragraph::new("CLI / API Access")
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-            .alignment(Alignment::Center)
-            .render(chunks[0], buf);
-
-        let col = centered_horizontal(area, 60);
+            .split(content);
 
         let desc = Paragraph::new(
             "Allow remote management via the vmmctl command-line tool.\n\
@@ -74,9 +68,9 @@ impl ApiAccessState {
         .style(Style::default().fg(Color::White))
         .alignment(Alignment::Center)
         .wrap(ratatui::widgets::Wrap { trim: true });
-        desc.render(chunks[2], buf);
+        desc.render(chunks[0], buf);
 
-        let select_area = Rect { y: chunks[4].y, height: chunks[4].height, x: col.x, width: col.width };
+        let select_area = Rect { y: chunks[2].y, height: chunks[2].height, x: col.x, width: col.width };
         self.select.render(select_area, buf);
 
         let info = Paragraph::new(
@@ -85,19 +79,14 @@ impl ApiAccessState {
         )
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Center);
-        info.render(chunks[6], buf);
+        info.render(chunks[4], buf);
 
         if let Some(err) = &self.error {
             Paragraph::new(err.as_str())
                 .style(Style::default().fg(Color::Red))
                 .alignment(Alignment::Center)
-                .render(chunks[7], buf);
+                .render(chunks[5], buf);
         }
-
-        Paragraph::new("[Up/Down] Select  [Enter] Continue  [Esc] Back")
-            .style(Style::default().fg(Color::DarkGray))
-            .alignment(Alignment::Center)
-            .render(chunks[8], buf);
     }
 }
 

@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
-use crate::common::widgets::{SelectList, TextInput};
+use crate::common::widgets::{SelectList, TextInput, render_installer_frame};
 use super::{InstallConfig, ScreenResult};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -130,34 +130,28 @@ impl CertsState {
         let area = frame.area();
         let buf = frame.buffer_mut();
 
-        ratatui::widgets::Block::default()
-            .style(Style::default().bg(Color::Black))
-            .render(area, buf);
+        let content = render_installer_frame(
+            area, buf,
+            "TLS Certificates",
+            "[Tab] Switch field  [↑↓] Select mode  [Enter] Continue  [Esc] Back",
+            Some((7, 8)),
+        );
 
         let import = self.is_import();
 
+        let col = centered_horizontal(content, 60);
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .margin(2)
             .constraints([
-                Constraint::Length(1),   // 0: title
+                Constraint::Length(4),   // 0: mode list
                 Constraint::Length(1),   // 1: gap
-                Constraint::Length(4),   // 2: mode list
-                Constraint::Length(1),   // 3: gap
-                Constraint::Length(4),   // 4: cert path
-                Constraint::Length(4),   // 5: key path
-                Constraint::Min(0),      // 6: spacer
-                Constraint::Length(1),   // 7: error
-                Constraint::Length(1),   // 8: help
+                Constraint::Length(4),   // 2: cert path
+                Constraint::Length(4),   // 3: key path
+                Constraint::Min(0),      // 4: spacer
+                Constraint::Length(1),   // 5: error
             ])
-            .split(area);
-
-        Paragraph::new("TLS Certificates")
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-            .alignment(Alignment::Center)
-            .render(chunks[0], buf);
-
-        let col = centered_horizontal(area, 60);
+            .split(content);
 
         macro_rules! col_rect {
             ($chunk:expr) => {
@@ -165,29 +159,24 @@ impl CertsState {
             };
         }
 
-        self.mode_list.render(col_rect!(chunks[2]), buf);
+        self.mode_list.render(col_rect!(chunks[0]), buf);
 
         let grey = Style::default().fg(Color::DarkGray);
 
         if import {
-            self.cert_path.render(col_rect!(chunks[4]), buf);
-            self.key_path.render(col_rect!(chunks[5]), buf);
+            self.cert_path.render(col_rect!(chunks[2]), buf);
+            self.key_path.render(col_rect!(chunks[3]), buf);
         } else {
-            render_greyed_field("Certificate Path:", col_rect!(chunks[4]), buf, grey);
-            render_greyed_field("Private Key Path:", col_rect!(chunks[5]), buf, grey);
+            render_greyed_field("Certificate Path:", col_rect!(chunks[2]), buf, grey);
+            render_greyed_field("Private Key Path:", col_rect!(chunks[3]), buf, grey);
         }
 
         if let Some(err) = &self.error {
             Paragraph::new(err.as_str())
                 .style(Style::default().fg(Color::Red))
                 .alignment(Alignment::Center)
-                .render(chunks[7], buf);
+                .render(chunks[5], buf);
         }
-
-        Paragraph::new("[Tab] Switch field  [↑↓] Select mode  [Enter] Continue  [Esc] Back")
-            .style(Style::default().fg(Color::DarkGray))
-            .alignment(Alignment::Center)
-            .render(chunks[8], buf);
     }
 }
 

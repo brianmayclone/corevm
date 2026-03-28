@@ -3,7 +3,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
 use crate::common::config::ApplianceRole;
-use crate::common::widgets::TextInput;
+use crate::common::widgets::{TextInput, render_installer_frame};
 use super::{InstallConfig, ScreenResult};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -128,38 +128,32 @@ impl PortsState {
         let area = frame.area();
         let buf = frame.buffer_mut();
 
-        ratatui::widgets::Block::default()
-            .style(Style::default().bg(Color::Black))
-            .render(area, buf);
+        let content = render_installer_frame(
+            area, buf,
+            "Service Ports",
+            "[Tab] Switch field  [Enter] Continue  [Esc] Back",
+            Some((5, 8)),
+        );
 
         let show_cluster = Self::show_cluster(config);
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .margin(2)
             .constraints([
-                Constraint::Length(1),   // 0: title
-                Constraint::Length(1),   // 1: gap
-                Constraint::Length(4),   // 2: server port
-                Constraint::Length(4),   // 3: cluster port
-                Constraint::Min(0),      // 4: spacer
-                Constraint::Length(1),   // 5: error
-                Constraint::Length(1),   // 6: help
+                Constraint::Length(4),   // 0: server port
+                Constraint::Length(4),   // 1: cluster port
+                Constraint::Min(0),      // 2: spacer
+                Constraint::Length(1),   // 3: error
             ])
-            .split(area);
+            .split(content);
 
-        Paragraph::new("Service Ports")
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-            .alignment(Alignment::Center)
-            .render(chunks[0], buf);
+        let col = centered_horizontal(content, 50);
 
-        let col = centered_horizontal(area, 50);
-
-        let sp_area = Rect { y: chunks[2].y, height: chunks[2].height, x: col.x, width: col.width };
+        let sp_area = Rect { y: chunks[0].y, height: chunks[0].height, x: col.x, width: col.width };
         self.server_port.render(sp_area, buf);
 
         if show_cluster {
-            let cp_area = Rect { y: chunks[3].y, height: chunks[3].height, x: col.x, width: col.width };
+            let cp_area = Rect { y: chunks[1].y, height: chunks[1].height, x: col.x, width: col.width };
             self.cluster_port.render(cp_area, buf);
         }
 
@@ -167,13 +161,8 @@ impl PortsState {
             Paragraph::new(err.as_str())
                 .style(Style::default().fg(Color::Red))
                 .alignment(Alignment::Center)
-                .render(chunks[5], buf);
+                .render(chunks[3], buf);
         }
-
-        Paragraph::new("[Tab] Switch field  [Enter] Continue  [Esc] Back")
-            .style(Style::default().fg(Color::DarkGray))
-            .alignment(Alignment::Center)
-            .render(chunks[6], buf);
     }
 }
 

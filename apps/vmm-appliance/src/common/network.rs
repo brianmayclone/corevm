@@ -50,6 +50,47 @@ pub fn detect_interfaces() -> Result<Vec<NetworkInterface>> {
     Ok(interfaces)
 }
 
+/// Generate a unique default hostname based on the MAC address of the first
+/// network interface. Format: `COREVM-XXXX` where XXXX are the last 4 hex
+/// digits of the MAC (e.g. `COREVM-A3F1`). Falls back to a random suffix
+/// derived from `/etc/machine-id` or `getrandom` if no interface is available.
+pub fn generate_default_hostname() -> String {
+    // Try to derive from the first network interface MAC
+    if let Ok(interfaces) = detect_interfaces() {
+        if let Some(iface) = interfaces.first() {
+            let hex: String = iface.mac.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+            if hex.len() >= 4 {
+                let suffix = &hex[hex.len() - 4..];
+                return format!("COREVM-{}", suffix.to_ascii_uppercase());
+            }
+        }
+    }
+
+    // Fallback: use machine-id
+    if let Ok(mid) = fs::read_to_string("/etc/machine-id") {
+        let trimmed = mid.trim();
+        if trimmed.len() >= 4 {
+            let suffix = &trimmed[trimmed.len() - 4..];
+            return format!("COREVM-{}", suffix.to_ascii_uppercase());
+        }
+    }
+
+    // Last resort: random 4 hex chars
+    let mut buf = [0u8; 2];
+    if let Ok(()) = getrandom(&mut buf) {
+        return format!("COREVM-{:02X}{:02X}", buf[0], buf[1]);
+    }
+
+    "COREVM-0000".to_string()
+}
+
+fn getrandom(buf: &mut [u8]) -> std::io::Result<()> {
+    use std::io::Read;
+    let mut f = std::fs::File::open("/dev/urandom")?;
+    f.read_exact(buf)?;
+    Ok(())
+}
+
 pub fn write_networkd_config(target: &Path, config: &NetworkConfig) -> Result<()> {
     let network_dir = target.join("etc/systemd/network");
     fs::create_dir_all(&network_dir).context("Failed to create systemd/network dir")?;

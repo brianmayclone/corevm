@@ -366,56 +366,61 @@ fn detect_primary_interface() -> String {
 /// Fetch CoreSAN status from the local vmm-san daemon.
 /// Returns None if vmm-san is not running or has no claimed disks.
 fn fetch_san_status() -> Option<SanStatus> {
-    // Check if vmm-san service is active first (cheap check)
-    let service_active = Command::new("systemctl")
+    // Step 1: Check if vmm-san service is running
+    // Try multiple service names since it could be "vmm-san" or "vmm-san.service"
+    let service_check = Command::new("systemctl")
         .args(["is-active", "vmm-san"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "active")
-        .unwrap_or(false);
+        .output();
 
-    if !service_active {
-        return None;
-    }
-
-    // Read vmm-san port from config
-    let san_port = read_port_from_toml("/etc/vmm/vmm-san.toml", "server").unwrap_or(7443);
-
-    // Fetch /api/status via raw HTTP (no curl dependency)
-    let json = http_get_json(&format!("127.0.0.1:{}", san_port), "/api/status")?;
-
-    // /api/status returns a flat structure directly (not nested under "status")
-    // But /api/dashboard wraps it in { status: {...}, total_capacity_bytes, ... }
-    // Handle both:
-    let st = if json.get("status").is_some() && json["status"].is_object() {
-        &json["status"]
-    } else {
-        &json
+    let service_active = match &service_check {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            stdout == "active"
+        }
+        Err(_) => false,
     };
 
-    // Check if there are claimed disks — only show SAN status if disks are claimed
-    let claimed_disks = st["claimed_disks"].as_u64().unwrap_or(0) as u32;
+    if !service_active {
+        // Fallback: check if vmm-san process is running at all
+        let ps_check = Command::new("pgrep")
+            .args(["-x", "vmm-san"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        if !ps_check {
+            return None;
+        }
+    }
+
+    // Step 2: Determine the port
+    let san_port = read_port_from_toml("/etc/vmm/vmm-san.toml", "server").unwrap_or(7443);
+
+    // Step 3: Fetch /api/status via raw HTTP
+    let json = match http_get_json(&format!("127.0.0.1:{}", san_port), "/api/status") {
+        Some(j) => j,
+        None => return None,
+    };
+
+    // /api/status returns a flat structure with all fields at top level
+    let claimed_disks = json["claimed_disks"].as_u64().unwrap_or(0) as u32;
     if claimed_disks == 0 {
         return None;
     }
 
-    let quorum = st["quorum_status"].as_str().unwrap_or("unknown").to_string();
-    let peers = st["peer_count"].as_u64().unwrap_or(0) as u32;
-    let volumes = st["volumes"].as_array().map(|a| a.len() as u32).unwrap_or(0);
-    let is_leader = st["is_leader"].as_bool().unwrap_or(false);
+    let quorum = json["quorum_status"].as_str().unwrap_or("unknown").to_string();
+    let peers = json["peer_count"].as_u64().unwrap_or(0) as u32;
+    let volumes = json["volumes"].as_array().map(|a| a.len() as u32).unwrap_or(0);
+    let is_leader = json["is_leader"].as_bool().unwrap_or(false);
 
-    // Storage capacity — try various field names
-    let total_bytes = json["total_capacity_bytes"].as_u64()
-        .or_else(|| st["volumes"].as_array().map(|vols|
-            vols.iter().filter_map(|v| v["total_bytes"].as_u64()).sum()))
-        .unwrap_or(0);
-    let used_bytes = json["used_capacity_bytes"].as_u64().unwrap_or(0);
-    let free_bytes = if total_bytes > 0 {
-        total_bytes.saturating_sub(used_bytes)
-    } else {
-        st["volumes"].as_array().map(|vols|
-            vols.iter().filter_map(|v| v["free_bytes"].as_u64()).sum()
-        ).unwrap_or(0)
-    };
+    // Storage capacity from volume summaries
+    let (total_bytes, free_bytes) = json["volumes"].as_array()
+        .map(|vols| {
+            let t: u64 = vols.iter().filter_map(|v| v["total_bytes"].as_u64()).sum();
+            let f: u64 = vols.iter().filter_map(|v| v["free_bytes"].as_u64()).sum();
+            (t, f)
+        })
+        .unwrap_or((0, 0));
 
     Some(SanStatus {
         quorum,
@@ -433,21 +438,49 @@ fn http_get_json(host: &str, path: &str) -> Option<serde_json::Value> {
     use std::io::{Read as IoRead, Write as IoWrite};
     use std::net::TcpStream;
 
-    let mut stream = TcpStream::connect(host).ok()?;
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
-    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
+    let mut stream = match TcpStream::connect_timeout(
+        &host.parse().ok()?,
+        Duration::from_secs(1),
+    ) {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
 
     let request = format!(
-        "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nAccept: application/json\r\n\r\n",
         path, host
     );
-    stream.write_all(request.as_bytes()).ok()?;
+    if stream.write_all(request.as_bytes()).is_err() {
+        return None;
+    }
 
-    let mut response = String::new();
-    stream.read_to_string(&mut response).ok()?;
+    // Read response in chunks — don't rely on read_to_string which can fail on connection close
+    let mut buf = Vec::with_capacity(8192);
+    let mut tmp = [0u8; 4096];
+    loop {
+        match stream.read(&mut tmp) {
+            Ok(0) => break,        // Connection closed — done
+            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break, // Timeout — use what we have
+            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => break,
+            Err(_) => break,
+        }
+        if buf.len() > 65536 { break; } // Safety limit
+    }
+
+    let response = String::from_utf8_lossy(&buf);
 
     // Skip HTTP headers — find the blank line separating headers from body
-    let body = response.split("\r\n\r\n").nth(1)?;
+    let body = if let Some(pos) = response.find("\r\n\r\n") {
+        &response[pos + 4..]
+    } else if let Some(pos) = response.find("\n\n") {
+        &response[pos + 2..]
+    } else {
+        return None;
+    };
+
     serde_json::from_str(body.trim()).ok()
 }
 

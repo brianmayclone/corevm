@@ -425,14 +425,94 @@ pub async fn browse_volume_root(
     client.browse_volume(&id, "").await.map(Json).map_err(san_err)
 }
 
-/// GET /api/san/volumes/{id}/chunk-map — chunk allocation map for visualization
+/// GET /api/san/volumes/{id}/chunk-map — fan-out to ALL SAN hosts, aggregate chunk maps.
 pub async fn chunk_map(
     State(state): State<Arc<ClusterState>>,
     _user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    let (client, _) = any_san_client(&state)?;
-    client.chunk_map(&id).await.map(Json).map_err(san_err)
+    let hosts = {
+        let db = state.db.lock().map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        get_san_hosts(&db)
+    };
+
+    if hosts.is_empty() {
+        return Err(AppError(StatusCode::SERVICE_UNAVAILABLE, "No SAN hosts".into()));
+    }
+
+    // Fan-out: query chunk-map from every SAN host
+    let vol_id = id.clone();
+    let futures: Vec<_> = hosts.iter().map(|h| {
+        let client = SanClient::new(&h.san_address);
+        let vid = vol_id.clone();
+        let hostname = h.hostname.clone();
+        async move {
+            match client.chunk_map(&vid).await {
+                Ok(data) => Some((hostname, data)),
+                Err(_) => None,
+            }
+        }
+    }).collect();
+
+    let results: Vec<(String, Value)> = futures::future::join_all(futures).await
+        .into_iter().flatten().collect();
+
+    if results.is_empty() {
+        return Err(san_err("No SAN host responded".into()));
+    }
+
+    // Take the first response as base for volume info
+    let (_, first) = &results[0];
+    let volume_name = first["volume_name"].as_str().unwrap_or("").to_string();
+    let chunk_size_bytes = first["chunk_size_bytes"].as_u64().unwrap_or(0);
+
+    // Aggregate: merge backends and chunks from all hosts
+    let mut all_backends = Vec::new();
+    let mut all_chunks = Vec::new();
+    let mut total_capacity: u64 = 0;
+    let mut used_bytes: u64 = 0;
+
+    for (hostname, data) in &results {
+        // Add backends from this host (tag with hostname)
+        if let Some(backends) = data["backends"].as_array() {
+            for mut b in backends.iter().cloned() {
+                if let Some(obj) = b.as_object_mut() {
+                    // Override hostname with the cluster-known hostname
+                    obj.insert("node_hostname".into(), Value::String(hostname.clone()));
+                }
+                all_backends.push(b);
+            }
+        }
+
+        // Add chunks from this host (tag with hostname)
+        if let Some(chunks) = data["chunks"].as_array() {
+            for mut c in chunks.iter().cloned() {
+                if let Some(obj) = c.as_object_mut() {
+                    obj.insert("node_hostname".into(), Value::String(hostname.clone()));
+                }
+                all_chunks.push(c);
+            }
+        }
+
+        // Use max capacity (each host reports its own backends)
+        total_capacity += data["total_capacity_bytes"].as_u64().unwrap_or(0);
+        // Only count used_bytes once (take max across hosts since they see the same files)
+        let host_used = data["used_bytes"].as_u64().unwrap_or(0);
+        if host_used > used_bytes {
+            used_bytes = host_used;
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "volume_id": id,
+        "volume_name": volume_name,
+        "chunk_size_bytes": chunk_size_bytes,
+        "total_chunks": all_chunks.len(),
+        "total_capacity_bytes": total_capacity,
+        "used_bytes": used_bytes,
+        "backends": all_backends,
+        "chunks": all_chunks,
+    })))
 }
 
 /// POST /api/san/volumes/{id}/mkdir

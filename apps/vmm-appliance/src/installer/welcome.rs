@@ -3,7 +3,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
 use crate::common::config::ApplianceRole;
-use crate::common::widgets::SelectList;
+use crate::common::widgets::{SelectList, render_installer_frame};
 use super::{InstallConfig, ScreenResult};
 
 const LOGO: &str = r#"
@@ -102,20 +102,19 @@ impl WelcomeState {
         let area = frame.area();
         let buf = frame.buffer_mut();
 
-        // Full-screen dark background
-        let bg = Style::default().bg(Color::Black);
-        ratatui::widgets::Block::default()
-            .style(bg)
-            .render(area, buf);
+        let content = render_installer_frame(
+            area, buf,
+            "Welcome",
+            "[Tab] Switch field  [↑↓] Select  [Enter] Continue  [Esc] Quit",
+            None,
+        );
 
-        // Layout: logo | gap | fields | gap | help
+        // Layout within content area
         let logo_lines = LOGO.lines().count() as u16;
-        let help_height = 1u16;
-        let field_height = 8u16; // label + 5 items each list
+        let field_height = 8u16;
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .margin(1)
             .constraints([
                 Constraint::Length(logo_lines),     // 0: logo
                 Constraint::Length(1),              // 1: gap
@@ -123,9 +122,8 @@ impl WelcomeState {
                 Constraint::Length(1),              // 3: gap
                 Constraint::Length(field_height),   // 4: language list
                 Constraint::Min(0),                 // 5: spacer
-                Constraint::Length(help_height),    // 6: help
             ])
-            .split(area);
+            .split(content);
 
         // Logo
         Paragraph::new(LOGO)
@@ -140,12 +138,6 @@ impl WelcomeState {
         // Language list – centered block
         let lang_area = centered_horizontal(chunks[4], 50);
         self.lang_list.render(lang_area, buf);
-
-        // Help line
-        Paragraph::new("[Tab] Switch field  [↑↓] Select  [Enter] Continue  [Esc] Quit")
-            .style(Style::default().fg(Color::DarkGray))
-            .alignment(Alignment::Center)
-            .render(chunks[6], buf);
     }
 }
 

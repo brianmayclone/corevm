@@ -3,6 +3,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::common::config::ApplianceRole;
+use crate::common::widgets::render_installer_frame;
 use super::{InstallConfig, ScreenResult};
 
 pub struct SummaryState {}
@@ -24,26 +25,12 @@ impl SummaryState {
         let area = frame.area();
         let buf = frame.buffer_mut();
 
-        Block::default()
-            .style(Style::default().bg(Color::Black))
-            .render(area, buf);
-
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .margin(2)
-            .constraints([
-                Constraint::Length(1),   // 0: title
-                Constraint::Length(1),   // 1: gap
-                Constraint::Min(5),      // 2: summary table
-                Constraint::Length(1),   // 3: gap
-                Constraint::Length(1),   // 4: help
-            ])
-            .split(area);
-
-        Paragraph::new("Installation Summary")
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-            .alignment(Alignment::Center)
-            .render(chunks[0], buf);
+        let content = render_installer_frame(
+            area, buf,
+            "Installation Summary",
+            "[Enter] Start Installation  [Esc] Go Back",
+            Some((8, 8)),
+        );
 
         // Build summary rows
         let rows = build_summary_rows(config);
@@ -60,21 +47,16 @@ impl SummaryState {
             })
             .collect();
 
-        let col = centered_horizontal(area, 70);
-        let table_area = Rect { y: chunks[2].y, height: chunks[2].height, x: col.x, width: col.width };
+        let col = centered_horizontal(content, 70);
+        let table_area = Rect { y: content.y, height: content.height, x: col.x, width: col.width };
 
         Paragraph::new(text)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray)),
+                    .border_style(Style::default().fg(Color::Rgb(60, 70, 85))),
             )
             .render(table_area, buf);
-
-        Paragraph::new("[Enter] Start Installation  [Esc] Go Back")
-            .style(Style::default().fg(Color::DarkGray))
-            .alignment(Alignment::Center)
-            .render(chunks[4], buf);
     }
 }
 

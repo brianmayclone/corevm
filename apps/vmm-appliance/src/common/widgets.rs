@@ -3,6 +3,110 @@ use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, 
 use crossterm::event::{KeyCode, KeyEvent};
 
 // ---------------------------------------------------------------------------
+// Installer color theme
+// ---------------------------------------------------------------------------
+
+/// Dark blue-gray background used across all installer screens.
+pub const BG_COLOR: Color = Color::Rgb(20, 30, 48);
+/// Accent color for header bar and highlights.
+pub const ACCENT_COLOR: Color = Color::Rgb(50, 140, 200);
+/// Muted text color.
+pub const MUTED_COLOR: Color = Color::Rgb(120, 130, 140);
+/// Header bar background.
+pub const HEADER_BG: Color = Color::Rgb(40, 60, 90);
+/// Footer bar background.
+pub const FOOTER_BG: Color = Color::Rgb(30, 40, 55);
+
+// ---------------------------------------------------------------------------
+// InstallerFrame — common outer chrome for all screens
+// ---------------------------------------------------------------------------
+
+/// Renders the common installer chrome (background, header bar, footer help bar)
+/// and returns the inner content area for the screen to render into.
+pub fn render_installer_frame(
+    area: Rect,
+    buf: &mut Buffer,
+    title: &str,
+    help_text: &str,
+    step: Option<(u16, u16)>, // (current, total) — e.g. (2, 9)
+) -> Rect {
+    // Fill entire area with background color
+    Block::default()
+        .style(Style::default().bg(BG_COLOR))
+        .render(area, buf);
+
+    // Layout: header (1) + header border (1) + content + footer border (1) + footer (1)
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // 0: header bar
+            Constraint::Length(1), // 1: header separator
+            Constraint::Min(3),   // 2: content area
+            Constraint::Length(1), // 3: footer separator
+            Constraint::Length(1), // 4: footer bar
+        ])
+        .split(area);
+
+    // Header bar
+    let header_bg_block = Block::default().style(Style::default().bg(HEADER_BG));
+    header_bg_block.render(chunks[0], buf);
+
+    let step_text = if let Some((cur, total)) = step {
+        format!(" Step {}/{}", cur, total)
+    } else {
+        String::new()
+    };
+
+    let title_span = Span::styled(
+        format!("  CoreVM Installer — {}", title),
+        Style::default().fg(Color::White).bg(HEADER_BG).add_modifier(Modifier::BOLD),
+    );
+    let step_span = Span::styled(
+        format!("{}  ", step_text),
+        Style::default().fg(ACCENT_COLOR).bg(HEADER_BG),
+    );
+
+    // Render title on the left
+    Paragraph::new(Line::from(title_span))
+        .render(chunks[0], buf);
+    // Render step indicator on the right
+    if !step_text.is_empty() {
+        Paragraph::new(Line::from(step_span))
+            .alignment(Alignment::Right)
+            .render(chunks[0], buf);
+    }
+
+    // Header separator — thin line
+    let sep_line: String = "─".repeat(chunks[1].width as usize);
+    Paragraph::new(sep_line.as_str())
+        .style(Style::default().fg(ACCENT_COLOR).bg(BG_COLOR))
+        .render(chunks[1], buf);
+
+    // Footer separator — thin line
+    let sep_line2: String = "─".repeat(chunks[3].width as usize);
+    Paragraph::new(sep_line2.as_str())
+        .style(Style::default().fg(Color::Rgb(60, 70, 85)).bg(BG_COLOR))
+        .render(chunks[3], buf);
+
+    // Footer bar
+    let footer_block = Block::default().style(Style::default().bg(FOOTER_BG));
+    footer_block.render(chunks[4], buf);
+
+    Paragraph::new(format!("  {}", help_text))
+        .style(Style::default().fg(MUTED_COLOR).bg(FOOTER_BG))
+        .render(chunks[4], buf);
+
+    // Return the content area with 1-cell horizontal margin
+    let content = chunks[2];
+    Rect {
+        x: content.x + 2,
+        y: content.y + 1,
+        width: content.width.saturating_sub(4),
+        height: content.height.saturating_sub(2),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TextInput
 // ---------------------------------------------------------------------------
 

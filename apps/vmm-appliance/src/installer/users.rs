@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
-use crate::common::widgets::{PasswordInput, TextInput};
+use crate::common::widgets::{PasswordInput, TextInput, render_installer_frame};
 use super::{InstallConfig, ScreenResult};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -86,15 +86,15 @@ impl UsersState {
         if self.root_password.value() != self.root_confirm.value() {
             return Err("Root passwords do not match.".to_string());
         }
+        // User account is optional — only validate if username is provided
         let username = self.username.value.trim();
-        if username.is_empty() {
-            return Err("Username must not be empty.".to_string());
-        }
-        if self.user_password.value().is_empty() {
-            return Err("User password must not be empty.".to_string());
-        }
-        if self.user_password.value() != self.user_confirm.value() {
-            return Err("User passwords do not match.".to_string());
+        if !username.is_empty() {
+            if self.user_password.value().is_empty() {
+                return Err("User password must not be empty when username is set.".to_string());
+            }
+            if self.user_password.value() != self.user_confirm.value() {
+                return Err("User passwords do not match.".to_string());
+            }
         }
         Ok(())
     }
@@ -140,34 +140,35 @@ impl UsersState {
         let area = frame.area();
         let buf = frame.buffer_mut();
 
-        ratatui::widgets::Block::default()
-            .style(Style::default().bg(Color::Black))
-            .render(area, buf);
+        let content = render_installer_frame(
+            area, buf,
+            "Root Password",
+            "[Tab] Next field  [Enter] Continue  [Esc] Back",
+            Some((4, 8)),
+        );
+
+        let col = centered_horizontal(content, 60);
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .margin(2)
             .constraints([
-                Constraint::Length(1),   // 0: title
+                Constraint::Length(1),   // 0: info text
                 Constraint::Length(1),   // 1: gap
                 Constraint::Length(4),   // 2: root password
                 Constraint::Length(4),   // 3: root confirm
                 Constraint::Length(1),   // 4: gap
-                Constraint::Length(4),   // 5: username
+                Constraint::Length(4),   // 5: username (optional)
                 Constraint::Length(4),   // 6: user password
                 Constraint::Length(4),   // 7: user confirm
                 Constraint::Min(0),      // 8: spacer
                 Constraint::Length(1),   // 9: error
-                Constraint::Length(1),   // 10: help
             ])
-            .split(area);
+            .split(content);
 
-        Paragraph::new("User Accounts")
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        Paragraph::new("Set the root password. Additional user account is optional.")
+            .style(Style::default().fg(Color::Gray))
             .alignment(Alignment::Center)
             .render(chunks[0], buf);
-
-        let col = centered_horizontal(area, 60);
 
         macro_rules! col_rect {
             ($chunk:expr) => {
@@ -187,11 +188,6 @@ impl UsersState {
                 .alignment(Alignment::Center)
                 .render(chunks[9], buf);
         }
-
-        Paragraph::new("[Tab] Next field  [Enter] Continue  [Esc] Back")
-            .style(Style::default().fg(Color::DarkGray))
-            .alignment(Alignment::Center)
-            .render(chunks[10], buf);
     }
 }
 

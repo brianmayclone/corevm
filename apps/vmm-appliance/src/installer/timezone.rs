@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
-use crate::common::widgets::{SelectList, TextInput};
+use crate::common::widgets::{SelectList, TextInput, render_installer_frame};
 use super::{InstallConfig, ScreenResult};
 
 // ---------------------------------------------------------------------------
@@ -216,33 +216,27 @@ impl TimezoneState {
         let area = frame.area();
         let buf = frame.buffer_mut();
 
-        ratatui::widgets::Block::default()
-            .style(Style::default().bg(Color::Black))
-            .render(area, buf);
+        let content = render_installer_frame(
+            area, buf,
+            "Timezone & NTP",
+            "[Tab] Next field  [↑↓] Select  [Enter] Continue  [Esc] Back",
+            Some((3, 8)),
+        );
+
+        let col = centered_horizontal(content, 60);
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .margin(2)
             .constraints([
-                Constraint::Length(1),   // 0: title
+                Constraint::Length(6),   // 0: continent
                 Constraint::Length(1),   // 1: gap
-                Constraint::Length(6),   // 2: continent
+                Constraint::Length(8),   // 2: city
                 Constraint::Length(1),   // 3: gap
-                Constraint::Length(8),   // 4: city
-                Constraint::Length(1),   // 5: gap
-                Constraint::Length(4),   // 6: ntp toggle
-                Constraint::Length(4),   // 7: ntp server
-                Constraint::Min(0),      // 8: spacer
-                Constraint::Length(1),   // 9: help
+                Constraint::Length(4),   // 4: ntp toggle
+                Constraint::Length(4),   // 5: ntp server
+                Constraint::Min(0),      // 6: spacer
             ])
-            .split(area);
-
-        Paragraph::new("Timezone & NTP")
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-            .alignment(Alignment::Center)
-            .render(chunks[0], buf);
-
-        let col = centered_horizontal(area, 60);
+            .split(content);
 
         macro_rules! col_rect {
             ($chunk:expr) => {
@@ -250,22 +244,17 @@ impl TimezoneState {
             };
         }
 
-        self.continent_list.render(col_rect!(chunks[2]), buf);
-        self.city_list.render(col_rect!(chunks[4]), buf);
-        self.ntp_list.render(col_rect!(chunks[6]), buf);
-        self.ntp_server.render(col_rect!(chunks[7]), buf);
+        self.continent_list.render(col_rect!(chunks[0]), buf);
+        self.city_list.render(col_rect!(chunks[2]), buf);
+        self.ntp_list.render(col_rect!(chunks[4]), buf);
+        self.ntp_server.render(col_rect!(chunks[5]), buf);
 
         // Preview
         let tz = self.timezone_string();
         Paragraph::new(format!("Selected timezone: {}", tz))
             .style(Style::default().fg(Color::Green))
             .alignment(Alignment::Center)
-            .render(chunks[8], buf);
-
-        Paragraph::new("[Tab] Next field  [↑↓] Select  [Enter] Continue  [Esc] Back")
-            .style(Style::default().fg(Color::DarkGray))
-            .alignment(Alignment::Center)
-            .render(chunks[9], buf);
+            .render(chunks[6], buf);
     }
 }
 

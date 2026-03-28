@@ -53,6 +53,9 @@ struct LsblkDevice {
     dev_type: String,
 }
 
+/// Minimum disk size required for installation (8 GB).
+const MIN_DISK_BYTES: u64 = 8_000_000_000;
+
 pub fn detect_disks() -> Result<Vec<DiskInfo>> {
     let output = run_cmd_output("lsblk", &["-Jb", "-o", "NAME,SIZE,MODEL,TYPE"])
         .context("Failed to run lsblk")?;
@@ -61,7 +64,21 @@ pub fn detect_disks() -> Result<Vec<DiskInfo>> {
     let disks = parsed
         .blockdevices
         .into_iter()
-        .filter(|d| d.dev_type == "disk")
+        .filter(|d| {
+            // Only real disks
+            if d.dev_type != "disk" {
+                return false;
+            }
+            // Exclude floppy drives (fd0, fd1, …)
+            if d.name.starts_with("fd") {
+                return false;
+            }
+            // Exclude disks that are too small for installation
+            if d.size < MIN_DISK_BYTES {
+                return false;
+            }
+            true
+        })
         .map(|d| DiskInfo {
             path: PathBuf::from(format!("/dev/{}", d.name)),
             size_bytes: d.size,

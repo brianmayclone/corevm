@@ -308,31 +308,25 @@ pub struct MkdirRequest {
 }
 
 /// POST /api/volumes/{id}/mkdir — create a directory inside a volume.
+/// Directories are virtual — they exist as a zero-byte marker file in file_map.
+/// The browse/readdir logic derives directories from file path prefixes.
 pub async fn mkdir(
     State(state): State<Arc<CoreSanState>>,
     Path(volume_id): Path<String>,
     Json(body): Json<MkdirRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    // Create the directory on all local backends
-    let backends: Vec<String> = {
-        let db = state.db.lock().unwrap();
-        let mut stmt = db.prepare(
-            "SELECT path FROM backends WHERE node_id = ?1 AND status = 'online'"
-        ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
-        let result = stmt.query_map(rusqlite::params![&state.node_id], |row| row.get(0))
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?
-            .filter_map(|r| r.ok()).collect();
-        result
-    };
-
-    for bp in &backends {
-        let dir = std::path::Path::new(bp)
-            .join(".coresan").join(&volume_id).join(&body.path);
-        std::fs::create_dir_all(&dir).ok();
-    }
+    // Create a .dir marker entry in file_map so the directory is visible
+    // even when empty (files with this prefix would also make it visible)
+    let marker_path = format!("{}/.keep", body.path.trim_end_matches('/'));
+    let db = state.db.lock().unwrap();
+    let now = chrono::Utc::now().to_rfc3339();
+    db.execute(
+        "INSERT OR IGNORE INTO file_map (volume_id, rel_path, size_bytes, version, created_at, updated_at)
+         VALUES (?1, ?2, 0, 0, ?3, ?3)",
+        rusqlite::params![&volume_id, &marker_path, &now],
+    ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
 
     tracing::info!("Created directory {}/{}", volume_id, body.path);
-
     Ok(Json(serde_json::json!({ "success": true, "path": body.path })))
 }
 
@@ -396,36 +390,9 @@ pub async fn browse(
         }
     }
 
-    // Also scan backend directories for empty folders (not in file_map)
-    {
-        let backend_paths: Vec<String> = db.prepare(
-            "SELECT path FROM backends WHERE node_id = ?1 AND status = 'online'"
-        ).ok().map(|mut stmt| {
-            stmt.query_map(rusqlite::params![&state.node_id], |row| row.get(0))
-                .ok().map(|rows| rows.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default()
-        }).unwrap_or_default();
-
-        for bp in &backend_paths {
-            let scan_dir = std::path::Path::new(bp)
-                .join(".coresan").join(&volume_id).join(&dir_path);
-            if let Ok(read) = std::fs::read_dir(&scan_dir) {
-                for entry in read.flatten() {
-                    if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        if seen_dirs.insert(name.clone()) {
-                            entries.push(BrowseEntry {
-                                name,
-                                is_dir: true,
-                                size_bytes: 0,
-                                updated_at: String::new(),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // file_map is the single source of truth — no disk scanning
+    // (chunk data lives under .coresan/<volume_id>/<file_id>/chunk_XXXXXX,
+    //  which is internal structure and must NOT be exposed to users)
 
     entries.sort_by(|a, b| {
         b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name))

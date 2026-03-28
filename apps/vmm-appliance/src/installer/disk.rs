@@ -3,7 +3,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
 use crate::common::system::{detect_disks, is_efi_booted, get_ram_bytes, DiskInfo};
-use crate::common::widgets::{SelectList, ConfirmDialog};
+use crate::common::widgets::{SelectList, ConfirmDialog, render_installer_frame};
 use super::{InstallConfig, ScreenResult};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -134,43 +134,31 @@ impl DiskState {
         let area = frame.area();
         let buf = frame.buffer_mut();
 
-        ratatui::widgets::Block::default()
-            .style(Style::default().bg(Color::Black))
-            .render(area, buf);
+        let content = render_installer_frame(
+            area, buf,
+            "Disk Selection",
+            "[↑↓] Select disk  [Enter] Confirm  [Esc] Back",
+            Some((1, 8)),
+        );
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .margin(2)
             .constraints([
-                Constraint::Length(1),   // 0: title
+                Constraint::Min(5),      // 0: disk list
                 Constraint::Length(1),   // 1: gap
-                Constraint::Min(5),      // 2: disk list
-                Constraint::Length(1),   // 3: gap
-                Constraint::Length(1),   // 4: error or blank
-                Constraint::Min(0),      // 5: spacer
-                Constraint::Length(1),   // 6: help
+                Constraint::Length(1),   // 2: error or blank
             ])
-            .split(area);
+            .split(content);
 
-        Paragraph::new("Disk Selection")
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-            .alignment(Alignment::Center)
-            .render(chunks[0], buf);
-
-        let list_area = centered_horizontal(chunks[2], 70);
+        let list_area = centered_horizontal(chunks[0], 70);
         self.list.render(list_area, buf);
 
         if let Some(err) = &self.error {
             Paragraph::new(err.as_str())
                 .style(Style::default().fg(Color::Red))
                 .alignment(Alignment::Center)
-                .render(chunks[4], buf);
+                .render(chunks[2], buf);
         }
-
-        Paragraph::new("[↑↓] Select disk  [Enter] Confirm  [Esc] Back")
-            .style(Style::default().fg(Color::DarkGray))
-            .alignment(Alignment::Center)
-            .render(chunks[6], buf);
 
         if let Some(dialog) = &self.confirm {
             dialog.render(area, buf);

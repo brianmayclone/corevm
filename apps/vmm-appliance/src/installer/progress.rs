@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Gauge, Paragraph, Wrap};
+use ratatui::widgets::{Gauge, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::common::{
@@ -19,6 +19,7 @@ use crate::common::{
         format_partitions, install_grub, is_efi_booted, mount_target, partition_disk, reboot,
         set_hostname, set_locale, set_root_password, set_timezone, unmount_target,
     },
+    widgets::{render_installer_frame, ACCENT_COLOR},
 };
 
 use super::{InstallConfig, ScreenResult};
@@ -410,54 +411,39 @@ impl ProgressState {
         let area = frame.area();
         let buf = frame.buffer_mut();
 
-        // Clear screen
-        Block::default()
-            .style(Style::default().bg(Color::Black))
-            .render(area, buf);
-
         // Error state
         if let Some(ref err) = self.error {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .margin(2)
-                .constraints([
-                    Constraint::Length(1), // title
-                    Constraint::Length(1), // gap
-                    Constraint::Min(0),   // error
-                ])
-                .split(area);
-
-            Paragraph::new("Installation Failed")
-                .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
-                .alignment(Alignment::Center)
-                .render(chunks[0], buf);
+            let content = render_installer_frame(
+                area, buf,
+                "Installation Failed",
+                "",
+                None,
+            );
 
             Paragraph::new(err.as_str())
                 .style(Style::default().fg(Color::Red))
                 .wrap(Wrap { trim: true })
-                .render(chunks[2], buf);
+                .render(content, buf);
             return;
         }
 
         // Completion state
         if self.done {
+            let content = render_installer_frame(
+                area, buf,
+                "Installation Complete",
+                "[Enter] Reboot",
+                None,
+            );
+
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .margin(2)
                 .constraints([
-                    Constraint::Length(1),  // title
-                    Constraint::Length(1),  // gap
-                    Constraint::Min(0),    // message area
-                    Constraint::Length(1),  // gap
-                    Constraint::Length(3),  // progress bar area
-                    Constraint::Length(1),  // help
+                    Constraint::Min(0),    // 0: message area
+                    Constraint::Length(1),  // 1: gap
+                    Constraint::Length(1),  // 2: progress bar
                 ])
-                .split(area);
-
-            Paragraph::new("Installation Complete")
-                .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
-                .alignment(Alignment::Center)
-                .render(chunks[0], buf);
+                .split(content);
 
             let msg = format!(
                 "CoreVM has been successfully installed.\n\n\
@@ -466,52 +452,46 @@ impl ProgressState {
                  After reboot, the DCUI will be available on tty1.",
                 self.done_url
             );
-            let content_area = centered_horizontal(chunks[2], 60);
+            let content_area = centered_horizontal(chunks[0], 60);
             Paragraph::new(msg)
                 .style(Style::default().fg(Color::White))
                 .wrap(Wrap { trim: true })
                 .render(content_area, buf);
 
-            let bar_area = centered_horizontal(chunks[4], 60);
+            let bar_area = centered_horizontal(chunks[2], 60);
             Gauge::default()
                 .gauge_style(Style::default().fg(Color::Green).bg(Color::DarkGray))
                 .percent(100)
                 .label("100%")
                 .render(bar_area, buf);
-
-            Paragraph::new("[Enter] Reboot")
-                .style(Style::default().fg(Color::DarkGray))
-                .alignment(Alignment::Center)
-                .render(chunks[5], buf);
             return;
         }
 
         // Installing state — info slides + progress bar
+        let content = render_installer_frame(
+            area, buf,
+            "Installing CoreVM Appliance",
+            "",
+            None,
+        );
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .margin(2)
             .constraints([
-                Constraint::Length(1),  // 0: title bar
-                Constraint::Length(2),  // 1: gap
-                Constraint::Min(0),    // 2: slide content area
-                Constraint::Length(2),  // 3: gap
-                Constraint::Length(1),  // 4: status text
-                Constraint::Length(1),  // 5: progress bar
-                Constraint::Length(1),  // 6: percentage
+                Constraint::Length(1),  // 0: gap
+                Constraint::Min(0),    // 1: slide content area
+                Constraint::Length(1),  // 2: gap
+                Constraint::Length(1),  // 3: status text
+                Constraint::Length(1),  // 4: progress bar
+                Constraint::Length(1),  // 5: percentage
             ])
-            .split(area);
-
-        // Title
-        Paragraph::new("Installing CoreVM Appliance")
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-            .alignment(Alignment::Center)
-            .render(chunks[0], buf);
+            .split(content);
 
         // Info slide
         let slide_idx = self.current_slide();
         let (slide_title, slide_body) = INFO_SLIDES[slide_idx];
 
-        let slide_area = centered_horizontal(chunks[2], 56);
+        let slide_area = centered_horizontal(chunks[1], 56);
         let slide_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -537,7 +517,6 @@ impl ProgressState {
             .map(|i| if i == slide_idx { "o" } else { "." })
             .collect::<Vec<_>>()
             .join(" ");
-        // Render dots below slide body if space allows
         if slide_chunks[2].height > 6 {
             let dot_area = Rect {
                 y: slide_chunks[2].y + slide_chunks[2].height - 1,
@@ -554,21 +533,21 @@ impl ProgressState {
         Paragraph::new(self.status_text.as_str())
             .style(Style::default().fg(Color::Gray))
             .alignment(Alignment::Center)
-            .render(chunks[4], buf);
+            .render(chunks[3], buf);
 
         // Progress bar
-        let bar_area = centered_horizontal(chunks[5], 60);
+        let bar_area = centered_horizontal(chunks[4], 60);
         let pct = (self.progress * 100.0) as u16;
         Gauge::default()
-            .gauge_style(Style::default().fg(Color::Cyan).bg(Color::DarkGray))
+            .gauge_style(Style::default().fg(ACCENT_COLOR).bg(Color::DarkGray))
             .percent(pct)
             .render(bar_area, buf);
 
         // Percentage text
         Paragraph::new(format!("{}%", pct))
-            .style(Style::default().fg(Color::Cyan))
+            .style(Style::default().fg(ACCENT_COLOR))
             .alignment(Alignment::Center)
-            .render(chunks[6], buf);
+            .render(chunks[5], buf);
     }
 }
 

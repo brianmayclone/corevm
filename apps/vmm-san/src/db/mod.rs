@@ -114,7 +114,7 @@ CREATE TABLE IF NOT EXISTS chunk_replicas (
     node_id         TEXT NOT NULL,              -- which host holds this replica
     state           TEXT NOT NULL DEFAULT 'syncing', -- syncing, synced, stale, error
     synced_at       TEXT,
-    PRIMARY KEY (chunk_id, node_id)
+    PRIMARY KEY (chunk_id, backend_id, node_id)
 );
 
 -- ═══════════════════════════════════════════════════════════════
@@ -281,20 +281,24 @@ fn migrate(db: &Connection) {
     migrate_chunk_replicas(db);
 }
 
-/// Recreate chunk_replicas without FK constraint on backend_id and with PK (chunk_id, node_id).
+/// Recreate chunk_replicas: remove FK on backend_id, use PK (chunk_id, backend_id, node_id).
+/// This allows: multiple local backends per node (mirror) AND remote-tracking with empty backend_id.
 fn migrate_chunk_replicas(db: &Connection) {
-    // Check if we need migration: try to see if the table has the old PK
     let needs_migrate = db.query_row(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='chunk_replicas'",
         [], |row| row.get::<_, String>(0),
-    ).map(|sql| sql.contains("PRIMARY KEY (chunk_id, backend_id)"))
-     .unwrap_or(false);
+    ).map(|sql| {
+        // Migrate if old schema has FK on backend_id or wrong PK
+        sql.contains("REFERENCES backends(id)") ||
+        sql.contains("PRIMARY KEY (chunk_id, backend_id)") && !sql.contains("PRIMARY KEY (chunk_id, backend_id, node_id)") ||
+        sql.contains("PRIMARY KEY (chunk_id, node_id)")
+    }).unwrap_or(false);
 
     if !needs_migrate {
         return;
     }
 
-    tracing::info!("Migrating chunk_replicas: PK (chunk_id, backend_id) → (chunk_id, node_id)");
+    tracing::info!("Migrating chunk_replicas → PK (chunk_id, backend_id, node_id), no FK on backend_id");
 
     db.execute_batch("
         CREATE TABLE IF NOT EXISTS chunk_replicas_new (
@@ -303,7 +307,7 @@ fn migrate_chunk_replicas(db: &Connection) {
             node_id         TEXT NOT NULL,
             state           TEXT NOT NULL DEFAULT 'syncing',
             synced_at       TEXT,
-            PRIMARY KEY (chunk_id, node_id)
+            PRIMARY KEY (chunk_id, backend_id, node_id)
         );
         INSERT OR IGNORE INTO chunk_replicas_new (chunk_id, backend_id, node_id, state, synced_at)
             SELECT chunk_id, backend_id, node_id, state, synced_at FROM chunk_replicas;
@@ -311,7 +315,6 @@ fn migrate_chunk_replicas(db: &Connection) {
         ALTER TABLE chunk_replicas_new RENAME TO chunk_replicas;
     ").ok();
 
-    // Recreate indexes
     db.execute_batch("
         CREATE INDEX IF NOT EXISTS idx_chunk_replicas_chunk ON chunk_replicas(chunk_id);
         CREATE INDEX IF NOT EXISTS idx_chunk_replicas_backend ON chunk_replicas(backend_id);
