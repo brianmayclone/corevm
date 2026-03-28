@@ -1,14 +1,10 @@
 //! Chunk-level API endpoints — receive/serve individual chunks from peers.
 //!
-//! These endpoints are the core of chunk-based replication. Peers push/pull
-//! individual chunks rather than whole files, enabling efficient RAID-aware
-//! distribution across claimed disks.
-//!
 //! Safety guarantees:
 //! - Atomic write (tmp + fsync + rename) prevents partial chunks on disk
-//! - SHA256 verification on write: sender can provide expected hash via header
-//! - Read-back verification after write confirms data integrity
-//! - DB updates wrapped in transactions to prevent inconsistency
+//! - SHA256 verification on write (sender provides expected hash via header)
+//! - Read-back verification after write confirms disk integrity
+//! - DB updates via ChunkService with proper error handling
 //! - No re-replication (peer requests are not forwarded)
 
 use axum::extract::{Path, State};
@@ -18,13 +14,12 @@ use sha2::{Sha256, Digest};
 use std::sync::Arc;
 use crate::state::CoreSanState;
 use crate::storage::chunk;
+use crate::services::chunk::ChunkService;
+use crate::services::file::FileService;
 
-/// Custom header for sender to provide the expected SHA256 of the chunk.
 const EXPECTED_SHA256_HEADER: &str = "X-CoreSAN-Chunk-SHA256";
 
 /// PUT /api/chunks/{volume_id}/{file_id}/{chunk_index} — receive a chunk from a peer.
-/// Stores the chunk on a local backend and updates chunk_replicas.
-/// If the sender provides X-CoreSAN-Chunk-SHA256, the received data is verified against it.
 pub async fn write_chunk(
     headers: HeaderMap,
     State(state): State<Arc<CoreSanState>>,
@@ -36,14 +31,13 @@ pub async fn write_chunk(
     if let Some(expected) = headers.get(EXPECTED_SHA256_HEADER) {
         let expected_str = expected.to_str().unwrap_or("");
         if !expected_str.is_empty() && expected_str != actual_sha256 {
-            tracing::warn!("Chunk write REJECTED: SHA256 mismatch for {}/{}/idx{} expected={} actual={}",
-                volume_id, file_id, chunk_index, expected_str, &actual_sha256[..8]);
+            tracing::warn!("Chunk write REJECTED: SHA256 mismatch {}/{}/idx{}", volume_id, file_id, chunk_index);
             return Err((StatusCode::CONFLICT,
                 format!("SHA256 mismatch: expected {} got {}", expected_str, actual_sha256)));
         }
     }
 
-    // 2. Find a local backend to store the chunk
+    // 2. Find a local backend
     let (backend_id, backend_path) = {
         let db = state.db.lock().unwrap();
         let local_raid: String = db.query_row(
@@ -58,7 +52,7 @@ pub async fn write_chunk(
         placements[0].clone()
     };
 
-    // 3. Atomic write: temp + fsync + rename
+    // 3. Atomic write to disk: temp + fsync + rename
     let path = chunk::chunk_path(&backend_path, &volume_id, file_id, chunk_index);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -69,67 +63,42 @@ pub async fn write_chunk(
     std::fs::write(&tmp, &body)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("write: {}", e)))?;
     if let Ok(f) = std::fs::File::open(&tmp) {
-        f.sync_all().ok();
+        let _ = f.sync_all();
     }
     std::fs::rename(&tmp, &path).map_err(|e| {
-        std::fs::remove_file(&tmp).ok();
+        let _ = std::fs::remove_file(&tmp);
         (StatusCode::INTERNAL_SERVER_ERROR, format!("rename: {}", e))
     })?;
 
-    // 4. Read-back verification — ensure what we wrote is actually on disk
+    // 4. Read-back verification
     let readback_sha = match std::fs::read(&path) {
         Ok(d) => format!("{:x}", Sha256::digest(&d)),
         Err(e) => {
-            std::fs::remove_file(&path).ok();
-            return Err((StatusCode::INTERNAL_SERVER_ERROR,
-                format!("readback failed: {}", e)));
+            let _ = std::fs::remove_file(&path);
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("readback failed: {}", e)));
         }
     };
-
     if readback_sha != actual_sha256 {
-        std::fs::remove_file(&path).ok();
-        tracing::error!("Chunk write: readback SHA256 mismatch! Disk may be failing. {}/{}/idx{}",
-            volume_id, file_id, chunk_index);
-        return Err((StatusCode::INTERNAL_SERVER_ERROR,
-            "Readback verification failed — possible disk error".into()));
+        let _ = std::fs::remove_file(&path);
+        tracing::error!("write_chunk: readback SHA256 mismatch! Disk error? {}/{}/idx{}", volume_id, file_id, chunk_index);
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, "Readback verification failed".into()));
     }
 
-    // 5. Update database in a transaction
+    // 5. Update DB via ChunkService
     {
         let db = state.db.lock().unwrap();
-        let chunk_size = body.len() as u64;
         let vol_chunk_size = db.query_row(
             "SELECT chunk_size_bytes FROM volumes WHERE id = ?1",
             rusqlite::params![&volume_id], |row| row.get::<_, u64>(0),
         ).unwrap_or(chunk::DEFAULT_CHUNK_SIZE);
-        let offset = chunk_index as u64 * vol_chunk_size;
-        let now = chrono::Utc::now().to_rfc3339();
 
-        db.execute("BEGIN IMMEDIATE", []).ok();
-
-        db.execute(
-            "INSERT OR IGNORE INTO file_chunks (file_id, chunk_index, offset_bytes, size_bytes)
-             VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![file_id, chunk_index, offset, chunk_size],
-        ).ok();
-
-        if let Ok(chunk_id) = db.query_row(
-            "SELECT id FROM file_chunks WHERE file_id = ?1 AND chunk_index = ?2",
-            rusqlite::params![file_id, chunk_index], |row| row.get::<_, i64>(0),
+        if let Err(e) = ChunkService::receive_chunk(
+            &db, file_id, chunk_index, body.len() as u64,
+            vol_chunk_size, &actual_sha256, &backend_id, &state.node_id,
         ) {
-            db.execute(
-                "UPDATE file_chunks SET sha256 = ?1, size_bytes = ?2 WHERE id = ?3",
-                rusqlite::params![&actual_sha256, chunk_size, chunk_id],
-            ).ok();
-
-            db.execute(
-                "INSERT OR REPLACE INTO chunk_replicas (chunk_id, backend_id, node_id, state, synced_at)
-                 VALUES (?1, ?2, ?3, 'synced', ?4)",
-                rusqlite::params![chunk_id, &backend_id, &state.node_id, &now],
-            ).ok();
+            tracing::error!("write_chunk DB error: {}", e);
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("DB: {}", e)));
         }
-
-        db.execute("COMMIT", []).ok();
     }
 
     tracing::info!("Received chunk {}/{}/idx{} ({} bytes, sha256={})",
@@ -138,12 +107,10 @@ pub async fn write_chunk(
 }
 
 /// GET /api/chunks/{volume_id}/{file_id}/{chunk_index} — serve a chunk to a peer.
-/// Reads from local backends, verifies SHA256 before serving.
 pub async fn read_chunk(
     State(state): State<Arc<CoreSanState>>,
     Path((volume_id, file_id, chunk_index)): Path<(String, i64, u32)>,
 ) -> Result<Vec<u8>, (StatusCode, String)> {
-    // Find local synced replica(s) with expected SHA256
     let replicas: Vec<(String, String, String)> = {
         let db = state.db.lock().unwrap();
         let mut stmt = db.prepare(
@@ -163,19 +130,15 @@ pub async fn read_chunk(
     for (backend_path, backend_id, expected_sha256) in &replicas {
         let path = chunk::chunk_path(backend_path, &volume_id, file_id, chunk_index);
         if let Ok(data) = std::fs::read(&path) {
-            // Verify SHA256 before serving — never send corrupt data to peers
+            // Verify SHA256 before serving
             if !expected_sha256.is_empty() {
                 let actual = format!("{:x}", Sha256::digest(&data));
                 if actual != *expected_sha256 {
                     tracing::warn!("read_chunk: SHA256 mismatch on {}, marking error", path.display());
                     let db = state.db.lock().unwrap();
-                    db.execute(
-                        "UPDATE chunk_replicas SET state = 'error' WHERE chunk_id = (
-                            SELECT id FROM file_chunks WHERE file_id = ?1 AND chunk_index = ?2
-                        ) AND backend_id = ?3",
-                        rusqlite::params![file_id, chunk_index, backend_id],
-                    ).ok();
-                    continue; // Try next replica
+                    log_err!(ChunkService::mark_replica_error_by_backend(&db, file_id, chunk_index, backend_id),
+                        "read_chunk: mark error");
+                    continue;
                 }
             }
             return Ok(data);
@@ -185,9 +148,7 @@ pub async fn read_chunk(
     Err((StatusCode::NOT_FOUND, format!("Chunk {}/{}/idx{} not found locally", volume_id, file_id, chunk_index)))
 }
 
-/// POST /api/file-meta/sync — receive file metadata from a peer (leader or writer).
-/// Creates/updates file_map and file_chunks entries so this node knows about the file.
-/// Uses transactions to ensure atomicity.
+/// POST /api/file-meta/sync — receive file metadata from a peer.
 pub async fn sync_file_meta(
     State(state): State<Arc<CoreSanState>>,
     Json(meta): Json<serde_json::Value>,
@@ -204,48 +165,11 @@ pub async fn sync_file_meta(
         .unwrap_or(chunk::DEFAULT_CHUNK_SIZE);
 
     let db = state.db.lock().unwrap();
-    let now = chrono::Utc::now().to_rfc3339();
 
-    db.execute("BEGIN IMMEDIATE", []).ok();
+    FileService::sync_metadata(
+        &db, volume_id, rel_path, size_bytes, sha256, version, chunk_count, chunk_size_bytes,
+    ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
 
-    // Upsert file_map — only update if incoming version is newer
-    db.execute(
-        "INSERT INTO file_map (volume_id, rel_path, size_bytes, sha256, version, chunk_count, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
-         ON CONFLICT(volume_id, rel_path) DO UPDATE SET
-            size_bytes = CASE WHEN excluded.version > file_map.version THEN excluded.size_bytes ELSE file_map.size_bytes END,
-            sha256 = CASE WHEN excluded.version > file_map.version THEN excluded.sha256 ELSE file_map.sha256 END,
-            version = MAX(file_map.version, excluded.version),
-            chunk_count = CASE WHEN excluded.version > file_map.version THEN excluded.chunk_count ELSE MAX(file_map.chunk_count, excluded.chunk_count) END,
-            updated_at = CASE WHEN excluded.version > file_map.version THEN excluded.updated_at ELSE file_map.updated_at END",
-        rusqlite::params![volume_id, rel_path, size_bytes, sha256, version, chunk_count, &now],
-    ).map_err(|e| {
-        db.execute("ROLLBACK", []).ok();
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("file_map sync: {}", e))
-    })?;
-
-    // Ensure file_chunks entries exist for all chunks
-    let local_file_id: i64 = db.query_row(
-        "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
-        rusqlite::params![volume_id, rel_path], |row| row.get(0),
-    ).map_err(|e| {
-        db.execute("ROLLBACK", []).ok();
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("get file_id: {}", e))
-    })?;
-
-    for ci in 0..chunk_count {
-        let offset = ci as u64 * chunk_size_bytes;
-        let size = chunk_size_bytes.min(size_bytes.saturating_sub(offset));
-        db.execute(
-            "INSERT OR IGNORE INTO file_chunks (file_id, chunk_index, offset_bytes, size_bytes)
-             VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![local_file_id, ci, offset, size],
-        ).ok();
-    }
-
-    db.execute("COMMIT", []).ok();
-
-    tracing::info!("Synced file metadata: {}/{} v{} ({} chunks)",
-        volume_id, rel_path, version, chunk_count);
+    tracing::info!("Synced file metadata: {}/{} v{} ({} chunks)", volume_id, rel_path, version, chunk_count);
     Ok(StatusCode::OK)
 }

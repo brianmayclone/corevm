@@ -7,15 +7,16 @@ pub struct BenchmarkService;
 impl BenchmarkService {
     pub fn store_result(db: &Connection, from_node: &str, to_node: &str,
                         bandwidth: f64, latency: f64, jitter: f64, loss: f64, test_size: i64) {
-        db.execute(
+        log_err!(db.execute(
             "INSERT INTO benchmark_results (from_node_id, to_node_id, bandwidth_mbps, latency_us, jitter_us, packet_loss_pct, test_size_bytes)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![from_node, to_node, bandwidth, latency, jitter, loss, test_size],
-        ).ok();
+        ), "BenchmarkService::store_result");
     }
 
     pub fn cleanup_old(db: &Connection) {
-        db.execute("DELETE FROM benchmark_results WHERE measured_at < datetime('now', '-24 hours')", []).ok();
+        log_err!(db.execute("DELETE FROM benchmark_results WHERE measured_at < datetime('now', '-24 hours')", []),
+            "BenchmarkService::cleanup_old");
     }
 
     pub fn get_recent_summary(db: &Connection) -> Option<(f64, f64, Option<String>, String)> {

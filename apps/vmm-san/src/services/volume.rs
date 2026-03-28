@@ -66,15 +66,18 @@ impl VolumeService {
     }
 
     pub fn update_ftt(db: &Connection, id: &str, ftt: u32) {
-        db.execute("UPDATE volumes SET ftt = ?1 WHERE id = ?2", rusqlite::params![ftt, id]).ok();
+        log_err!(db.execute("UPDATE volumes SET ftt = ?1 WHERE id = ?2", rusqlite::params![ftt, id]),
+            "VolumeService::update_ftt");
     }
 
     pub fn update_local_raid(db: &Connection, id: &str, raid: &str) {
-        db.execute("UPDATE volumes SET local_raid = ?1 WHERE id = ?2", rusqlite::params![raid, id]).ok();
+        log_err!(db.execute("UPDATE volumes SET local_raid = ?1 WHERE id = ?2", rusqlite::params![raid, id]),
+            "VolumeService::update_local_raid");
     }
 
     pub fn update_status(db: &Connection, id: &str, status: &str) {
-        db.execute("UPDATE volumes SET status = ?1 WHERE id = ?2", rusqlite::params![status, id]).ok();
+        log_err!(db.execute("UPDATE volumes SET status = ?1 WHERE id = ?2", rusqlite::params![status, id]),
+            "VolumeService::update_status");
     }
 
     pub fn exists(db: &Connection, id: &str) -> bool {

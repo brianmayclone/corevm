@@ -41,25 +41,11 @@ pub fn spawn(state: Arc<CoreSanState>) {
 }
 
 fn run_rebalance(state: &CoreSanState) {
+    use crate::services::chunk::ChunkService;
+
     let db = state.db.lock().unwrap();
 
-    // Find chunk_replicas on offline/degraded/draining backends that need relocation
-    let chunks_to_move: Vec<(i64, i64, u32, String, String, String)> = {
-        let mut stmt = db.prepare(
-            "SELECT cr.chunk_id, fc.file_id, fc.chunk_index, cr.backend_id, b.path, fm.volume_id
-             FROM chunk_replicas cr
-             JOIN file_chunks fc ON fc.id = cr.chunk_id
-             JOIN file_map fm ON fm.id = fc.file_id
-             JOIN backends b ON b.id = cr.backend_id
-             WHERE cr.node_id = ?1 AND b.status IN ('offline', 'degraded', 'draining')
-               AND cr.state = 'synced'
-             LIMIT ?2"
-        ).unwrap();
-        stmt.query_map(
-            rusqlite::params![&state.node_id, MAX_CHUNKS_PER_CYCLE],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
-        ).unwrap().filter_map(|r| r.ok()).collect()
-    };
+    let chunks_to_move = ChunkService::find_chunks_on_bad_backends(&db, &state.node_id, MAX_CHUNKS_PER_CYCLE);
 
     if chunks_to_move.is_empty() {
         return;
@@ -70,8 +56,11 @@ fn run_rebalance(state: &CoreSanState) {
     let mut moved = 0u32;
     let mut failed = 0u32;
 
-    for (chunk_id, file_id, chunk_index, old_backend_id, old_backend_path, volume_id) in &chunks_to_move {
-        // Find a healthy target backend on this node (backends are node-wide, not volume-specific)
+    for ctm in &chunks_to_move {
+        let (chunk_id, file_id, chunk_index) = (ctm.chunk_id, ctm.file_id, ctm.chunk_index);
+        let (old_backend_id, old_backend_path, volume_id) = (&ctm.backend_id, &ctm.backend_path, &ctm.volume_id);
+
+        // Find a healthy target backend on this node
         let target = db.query_row(
             "SELECT id, path FROM backends
              WHERE node_id = ?1 AND status = 'online' AND id != ?2
@@ -90,16 +79,14 @@ fn run_rebalance(state: &CoreSanState) {
         };
 
         // Read source chunk
-        let src = chunk::chunk_path(old_backend_path, volume_id, *file_id, *chunk_index);
+        let src = chunk::chunk_path(old_backend_path, volume_id, file_id, chunk_index);
         let src_data = match std::fs::read(&src) {
             Ok(d) => d,
             Err(e) => {
                 tracing::warn!("Rebalancer: cannot read source chunk {}: {}", src.display(), e);
                 // Mark source as error since it's unreadable
-                db.execute(
-                    "UPDATE chunk_replicas SET state = 'error' WHERE chunk_id = ?1 AND backend_id = ?2",
-                    rusqlite::params![chunk_id, old_backend_id],
-                ).ok();
+                log_err!(ChunkService::mark_replica_error(&db, chunk_id, &state.node_id),
+                    "rebalancer: mark unreadable chunk");
                 failed += 1;
                 continue;
             }
@@ -108,7 +95,7 @@ fn run_rebalance(state: &CoreSanState) {
         let src_sha = format!("{:x}", Sha256::digest(&src_data));
 
         // Atomic write to target: tmp → fsync → rename
-        let dst = chunk::chunk_path(&target_path, volume_id, *file_id, *chunk_index);
+        let dst = chunk::chunk_path(&target_path, volume_id, file_id, chunk_index);
         if let Some(parent) = dst.parent() {
             if std::fs::create_dir_all(parent).is_err() {
                 failed += 1;
@@ -150,22 +137,14 @@ fn run_rebalance(state: &CoreSanState) {
             continue;
         }
 
-        // Copy verified — update DB atomically
-        let now = chrono::Utc::now().to_rfc3339();
-        db.execute("BEGIN IMMEDIATE", []).ok();
-
-        db.execute(
-            "INSERT OR REPLACE INTO chunk_replicas (chunk_id, backend_id, node_id, state, synced_at)
-             VALUES (?1, ?2, ?3, 'synced', ?4)",
-            rusqlite::params![chunk_id, &target_id, &state.node_id, &now],
-        ).ok();
-
-        db.execute(
-            "DELETE FROM chunk_replicas WHERE chunk_id = ?1 AND backend_id = ?2",
-            rusqlite::params![chunk_id, old_backend_id],
-        ).ok();
-
-        db.execute("COMMIT", []).ok();
+        // Copy verified — update DB atomically via ChunkService
+        if let Err(e) = ChunkService::move_replica(&db, chunk_id, old_backend_id, &target_id, &state.node_id) {
+            tracing::error!("Rebalancer: DB move_replica failed for chunk {}: {}", chunk_id, e);
+            failed += 1;
+            // Remove the destination copy since DB wasn't updated
+            let _ = std::fs::remove_file(&dst);
+            continue;
+        }
 
         // Only NOW remove the old file — DB already points to the new location
         std::fs::remove_file(&src).ok();

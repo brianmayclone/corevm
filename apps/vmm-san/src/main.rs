@@ -5,6 +5,17 @@
 //! on vmm-cluster. The cluster can discover and manage CoreSAN through
 //! vmm-server, but CoreSAN operates autonomously.
 
+/// Log errors instead of silently discarding them.
+/// Use `log_err!(expr, "context")` instead of `expr.ok()` for any operation that can fail.
+#[macro_export]
+macro_rules! log_err {
+    ($expr:expr, $ctx:expr) => {
+        if let Err(e) = $expr {
+            tracing::error!("{}: {}", $ctx, e);
+        }
+    };
+}
+
 mod config;
 mod state;
 mod db;

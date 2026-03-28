@@ -139,16 +139,12 @@ async fn run_push_replicator(
                     Ok(_) => {
                         // Record in our local DB that this peer now has the chunk
                         let db = state.db.lock().unwrap();
-                        if let Ok(chunk_id) = db.query_row(
-                            "SELECT id FROM file_chunks WHERE file_id = ?1 AND chunk_index = ?2",
-                            rusqlite::params![event.file_id, chunk_index], |row| row.get::<_, i64>(0),
+                        if let Ok(chunk_id) = crate::services::chunk::ChunkService::get_chunk_id(
+                            &db, event.file_id, *chunk_index,
                         ) {
-                            let now = chrono::Utc::now().to_rfc3339();
-                            db.execute(
-                                "INSERT OR REPLACE INTO chunk_replicas (chunk_id, backend_id, node_id, state, synced_at)
-                                 VALUES (?1, ?2, ?3, 'synced', ?4)",
-                                rusqlite::params![chunk_id, "", target_node_id, &now],
-                            ).ok();
+                            log_err!(crate::services::chunk::ChunkService::track_remote_replica(
+                                &db, chunk_id, target_node_id,
+                            ), "push_replicator: track remote replica");
                         }
                         drop(db);
                         tracing::info!("Replicated chunk {}/{}/idx{} → {}",

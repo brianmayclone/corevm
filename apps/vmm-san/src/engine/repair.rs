@@ -34,24 +34,11 @@ pub fn spawn(state: Arc<CoreSanState>) {
 const MAX_REPAIRS_PER_CYCLE: u32 = 30;
 
 async fn run_chunk_repair(state: &CoreSanState, client: &PeerClient) {
-    let under_replicated: Vec<(i64, i64, u32, String, u32, u32)> = {
+    use crate::services::chunk::ChunkService;
+
+    let under_replicated = {
         let db = state.db.lock().unwrap();
-
-        // Find chunks where the number of distinct nodes with synced replicas < FTT+1
-        let mut stmt = db.prepare(
-            "SELECT fc.id, fc.file_id, fc.chunk_index, fm.volume_id, v.ftt,
-                    (SELECT COUNT(DISTINCT cr.node_id) FROM chunk_replicas cr
-                     WHERE cr.chunk_id = fc.id AND cr.state = 'synced') AS synced_nodes
-             FROM file_chunks fc
-             JOIN file_map fm ON fm.id = fc.file_id
-             JOIN volumes v ON v.id = fm.volume_id
-             WHERE synced_nodes < (v.ftt + 1)
-             LIMIT ?1"
-        ).unwrap();
-
-        stmt.query_map(rusqlite::params![MAX_REPAIRS_PER_CYCLE], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
-        }).unwrap().filter_map(|r| r.ok()).collect()
+        ChunkService::find_under_replicated(&db, MAX_REPAIRS_PER_CYCLE)
     };
 
     if under_replicated.is_empty() {
@@ -88,19 +75,11 @@ async fn repair_single_chunk(
     chunk_index: u32,
     volume_id: &str,
 ) -> bool {
-    // Find a source node that has a synced copy — prefer replicas that passed
-    // a recent integrity check (have a sha256 stored).
+    use crate::services::chunk::ChunkService;
+
     let source_node_id = {
         let db = state.db.lock().unwrap();
-        db.query_row(
-            "SELECT cr.node_id FROM chunk_replicas cr
-             JOIN file_chunks fc ON fc.id = cr.chunk_id
-             WHERE cr.chunk_id = ?1 AND cr.state = 'synced'
-             ORDER BY CASE WHEN fc.sha256 != '' THEN 0 ELSE 1 END
-             LIMIT 1",
-            rusqlite::params![chunk_id],
-            |row| row.get::<_, String>(0),
-        ).ok()
+        ChunkService::find_chunk_source(&db, chunk_id)
     };
 
     let source_node_id = match source_node_id {
@@ -111,14 +90,9 @@ async fn repair_single_chunk(
         }
     };
 
-    // Find nodes that already have this chunk
     let nodes_with_chunk: Vec<String> = {
         let db = state.db.lock().unwrap();
-        let mut stmt = db.prepare(
-            "SELECT DISTINCT node_id FROM chunk_replicas WHERE chunk_id = ?1 AND state = 'synced'"
-        ).unwrap();
-        stmt.query_map(rusqlite::params![chunk_id], |row| row.get(0))
-            .unwrap().filter_map(|r| r.ok()).collect()
+        ChunkService::nodes_with_chunk(&db, chunk_id)
     };
 
     // Try local node first (if we don't have it)
@@ -135,13 +109,9 @@ async fn repair_single_chunk(
         // Pull the chunk via the chunk API endpoint (peer verifies SHA256 before serving)
         match client.pull_chunk(&peer_addr, volume_id, file_id, chunk_index).await {
             Ok(data) => {
-                // Verify received data against expected SHA256 if known
                 let expected_sha = {
                     let db = state.db.lock().unwrap();
-                    db.query_row(
-                        "SELECT sha256 FROM file_chunks WHERE id = ?1",
-                        rusqlite::params![chunk_id], |row| row.get::<_, String>(0),
-                    ).ok().filter(|s| !s.is_empty())
+                    ChunkService::get_chunk_sha256(&db, chunk_id)
                 };
 
                 use sha2::{Sha256, Digest};
@@ -180,21 +150,12 @@ async fn repair_single_chunk(
                         }
                         if std::fs::rename(&tmp, &dst).is_ok() {
                             let db = state.db.lock().unwrap();
-                            let now = chrono::Utc::now().to_rfc3339();
-                            db.execute("BEGIN IMMEDIATE", []).ok();
-                            db.execute(
-                                "INSERT OR REPLACE INTO chunk_replicas (chunk_id, backend_id, node_id, state, synced_at)
-                                 VALUES (?1, ?2, ?3, 'synced', ?4)",
-                                rusqlite::params![chunk_id, &backend_id, &state.node_id, &now],
-                            ).ok();
-                            // Update SHA256 if we didn't have one
+                            log_err!(ChunkService::set_replica_synced(&db, chunk_id, &backend_id, &state.node_id),
+                                "repair: set_replica_synced");
                             if expected_sha.is_none() {
-                                db.execute(
-                                    "UPDATE file_chunks SET sha256 = ?1 WHERE id = ?2",
-                                    rusqlite::params![&actual_sha, chunk_id],
-                                ).ok();
+                                log_err!(ChunkService::update_chunk_sha256_by_id(&db, chunk_id, &actual_sha),
+                                    "repair: update_chunk_sha256");
                             }
-                            db.execute("COMMIT", []).ok();
                             tracing::info!("Repair: pulled chunk {} (file {}, idx {}) from {} (verified sha={})",
                                 chunk_id, file_id, chunk_index, source_node_id, &actual_sha[..8]);
                             return true;
@@ -214,15 +175,7 @@ async fn repair_single_chunk(
     // We have it locally — verify integrity before pushing to peer
     let local_chunk_info = {
         let db = state.db.lock().unwrap();
-        db.query_row(
-            "SELECT b.path, COALESCE(fc.sha256, '') FROM chunk_replicas cr
-             JOIN backends b ON b.id = cr.backend_id
-             JOIN file_chunks fc ON fc.id = cr.chunk_id
-             WHERE cr.chunk_id = ?1 AND cr.node_id = ?2 AND cr.state = 'synced'
-             LIMIT 1",
-            rusqlite::params![chunk_id, &state.node_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        ).ok()
+        ChunkService::find_local_chunk_path(&db, chunk_id, &state.node_id)
     };
 
     let (backend_path, expected_sha) = match local_chunk_info {
@@ -244,10 +197,8 @@ async fn repair_single_chunk(
             tracing::warn!("Repair: LOCAL chunk {} is corrupt (expected={}, actual={}) — skipping push",
                 chunk_id, &expected_sha[..8], &local_sha[..8]);
             let db = state.db.lock().unwrap();
-            db.execute(
-                "UPDATE chunk_replicas SET state = 'error' WHERE chunk_id = ?1 AND node_id = ?2",
-                rusqlite::params![chunk_id, &state.node_id],
-            ).ok();
+            log_err!(ChunkService::mark_replica_error(&db, chunk_id, &state.node_id),
+                "repair: mark local chunk error");
             return false;
         }
     }
@@ -263,13 +214,8 @@ async fn repair_single_chunk(
             // Record in our LOCAL DB that this peer now has the chunk.
             // Without this, the repair engine would keep thinking the chunk is under-replicated.
             let db = state.db.lock().unwrap();
-            let now = chrono::Utc::now().to_rfc3339();
-            // Use a placeholder backend_id for remote nodes (the actual backend_id is in their DB)
-            db.execute(
-                "INSERT OR REPLACE INTO chunk_replicas (chunk_id, backend_id, node_id, state, synced_at)
-                 VALUES (?1, ?2, ?3, 'synced', ?4)",
-                rusqlite::params![chunk_id, "", &target_node_id, &now],
-            ).ok();
+            log_err!(ChunkService::track_remote_replica(&db, chunk_id, &target_node_id),
+                "repair: track remote replica");
 
             tracing::info!("Repair: pushed chunk {} (file {}, idx {}) to {} (verified, tracked locally)",
                 chunk_id, file_id, chunk_index, target_node_id);
@@ -282,24 +228,14 @@ async fn repair_single_chunk(
 
 /// Update protection_status for all files based on current chunk replica state.
 fn update_protection_status(state: &CoreSanState) {
-    let db = state.db.lock().unwrap();
+    use crate::services::file::FileService;
 
-    // Get all files with their volume's FTT
-    let files: Vec<(i64, String, u32)> = {
-        let mut stmt = db.prepare(
-            "SELECT fm.id, fm.volume_id, v.ftt FROM file_map fm
-             JOIN volumes v ON v.id = fm.volume_id
-             WHERE fm.chunk_count > 0"
-        ).unwrap();
-        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-            .unwrap().filter_map(|r| r.ok()).collect()
-    };
+    let db = state.db.lock().unwrap();
+    let files = FileService::list_files_with_ftt(&db);
 
     for (file_id, _volume_id, ftt) in files {
         let status = chunk::compute_protection_status(&db, file_id, ftt);
-        db.execute(
-            "UPDATE file_map SET protection_status = ?1 WHERE id = ?2",
-            rusqlite::params![status, file_id],
-        ).ok();
+        log_err!(FileService::update_protection_status(&db, file_id, status),
+            "repair: update_protection_status");
     }
 }

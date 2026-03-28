@@ -289,18 +289,11 @@ pub async fn delete(
             }
         }
 
-        // Remove from database (CASCADE handles file_chunks → chunk_replicas)
-        db.execute("DELETE FROM integrity_log WHERE file_id = ?1", rusqlite::params![fid]).ok();
-        db.execute("DELETE FROM chunk_replicas WHERE chunk_id IN (SELECT id FROM file_chunks WHERE file_id = ?1)", rusqlite::params![fid]).ok();
-        db.execute("DELETE FROM file_chunks WHERE file_id = ?1", rusqlite::params![fid]).ok();
-        db.execute("DELETE FROM file_replicas WHERE file_id = ?1", rusqlite::params![fid]).ok();
-        db.execute("DELETE FROM write_log WHERE file_id = ?1", rusqlite::params![fid]).ok();
     }
 
-    db.execute(
-        "DELETE FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
-        rusqlite::params![&volume_id, &rel_path],
-    ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+    // Delete file + all chunks/replicas atomically via FileService
+    crate::services::file::FileService::delete(&db, &volume_id, &rel_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
 
     tracing::info!("Deleted file {}/{} (chunks removed)", volume_id, rel_path);
 

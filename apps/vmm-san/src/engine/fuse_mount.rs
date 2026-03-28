@@ -778,18 +778,10 @@ impl Filesystem for CoreSanFS {
                     }
                 }
 
-                // Clean up DB records
-                db.execute("DELETE FROM integrity_log WHERE file_id = ?1", rusqlite::params![fid]).ok();
-                db.execute("DELETE FROM chunk_replicas WHERE chunk_id IN (SELECT id FROM file_chunks WHERE file_id = ?1)", rusqlite::params![fid]).ok();
-                db.execute("DELETE FROM file_chunks WHERE file_id = ?1", rusqlite::params![fid]).ok();
-                db.execute("DELETE FROM file_replicas WHERE file_id = ?1", rusqlite::params![fid]).ok();
-                db.execute("DELETE FROM write_log WHERE file_id = ?1", rusqlite::params![fid]).ok();
+                // Clean up DB records via FileService
+                log_err!(crate::services::file::FileService::delete(&db, &self.volume_id, &rel_path),
+                    "FUSE unlink: FileService::delete");
             }
-
-            db.execute(
-                "DELETE FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
-                rusqlite::params![&self.volume_id, &rel_path],
-            ).ok();
 
             tracing::info!("FUSE unlink: deleted '{}' (chunks removed)", rel_path);
         }

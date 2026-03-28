@@ -1,4 +1,8 @@
-//! Database schema, migrations, and seed data for CoreSAN.
+//! Database schema, migrations, helpers, and seed data for CoreSAN.
+
+pub mod helpers;
+
+pub use helpers::{DbResult, DbError, DbContext, db_transaction, db_exec};
 
 use rusqlite::Connection;
 

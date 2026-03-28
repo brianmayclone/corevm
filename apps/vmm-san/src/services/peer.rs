@@ -1,6 +1,7 @@
 //! Peer service — all database operations for peers.
 
 use rusqlite::Connection;
+use crate::db::{DbResult, DbContext};
 
 pub struct PeerService;
 
@@ -15,13 +16,14 @@ pub struct PeerInfo {
 }
 
 impl PeerService {
-    pub fn upsert(db: &Connection, node_id: &str, address: &str, peer_port: u16, hostname: &str) {
+    pub fn upsert(db: &Connection, node_id: &str, address: &str, peer_port: u16, hostname: &str) -> DbResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
         db.execute(
             "INSERT OR REPLACE INTO peers (node_id, address, peer_port, hostname, status, last_heartbeat, joined_at)
              VALUES (?1, ?2, ?3, ?4, 'online', ?5, ?5)",
             rusqlite::params![node_id, address, peer_port, hostname, &now],
-        ).ok();
+        ).ctx("PeerService::upsert")?;
+        Ok(())
     }
 
     pub fn list(db: &Connection) -> Vec<PeerInfo> {
@@ -34,23 +36,39 @@ impl PeerService {
         })).unwrap().filter_map(|r| r.ok()).collect()
     }
 
-    pub fn delete(db: &Connection, node_id: &str) {
-        db.execute("DELETE FROM peers WHERE node_id = ?1", rusqlite::params![node_id]).ok();
+    pub fn delete(db: &Connection, node_id: &str) -> DbResult<()> {
+        db.execute("DELETE FROM peers WHERE node_id = ?1", rusqlite::params![node_id])
+            .ctx("PeerService::delete")?;
+        Ok(())
     }
 
-    pub fn set_status(db: &Connection, node_id: &str, status: &str) {
-        db.execute("UPDATE peers SET status = ?1 WHERE node_id = ?2", rusqlite::params![status, node_id]).ok();
+    pub fn set_status(db: &Connection, node_id: &str, status: &str) -> DbResult<()> {
+        db.execute("UPDATE peers SET status = ?1 WHERE node_id = ?2",
+            rusqlite::params![status, node_id])
+            .ctx("PeerService::set_status")?;
+        Ok(())
     }
 
-    pub fn update_heartbeat(db: &Connection, node_id: &str) {
+    pub fn update_heartbeat(db: &Connection, node_id: &str) -> DbResult<()> {
         let now = chrono::Utc::now().to_rfc3339();
         db.execute(
             "UPDATE peers SET status = 'online', last_heartbeat = ?1 WHERE node_id = ?2",
             rusqlite::params![&now, node_id],
-        ).ok();
+        ).ctx("PeerService::update_heartbeat")?;
+        Ok(())
     }
 
-    pub fn mark_backends_offline(db: &Connection, node_id: &str) {
-        db.execute("UPDATE backends SET status = 'offline' WHERE node_id = ?1", rusqlite::params![node_id]).ok();
+    pub fn mark_backends_offline(db: &Connection, node_id: &str) -> DbResult<()> {
+        db.execute("UPDATE backends SET status = 'offline' WHERE node_id = ?1",
+            rusqlite::params![node_id])
+            .ctx("PeerService::mark_backends_offline")?;
+        Ok(())
+    }
+
+    pub fn get_hostname(db: &Connection, node_id: &str) -> Option<String> {
+        db.query_row(
+            "SELECT hostname FROM peers WHERE node_id = ?1",
+            rusqlite::params![node_id], |row| row.get(0),
+        ).ok()
     }
 }

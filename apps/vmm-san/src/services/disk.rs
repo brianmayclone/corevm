@@ -30,18 +30,20 @@ impl DiskService {
     }
 
     pub fn set_mounted(db: &Connection, id: &str, device_uuid: &str, backend_id: &str) {
-        db.execute(
+        log_err!(db.execute(
             "UPDATE claimed_disks SET device_uuid = ?1, status = 'mounted', backend_id = ?2 WHERE id = ?3",
             rusqlite::params![device_uuid, backend_id, id],
-        ).ok();
+        ), "DiskService::set_mounted");
     }
 
     pub fn set_error(db: &Connection, id: &str) {
-        db.execute("UPDATE claimed_disks SET status = 'error' WHERE id = ?1", rusqlite::params![id]).ok();
+        log_err!(db.execute("UPDATE claimed_disks SET status = 'error' WHERE id = ?1",
+            rusqlite::params![id]), "DiskService::set_error");
     }
 
     pub fn set_released(db: &Connection, id: &str) {
-        db.execute("UPDATE claimed_disks SET status = 'released' WHERE id = ?1", rusqlite::params![id]).ok();
+        log_err!(db.execute("UPDATE claimed_disks SET status = 'released' WHERE id = ?1",
+            rusqlite::params![id]), "DiskService::set_released");
     }
 
     pub fn get_mounted(db: &Connection, device_path: &str) -> Option<ClaimedDiskInfo> {

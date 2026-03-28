@@ -95,18 +95,18 @@ impl BackendService {
 
     pub fn update_stats(db: &Connection, id: &str, total: u64, free: u64, status: &str) {
         let now = chrono::Utc::now().to_rfc3339();
-        db.execute(
+        log_err!(db.execute(
             "UPDATE backends SET total_bytes = ?1, free_bytes = ?2, status = ?3, last_check = ?4 WHERE id = ?5",
             rusqlite::params![total, free, status, &now, id],
-        ).ok();
+        ), "BackendService::update_stats");
     }
 
     pub fn set_status(db: &Connection, id: &str, status: &str) {
-        db.execute("UPDATE backends SET status = ?1 WHERE id = ?2", rusqlite::params![status, id]).ok();
+        log_err!(db.execute("UPDATE backends SET status = ?1 WHERE id = ?2", rusqlite::params![status, id]), "BackendService::set_status");
     }
 
     pub fn delete(db: &Connection, id: &str) {
-        db.execute("DELETE FROM backends WHERE id = ?1", rusqlite::params![id]).ok();
+        log_err!(db.execute("DELETE FROM backends WHERE id = ?1", rusqlite::params![id]), "BackendService::delete");
     }
 
     pub fn get_best_for_node(db: &Connection, node_id: &str) -> Option<(String, String)> {

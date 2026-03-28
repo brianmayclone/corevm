@@ -220,12 +220,11 @@ pub fn atomic_write(
         ).unwrap_or(0);
         if old_size > 0 {
             // Delete old chunks — we're replacing the entire file
-            db.execute(
-                "DELETE FROM chunk_replicas WHERE chunk_id IN (SELECT id FROM file_chunks WHERE file_id = ?1)",
-                rusqlite::params![file_id],
-            ).ok();
-            db.execute("DELETE FROM file_chunks WHERE file_id = ?1", rusqlite::params![file_id]).ok();
-            db.execute("UPDATE file_map SET size_bytes = 0, chunk_count = 0 WHERE id = ?1", rusqlite::params![file_id]).ok();
+            if let Err(e) = crate::services::chunk::ChunkService::delete_chunks_for_file(db, file_id) {
+                tracing::error!("atomic_write: delete old chunks: {}", e);
+            }
+            log_err!(db.execute("UPDATE file_map SET size_bytes = 0, chunk_count = 0 WHERE id = ?1",
+                rusqlite::params![file_id]), "atomic_write: reset file_map size");
         }
         data
     } else {
