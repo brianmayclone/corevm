@@ -47,7 +47,14 @@ export default function VmDetail() {
   useEffect(() => {
     if (!id) return
     const load = () => {
-      api.get<VmDetailType>(`/api/vms/${id}`).then(({ data }) => setVm(data))
+      api.get(`/api/vms/${id}`).then(({ data }) => {
+        // Cluster mode returns { vm: {...}, config: {...} }, standalone returns flat object
+        if (data.vm) {
+          setVm({ ...data.vm, config: data.config || data.vm.config, disks: data.disks || [] })
+        } else {
+          setVm(data)
+        }
+      })
       api.get<AuditEntry[]>(`/api/system/activity?limit=5&target_id=${id}`).then(({ data }) => setActivities(data)).catch(() => {})
     }
     load()
