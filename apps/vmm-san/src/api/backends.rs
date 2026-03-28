@@ -122,7 +122,7 @@ pub async fn remove(
 
     // Check if backend has files that need to be replicated elsewhere
     let replica_count: i64 = db.query_row(
-        "SELECT COUNT(*) FROM file_replicas WHERE backend_id = ?1 AND state = 'synced'",
+        "SELECT COUNT(*) FROM chunk_replicas WHERE backend_id = ?1 AND state = 'synced'",
         rusqlite::params![&backend_id], |row| row.get(0),
     ).unwrap_or(0);
 

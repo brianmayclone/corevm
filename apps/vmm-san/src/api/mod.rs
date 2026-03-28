@@ -8,6 +8,7 @@ pub mod volumes;
 pub mod backends;
 pub mod peers;
 pub mod files;
+pub mod chunks;
 pub mod status;
 pub mod benchmark;
 pub mod disks;
@@ -48,6 +49,11 @@ pub fn router() -> Router<Arc<CoreSanState>> {
         .route("/api/volumes/{id}/mkdir", post(files::mkdir))
         .route("/api/volumes/{id}/browse/{*path}", get(files::browse))
         .route("/api/volumes/{id}/browse", get(files::browse_root))
+
+        // ── Chunk Operations (peer-to-peer replication) ───
+        .route("/api/chunks/{volume_id}/{file_id}/{chunk_index}",
+            get(chunks::read_chunk).put(chunks::write_chunk))
+        .route("/api/file-meta/sync", post(chunks::sync_file_meta))
 
         // ── Benchmark ─────────────────────────────────────
         .route("/api/benchmark/results", get(benchmark::results))

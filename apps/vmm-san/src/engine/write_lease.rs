@@ -47,7 +47,7 @@ pub fn acquire_lease(
     quorum: crate::state::QuorumStatus,
 ) -> LeaseResult {
     // Fenced nodes cannot acquire or renew leases
-    if quorum == crate::state::QuorumStatus::Fenced {
+    if quorum == crate::state::QuorumStatus::Fenced || quorum == crate::state::QuorumStatus::Sanitizing {
         return LeaseResult::Denied {
             owner_node_id: String::new(),
             until: "node is fenced (no quorum)".into(),
@@ -160,15 +160,15 @@ pub fn expire_stale_leases(db: &Connection) {
     }
 }
 
-/// Perform an atomic write: acquire lease, write file, update metadata, log to write_log.
+/// Perform an atomic write: acquire lease, write data via chunk manager, update metadata, log to write_log.
 /// Returns the new version number, or an error string.
 pub fn atomic_write(
     db: &Connection,
     volume_id: &str,
     rel_path: &str,
     node_id: &str,
-    backend_id: &str,
-    backend_path: &str,
+    _backend_id: &str,
+    _backend_path: &str,
     data: &[u8],
     offset: Option<i64>,
     quorum: crate::state::QuorumStatus,
@@ -182,102 +182,95 @@ pub fn atomic_write(
     };
     let new_version = version + 1;
 
-    // 2. Build full path
-    let full_path = std::path::Path::new(backend_path).join(rel_path);
-    if let Some(parent) = full_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("mkdir: {}", e))?;
-    }
+    // 2. Get volume config for chunk parameters
+    let (chunk_size, _ftt, local_raid): (u64, u32, String) = db.query_row(
+        "SELECT chunk_size_bytes, ftt, local_raid FROM volumes WHERE id = ?1",
+        rusqlite::params![volume_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).unwrap_or((crate::storage::chunk::DEFAULT_CHUNK_SIZE, 1, "stripe".into()));
 
-    // 3. Atomic write: write to temp file, fsync, rename
-    let tmp_path = full_path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
-
-    let content = if let Some(off) = offset {
-        // Offset-based write (FUSE): read existing, apply patch
-        let mut existing = std::fs::read(&full_path).unwrap_or_default();
-        let end = off as usize + data.len();
-        if existing.len() < end {
-            existing.resize(end, 0);
-        }
-        existing[off as usize..end].copy_from_slice(data);
-        existing
-    } else {
-        // Full file write (API): replace entire content
-        data.to_vec()
-    };
-
-    // Write to temp file
-    std::fs::write(&tmp_path, &content)
-        .map_err(|e| format!("write tmp: {}", e))?;
-
-    // fsync the temp file for durability
-    if let Ok(f) = std::fs::File::open(&tmp_path) {
-        f.sync_all().ok();
-    }
-
-    // Atomic rename
-    std::fs::rename(&tmp_path, &full_path)
-        .map_err(|e| {
-            std::fs::remove_file(&tmp_path).ok();
-            format!("rename: {}", e)
-        })?;
-
-    // 4. Compute checksum
-    use sha2::{Sha256, Digest};
-    let sha256 = format!("{:x}", Sha256::digest(&content));
-    let size = content.len() as u64;
+    // 3. Ensure file_map entry exists
     let now = chrono::Utc::now().to_rfc3339();
+    let lease_until = (chrono::Utc::now() + chrono::Duration::seconds(LEASE_DURATION_SECS)).to_rfc3339();
 
-    // 5. Update file_map with new version + ownership tick
     db.execute(
         "INSERT INTO file_map (volume_id, rel_path, size_bytes, sha256, version, write_owner, write_lease_until, created_at, updated_at, ownership_tick)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, 1)
+         VALUES (?1, ?2, 0, '', 0, ?3, ?4, ?5, ?5, 0)
          ON CONFLICT(volume_id, rel_path) DO UPDATE SET
-            size_bytes = excluded.size_bytes, sha256 = excluded.sha256,
-            version = excluded.version, write_owner = excluded.write_owner,
+            write_owner = excluded.write_owner,
             write_lease_until = excluded.write_lease_until,
-            updated_at = excluded.updated_at,
-            ownership_tick = ownership_tick + 1",
-        rusqlite::params![volume_id, rel_path, size, &sha256, new_version, node_id,
-                          &(chrono::Utc::now() + chrono::Duration::seconds(LEASE_DURATION_SECS)).to_rfc3339(),
-                          &now],
+            updated_at = excluded.updated_at",
+        rusqlite::params![volume_id, rel_path, node_id, &lease_until, &now],
     ).map_err(|e| format!("db file_map: {}", e))?;
 
-    // 6. Get file_id
+    // 4. Get file_id
     let file_id: i64 = db.query_row(
         "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
         rusqlite::params![volume_id, rel_path],
         |row| row.get(0),
     ).map_err(|e| format!("db get file_id: {}", e))?;
 
-    // 7. Mark local replica as synced with this version
-    db.execute(
-        "INSERT INTO file_replicas (file_id, backend_id, state, replica_version, synced_at)
-         VALUES (?1, ?2, 'synced', ?3, ?4)
-         ON CONFLICT(file_id, backend_id) DO UPDATE SET
-            state = 'synced', replica_version = excluded.replica_version,
-            synced_at = excluded.synced_at",
-        rusqlite::params![file_id, backend_id, new_version, &now],
-    ).ok();
+    // 5. Write data through chunk manager
+    let write_offset = offset.unwrap_or(0) as u64;
+    let full_data = if offset.is_none() {
+        // Full file write (API): first truncate existing chunks if file is being replaced
+        let old_size: u64 = db.query_row(
+            "SELECT size_bytes FROM file_map WHERE id = ?1",
+            rusqlite::params![file_id], |row| row.get(0),
+        ).unwrap_or(0);
+        if old_size > 0 {
+            // Delete old chunks — we're replacing the entire file
+            db.execute(
+                "DELETE FROM chunk_replicas WHERE chunk_id IN (SELECT id FROM file_chunks WHERE file_id = ?1)",
+                rusqlite::params![file_id],
+            ).ok();
+            db.execute("DELETE FROM file_chunks WHERE file_id = ?1", rusqlite::params![file_id]).ok();
+            db.execute("UPDATE file_map SET size_bytes = 0, chunk_count = 0 WHERE id = ?1", rusqlite::params![file_id]).ok();
+        }
+        data
+    } else {
+        data
+    };
 
-    // 8. Mark other replicas as stale (version mismatch)
-    db.execute(
-        "UPDATE file_replicas SET state = 'stale'
-         WHERE file_id = ?1 AND backend_id != ?2",
-        rusqlite::params![file_id, backend_id],
-    ).ok();
+    let _changed_chunks = crate::storage::chunk::write_chunk_data(
+        db, file_id, write_offset, full_data,
+        volume_id, node_id, chunk_size, &local_raid,
+    )?;
 
-    // 9. Append to write_log for push replication (with ownership epoch/tick)
+    // 6. Compute overall file checksum and size
+    use sha2::{Sha256, Digest};
+    let file_size: u64 = db.query_row(
+        "SELECT size_bytes FROM file_map WHERE id = ?1",
+        rusqlite::params![file_id], |row| row.get(0),
+    ).unwrap_or(0);
+
+    // For full file writes we know the sha256 directly; for partial writes
+    // the overall file sha256 is expensive to recompute so we leave it as-is
+    let sha256 = if offset.is_none() {
+        format!("{:x}", Sha256::digest(data))
+    } else {
+        String::new()
+    };
+
+    // 7. Update file_map with new version + ownership tick
+    db.execute(
+        "UPDATE file_map SET version = ?1, sha256 = CASE WHEN ?2 = '' THEN sha256 ELSE ?2 END,
+            ownership_tick = ownership_tick + 1, updated_at = ?3
+         WHERE id = ?4",
+        rusqlite::params![new_version, &sha256, &now, file_id],
+    ).map_err(|e| format!("db file_map update: {}", e))?;
+
+    // 8. Append to write_log for push replication (with ownership epoch/tick)
     let (epoch, tick): (i64, i64) = db.query_row(
-        "SELECT ownership_epoch, ownership_tick FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
-        rusqlite::params![volume_id, rel_path],
+        "SELECT ownership_epoch, ownership_tick FROM file_map WHERE id = ?1",
+        rusqlite::params![file_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     ).unwrap_or((0, 0));
 
     db.execute(
         "INSERT INTO write_log (file_id, volume_id, rel_path, version, writer_node_id, size_bytes, sha256, ownership_epoch, ownership_tick)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        rusqlite::params![file_id, volume_id, rel_path, new_version, node_id, size, &sha256, epoch, tick],
+        rusqlite::params![file_id, volume_id, rel_path, new_version, node_id, file_size, &sha256, epoch, tick],
     ).ok();
 
     Ok(new_version)

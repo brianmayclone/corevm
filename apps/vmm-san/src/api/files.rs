@@ -6,7 +6,6 @@ use axum::Json;
 use serde::Serialize;
 use std::sync::Arc;
 use crate::state::CoreSanState;
-use crate::storage::file_map;
 
 #[derive(Serialize)]
 pub struct FileEntry {
@@ -28,12 +27,14 @@ pub async fn list(
 
     let mut stmt = db.prepare(
         "SELECT fm.rel_path, fm.size_bytes, fm.sha256, fm.created_at, fm.updated_at,
-                COUNT(fr.backend_id) AS replica_count,
-                SUM(CASE WHEN fr.state = 'synced' THEN 1 ELSE 0 END) AS synced_count
+                (SELECT COUNT(DISTINCT cr.node_id) FROM chunk_replicas cr
+                 JOIN file_chunks fc ON fc.id = cr.chunk_id
+                 WHERE fc.file_id = fm.id) AS replica_count,
+                (SELECT COUNT(DISTINCT cr.node_id) FROM chunk_replicas cr
+                 JOIN file_chunks fc ON fc.id = cr.chunk_id
+                 WHERE fc.file_id = fm.id AND cr.state = 'synced') AS synced_count
          FROM file_map fm
-         LEFT JOIN file_replicas fr ON fr.file_id = fm.id
          WHERE fm.volume_id = ?1
-         GROUP BY fm.id
          ORDER BY fm.rel_path"
     ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -53,8 +54,8 @@ pub async fn list(
     Ok(Json(files))
 }
 
-/// GET /api/volumes/{id}/files/*path — read/stream a file.
-/// If the file is not on this node, transparently fetches from a peer that has it.
+/// GET /api/volumes/{id}/files/*path — read a file by assembling its chunks.
+/// If chunks are not on this node, transparently fetches from a peer that has them.
 /// Peer-originated requests (identified by X-CoreSAN-Secret header) only check locally
 /// to prevent recursive peer-to-peer fetch loops.
 pub async fn read(
@@ -64,15 +65,58 @@ pub async fn read(
 ) -> Result<Vec<u8>, (StatusCode, String)> {
     let is_peer_request = headers.get(crate::auth::PEER_SECRET_HEADER).is_some();
 
-    // 1. Try local replica first (fast path)
-    let local_path = {
+    // 1. Look up file in file_map
+    let (file_id, file_size, chunk_size) = {
         let db = state.db.lock().unwrap();
-        file_map::find_local_replica(&db, &volume_id, &rel_path, &state.node_id)
+        let file_info = db.query_row(
+            "SELECT fm.id, fm.size_bytes, v.chunk_size_bytes FROM file_map fm
+             JOIN volumes v ON v.id = fm.volume_id
+             WHERE fm.volume_id = ?1 AND fm.rel_path = ?2",
+            rusqlite::params![&volume_id, &rel_path],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, u64>(1)?, row.get::<_, u64>(2)?)),
+        );
+        match file_info {
+            Ok(info) => info,
+            Err(_) => {
+                if is_peer_request {
+                    return Err((StatusCode::NOT_FOUND, "File not found locally".into()));
+                }
+                // File not in our DB — ask peers
+                return read_from_peers(&state, &volume_id, &rel_path).await;
+            }
+        }
     };
 
-    if let Some(path) = local_path {
-        return tokio::fs::read(&path).await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Read error: {}", e)));
+    if file_size == 0 {
+        return Ok(Vec::new());
+    }
+
+    // 2. Try to read all chunks locally
+    let local_result = {
+        let db = state.db.lock().unwrap();
+        crate::storage::chunk::read_chunk_data(
+            &db, file_id, 0, file_size,
+            &volume_id, &state.node_id, chunk_size,
+        )
+    };
+
+    // Check if we got valid data (no zero-filled gaps from missing chunks)
+    if let Ok(data) = local_result {
+        // Verify we have local chunk replicas (not just zero-filled)
+        let has_local_chunks = {
+            let db = state.db.lock().unwrap();
+            let count: i64 = db.query_row(
+                "SELECT COUNT(*) FROM chunk_replicas cr
+                 JOIN file_chunks fc ON fc.id = cr.chunk_id
+                 WHERE fc.file_id = ?1 AND cr.node_id = ?2 AND cr.state = 'synced'",
+                rusqlite::params![file_id, &state.node_id], |row| row.get(0),
+            ).unwrap_or(0);
+            count > 0
+        };
+
+        if has_local_chunks {
+            return Ok(data);
+        }
     }
 
     // Peer-originated requests stop here — no recursive fetching
@@ -80,43 +124,27 @@ pub async fn read(
         return Err((StatusCode::NOT_FOUND, "File not found locally".into()));
     }
 
-    // 2. No local replica — try known remote replica from local DB first
-    let remote_node_id = {
-        let db = state.db.lock().unwrap();
-        file_map::find_remote_replica(&db, &volume_id, &rel_path, &state.node_id)
-    };
+    // 3. No local chunks — fetch whole file from a peer that has it
+    read_from_peers(&state, &volume_id, &rel_path).await
+}
 
+/// Try to read a file from online peers.
+async fn read_from_peers(
+    state: &Arc<CoreSanState>,
+    volume_id: &str,
+    rel_path: &str,
+) -> Result<Vec<u8>, (StatusCode, String)> {
     let client = crate::peer::client::PeerClient::new(&state.config.peer.secret);
 
-    if let Some(ref node_id) = remote_node_id {
-        if let Some(peer) = state.peers.get(node_id) {
-            let addr = peer.address.clone();
-            drop(peer);
-            tracing::debug!("Fetching {}/{} from known peer {} at {}",
-                volume_id, rel_path, node_id, addr);
-            if let Ok(data) = client.pull_file(&addr, &volume_id, &rel_path).await {
-                tracing::debug!("Peer-fetched {}/{} ({} bytes) from {}",
-                    volume_id, rel_path, data.len(), node_id);
-                return Ok(data);
-            }
-        }
-    }
-
-    // 3. Fallback: ask all online peers (each node's DB is independent,
-    //    so our local DB may not know about replicas on other nodes yet)
     let online_peers: Vec<(String, String)> = state.peers.iter()
         .filter(|p| p.status == crate::state::PeerStatus::Online && p.node_id != state.node_id)
         .map(|p| (p.node_id.clone(), p.address.clone()))
         .collect();
 
     for (peer_id, peer_addr) in &online_peers {
-        // Skip the peer we already tried above
-        if remote_node_id.as_deref() == Some(peer_id.as_str()) {
-            continue;
-        }
-        match client.pull_file(peer_addr, &volume_id, &rel_path).await {
+        match client.pull_file(peer_addr, volume_id, rel_path).await {
             Ok(data) => {
-                tracing::debug!("Peer-fetched {}/{} ({} bytes) from {} (broadcast)",
+                tracing::debug!("Peer-fetched {}/{} ({} bytes) from {}",
                     volume_id, rel_path, data.len(), peer_id);
                 return Ok(data);
             }
@@ -128,7 +156,7 @@ pub async fn read(
 }
 
 /// PUT /api/volumes/{id}/files/*path — write a file (creates or overwrites).
-/// Uses atomic write with write-lease acquisition and immediate push replication.
+/// Uses chunk-based storage with write-lease acquisition and immediate push replication.
 pub async fn write(
     headers: axum::http::HeaderMap,
     State(state): State<Arc<CoreSanState>>,
@@ -142,6 +170,10 @@ pub async fn write(
     if quorum == crate::state::QuorumStatus::Fenced {
         return Err((StatusCode::SERVICE_UNAVAILABLE,
             "node is fenced (no quorum) — writes are not allowed".into()));
+    }
+    if quorum == crate::state::QuorumStatus::Sanitizing {
+        return Err((StatusCode::SERVICE_UNAVAILABLE,
+            "node is sanitizing (startup integrity check) — writes are not yet allowed".into()));
     }
 
     // Check volume sync_mode — 'quorum' mode not yet implemented
@@ -158,25 +190,23 @@ pub async fn write(
         }
     }
 
-    // Select the best local backend
-    let (backend_id, backend_path) = {
+    // Verify at least one local backend exists
+    {
         let db = state.db.lock().unwrap();
         db.query_row(
-            "SELECT id, path FROM backends
-             WHERE node_id = ?1 AND status = 'online'
-             ORDER BY free_bytes DESC LIMIT 1",
+            "SELECT id FROM backends WHERE node_id = ?1 AND status = 'online' LIMIT 1",
             rusqlite::params![&state.node_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            |row| row.get::<_, String>(0),
         ).map_err(|_| (StatusCode::NOT_FOUND,
-            "No local backend available for this volume".into()))?
-    };
+            "No local backend available for this volume".into()))?;
+    }
 
-    // Atomic write: lease → temp file → fsync → rename → DB update → write_log
+    // Chunk-based atomic write: lease → chunk split → write to backends → DB update → write_log
     let new_version = {
         let db = state.db.lock().unwrap();
         crate::engine::write_lease::atomic_write(
             &db, &volume_id, &rel_path, &state.node_id,
-            &backend_id, &backend_path, &body, None, quorum,
+            "", "", &body, None, quorum,
         ).map_err(|e| (StatusCode::CONFLICT, e))?
     };
 
@@ -185,18 +215,29 @@ pub async fn write(
     let sha256 = format!("{:x}", Sha256::digest(&body));
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Push to peers — only for original writes, NOT for peer-replicated writes
+    // Push chunks to peers — only for original writes, NOT for peer-replicated writes
     if !is_peer_write {
-        let _ = state.write_tx.send(crate::engine::push_replicator::WriteEvent {
-            volume_id: volume_id.clone(),
-            rel_path: rel_path.clone(),
-            version: new_version,
-            data: std::sync::Arc::new(body.to_vec()),
-            writer_node_id: state.node_id.clone(),
-        });
-        tracing::info!("Wrote file {}/{} v{} ({} bytes)", volume_id, rel_path, new_version, size);
+        // Get file_id and chunk info for replication
+        let file_id = {
+            let db = state.db.lock().unwrap();
+            db.query_row(
+                "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
+                rusqlite::params![&volume_id, &rel_path], |row| row.get::<_, i64>(0),
+            ).ok()
+        };
+
+        if let Some(file_id) = file_id {
+            let _ = state.write_tx.send(crate::engine::push_replicator::WriteEvent {
+                volume_id: volume_id.clone(),
+                rel_path: rel_path.clone(),
+                file_id,
+                version: new_version,
+                writer_node_id: state.node_id.clone(),
+            });
+        }
+        tracing::info!("Wrote file {}/{} v{} ({} bytes, chunk-based)", volume_id, rel_path, new_version, size);
     } else {
-        tracing::info!("Received replica {}/{} v{} ({} bytes)", volume_id, rel_path, new_version, size);
+        tracing::info!("Received replica {}/{} v{} ({} bytes, chunk-based)", volume_id, rel_path, new_version, size);
     }
 
     Ok(Json(FileEntry {
@@ -210,48 +251,57 @@ pub async fn write(
     }))
 }
 
-/// DELETE /api/volumes/{id}/files/*path — delete a file and all replicas.
+/// DELETE /api/volumes/{id}/files/*path — delete a file and all chunk replicas.
 pub async fn delete(
     State(state): State<Arc<CoreSanState>>,
     Path((volume_id, rel_path)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let db = state.db.lock().unwrap();
 
-    // Find all local replicas and delete the physical files
-    let mut stmt = db.prepare(
-        "SELECT b.path FROM file_replicas fr
-         JOIN backends b ON b.id = fr.backend_id
-         JOIN file_map fm ON fm.id = fr.file_id
-         WHERE fm.volume_id = ?1 AND fm.rel_path = ?2 AND b.node_id = ?3"
-    ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
-
-    let paths: Vec<String> = stmt.query_map(
-        rusqlite::params![&volume_id, &rel_path, &state.node_id],
-        |row| row.get(0),
-    ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?
-     .filter_map(|r| r.ok()).collect();
-
-    for backend_path in paths {
-        let full_path = std::path::Path::new(&backend_path).join(&rel_path);
-        std::fs::remove_file(&full_path).ok();
-    }
-
-    // Remove from database — delete replicas first to avoid FK constraint
     let file_id: Option<i64> = db.query_row(
         "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
         rusqlite::params![&volume_id, &rel_path], |row| row.get(0),
     ).ok();
+
     if let Some(fid) = file_id {
+        // Delete physical chunk files on all local backends
+        let chunk_files: Vec<(u32, String)> = {
+            let mut stmt = db.prepare(
+                "SELECT fc.chunk_index, b.path FROM chunk_replicas cr
+                 JOIN file_chunks fc ON fc.id = cr.chunk_id
+                 JOIN backends b ON b.id = cr.backend_id
+                 WHERE fc.file_id = ?1 AND cr.node_id = ?2"
+            ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+            stmt.query_map(
+                rusqlite::params![fid, &state.node_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?
+             .filter_map(|r| r.ok()).collect()
+        };
+
+        for (chunk_index, backend_path) in &chunk_files {
+            let path = crate::storage::chunk::chunk_path(backend_path, &volume_id, fid, *chunk_index);
+            std::fs::remove_file(&path).ok();
+            // Clean up empty parent dirs
+            if let Some(parent) = path.parent() {
+                std::fs::remove_dir(parent).ok(); // only succeeds if empty
+            }
+        }
+
+        // Remove from database (CASCADE handles file_chunks → chunk_replicas)
         db.execute("DELETE FROM integrity_log WHERE file_id = ?1", rusqlite::params![fid]).ok();
+        db.execute("DELETE FROM chunk_replicas WHERE chunk_id IN (SELECT id FROM file_chunks WHERE file_id = ?1)", rusqlite::params![fid]).ok();
+        db.execute("DELETE FROM file_chunks WHERE file_id = ?1", rusqlite::params![fid]).ok();
         db.execute("DELETE FROM file_replicas WHERE file_id = ?1", rusqlite::params![fid]).ok();
         db.execute("DELETE FROM write_log WHERE file_id = ?1", rusqlite::params![fid]).ok();
     }
+
     db.execute(
         "DELETE FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
         rusqlite::params![&volume_id, &rel_path],
     ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
 
-    tracing::info!("Deleted file {}/{}", volume_id, rel_path);
+    tracing::info!("Deleted file {}/{} (chunks removed)", volume_id, rel_path);
 
     Ok(Json(serde_json::json!({ "success": true })))
 }

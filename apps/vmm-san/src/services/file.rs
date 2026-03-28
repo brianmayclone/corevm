@@ -66,7 +66,7 @@ impl FileService {
 
     /// Acquire or renew a write lease. Returns (acquired: bool, version: i64).
     pub fn acquire_lease(db: &Connection, volume_id: &str, rel_path: &str, node_id: &str, quorum: crate::state::QuorumStatus) -> Result<i64, String> {
-        if quorum == crate::state::QuorumStatus::Fenced {
+        if quorum == crate::state::QuorumStatus::Fenced || quorum == crate::state::QuorumStatus::Sanitizing {
             return Err("node is fenced (no quorum)".into());
         }
         let now = chrono::Utc::now();

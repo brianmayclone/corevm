@@ -143,11 +143,12 @@ fn run_inner(terminal: &mut ratatui::DefaultTerminal) -> anyhow::Result<()> {
         terminal.draw(|frame| {
             let area = frame.area();
 
-            // Layout: status (7) + spacer (1) + menu (min 14) + help (1)
+            // Layout: status (dynamic) + spacer (1) + menu (min 14) + help (1)
+            let status_height = status_bar.height();
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(7),
+                    Constraint::Length(status_height),
                     Constraint::Length(1),
                     Constraint::Min(14),
                     Constraint::Length(1),

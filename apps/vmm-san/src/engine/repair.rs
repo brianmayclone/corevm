@@ -1,8 +1,8 @@
 //! Repair engine — detects under-replicated chunks and creates new replicas.
 //!
-//! Runs periodically. When a node loses chunks (disk failure, hot-remove),
-//! the repair engine copies chunks from surviving nodes to restore FTT.
-//! This is the cross-node self-healing mechanism.
+//! Runs periodically on the leader node. When a node loses chunks (disk failure,
+//! hot-remove), the repair engine copies chunks from surviving nodes to restore FTT.
+//! Uses the chunk-level API endpoints for peer-to-peer chunk transfers.
 
 use std::sync::Arc;
 use tokio::time::{interval, Duration};
@@ -74,27 +74,26 @@ async fn repair_single_chunk(
     volume_id: &str,
 ) {
     // Find a source node that has a synced copy of this chunk
-    let source = {
+    let source_node_id = {
         let db = state.db.lock().unwrap();
         db.query_row(
-            "SELECT cr.node_id, b.path FROM chunk_replicas cr
-             JOIN backends b ON b.id = cr.backend_id
+            "SELECT cr.node_id FROM chunk_replicas cr
              WHERE cr.chunk_id = ?1 AND cr.state = 'synced'
              LIMIT 1",
             rusqlite::params![chunk_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            |row| row.get::<_, String>(0),
         ).ok()
     };
 
-    let (source_node_id, source_backend_path) = match source {
-        Some(s) => s,
+    let source_node_id = match source_node_id {
+        Some(id) => id,
         None => {
             tracing::warn!("Repair: no source for chunk {} (file {}, index {})", chunk_id, file_id, chunk_index);
             return;
         }
     };
 
-    // Find a target node that does NOT have this chunk
+    // Find nodes that already have this chunk
     let nodes_with_chunk: Vec<String> = {
         let db = state.db.lock().unwrap();
         let mut stmt = db.prepare(
@@ -106,10 +105,8 @@ async fn repair_single_chunk(
 
     // Try local node first (if we don't have it)
     if !nodes_with_chunk.contains(&state.node_id) {
-        // Pull from source and store locally
         if source_node_id == state.node_id {
-            // Source is local but somehow we're missing it? Skip.
-            return;
+            return; // Source is local but we're listed as missing — inconsistency
         }
 
         let peer_addr = match state.peers.get(&source_node_id) {
@@ -117,21 +114,18 @@ async fn repair_single_chunk(
             None => return,
         };
 
-        // Pull the chunk data from the peer
-        let src_path = chunk::chunk_path(&source_backend_path, volume_id, file_id, chunk_index);
-        let rel = format!(".coresan/{}/{}/chunk_{:06}", volume_id, file_id, chunk_index);
-
-        match client.pull_file(&peer_addr, volume_id, &rel).await {
+        // Pull the chunk via the chunk API endpoint
+        match client.pull_chunk(&peer_addr, volume_id, file_id, chunk_index).await {
             Ok(data) => {
                 // Find a local backend to store it
                 let local_backend = {
                     let db = state.db.lock().unwrap();
-                    db.query_row(
-                        "SELECT id, path FROM backends WHERE node_id = ?1 AND status = 'online'
-                         ORDER BY free_bytes DESC LIMIT 1",
-                        rusqlite::params![&state.node_id],
-                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-                    ).ok()
+                    let local_raid: String = db.query_row(
+                        "SELECT local_raid FROM volumes WHERE id = ?1",
+                        rusqlite::params![volume_id], |row| row.get(0),
+                    ).unwrap_or_else(|_| "stripe".into());
+                    let placements = chunk::place_chunk(&db, volume_id, &state.node_id, chunk_index, &local_raid);
+                    placements.into_iter().next()
                 };
 
                 if let Some((backend_id, backend_path)) = local_backend {
@@ -166,12 +160,26 @@ async fn repair_single_chunk(
         .map(|p| (p.node_id.clone(), p.address.clone()));
 
     if let Some((target_node_id, target_addr)) = target_peer {
-        let src = chunk::chunk_path(&source_backend_path, volume_id, file_id, chunk_index);
-        if let Ok(data) = std::fs::read(&src) {
-            let rel = format!(".coresan/{}/{}/chunk_{:06}", volume_id, file_id, chunk_index);
-            if client.push_file(&target_addr, volume_id, &rel, data).await.is_ok() {
-                tracing::info!("Repair: pushed chunk {} (file {}, idx {}) to {}",
-                    chunk_id, file_id, chunk_index, target_node_id);
+        // Read chunk from local backend
+        let local_chunk_path = {
+            let db = state.db.lock().unwrap();
+            db.query_row(
+                "SELECT b.path FROM chunk_replicas cr
+                 JOIN backends b ON b.id = cr.backend_id
+                 WHERE cr.chunk_id = ?1 AND cr.node_id = ?2 AND cr.state = 'synced'
+                 LIMIT 1",
+                rusqlite::params![chunk_id, &state.node_id],
+                |row| row.get::<_, String>(0),
+            ).ok()
+        };
+
+        if let Some(backend_path) = local_chunk_path {
+            let src = chunk::chunk_path(&backend_path, volume_id, file_id, chunk_index);
+            if let Ok(data) = std::fs::read(&src) {
+                if client.push_chunk(&target_addr, volume_id, file_id, chunk_index, data).await.is_ok() {
+                    tracing::info!("Repair: pushed chunk {} (file {}, idx {}) to {}",
+                        chunk_id, file_id, chunk_index, target_node_id);
+                }
             }
         }
     }

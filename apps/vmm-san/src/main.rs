@@ -161,11 +161,8 @@ async fn main() {
     // The receiver will be consumed by the push replicator task.
     let (write_tx, write_rx) = tokio::sync::mpsc::unbounded_channel();
 
-    let initial_quorum = if peers.is_empty() {
-        crate::state::QuorumStatus::Solo
-    } else {
-        crate::state::QuorumStatus::Active
-    };
+    // Start in Sanitizing state — node is not yet available
+    let initial_quorum = crate::state::QuorumStatus::Sanitizing;
 
     let state = Arc::new(CoreSanState {
         peers,
@@ -178,6 +175,26 @@ async fn main() {
         quorum_status: std::sync::RwLock::new(initial_quorum),
         is_leader: std::sync::atomic::AtomicBool::new(false),
     });
+
+    // ── Run startup sanitize check ───────────────────────────────────
+    // Verify all local chunk data before becoming available.
+    // During sanitize, writes are rejected (QuorumStatus::Sanitizing).
+    tracing::info!("Running startup sanitize check...");
+    let (san_passed, san_failed, san_repaired) =
+        engine::sanitize::run_startup_sanitize(&state).await;
+    tracing::info!("Sanitize done: {} ok, {} failed, {} repaired",
+        san_passed, san_failed, san_repaired);
+
+    // Transition from Sanitizing to normal quorum state
+    {
+        let normal_quorum = if state.peers.is_empty() {
+            crate::state::QuorumStatus::Solo
+        } else {
+            crate::state::QuorumStatus::Active
+        };
+        *state.quorum_status.write().unwrap() = normal_quorum;
+        tracing::info!("Node is now available (quorum: {:?})", normal_quorum);
+    }
 
     // ── Start background engines ────────────────────────────────────
     // All engines operate autonomously — no vmm-cluster dependency.
@@ -244,6 +261,9 @@ async fn main() {
 
     engine::disk_monitor::spawn(Arc::clone(&state));
     tracing::info!("Disk monitor started (hot-add/hot-remove detection, {}s poll)", 5);
+
+    engine::metadata_sync::spawn(Arc::clone(&state));
+    tracing::info!("Metadata sync engine started (leader pushes file_map to peers, 10s interval)");
 
     engine::discovery::spawn(Arc::clone(&state));
     tracing::info!("Discovery beacon started");

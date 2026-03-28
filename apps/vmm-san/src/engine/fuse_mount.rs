@@ -117,137 +117,157 @@ impl CoreSanFS {
         ).unwrap_or((crate::storage::chunk::DEFAULT_CHUNK_SIZE, 1, "stripe".into()))
     }
 
-    /// Find the local filesystem path for a file, or fetch from peer.
-    /// Returns the path to the local file (possibly a cache copy fetched from a peer).
-    fn resolve_file(&self, rel_path: &str) -> Option<PathBuf> {
-        // Try local replica via DB first
-        let local = {
-            let db = self.state.db.lock().unwrap();
-            db.query_row(
-                "SELECT b.path FROM file_replicas fr
-                 JOIN backends b ON b.id = fr.backend_id
-                 JOIN file_map fm ON fm.id = fr.file_id
-                 WHERE fm.volume_id = ?1 AND fm.rel_path = ?2
-                   AND b.node_id = ?3 AND fr.state = 'synced'
-                 LIMIT 1",
-                rusqlite::params![&self.volume_id, rel_path, &self.state.node_id],
-                |row| row.get::<_, String>(0),
-            ).ok()
-        };
-
-        if let Some(backend_path) = local {
-            let full = Path::new(&backend_path).join(rel_path);
-            if full.exists() {
-                return Some(full);
-            }
-        }
-
-        // Scan all local backends directly (file may exist but not be in file_replicas)
-        let backend_paths: Vec<String> = {
-            let db = self.state.db.lock().unwrap();
-            db.prepare("SELECT path FROM backends WHERE node_id = ?1 AND status = 'online'")
-                .ok().map(|mut stmt| {
-                    stmt.query_map(rusqlite::params![&self.state.node_id], |row| row.get(0))
-                        .ok().map(|rows| rows.filter_map(|r| r.ok()).collect())
-                        .unwrap_or_default()
-                }).unwrap_or_default()
-        };
-        for bp in &backend_paths {
-            let full = Path::new(bp).join(rel_path);
-            if full.exists() && full.is_file() {
-                return Some(full);
-            }
-        }
-
-        // No local copy at all — fetch from peer
-        self.fetch_from_peer(rel_path)
+    /// Check if a file has local chunk data available.
+    /// Returns true if at least one chunk replica is synced locally.
+    /// Used by lookup/getattr to determine if the file is accessible.
+    fn has_local_chunks(&self, rel_path: &str) -> bool {
+        let db = self.state.db.lock().unwrap();
+        let count: i64 = db.query_row(
+            "SELECT COUNT(*) FROM chunk_replicas cr
+             JOIN file_chunks fc ON fc.id = cr.chunk_id
+             JOIN file_map fm ON fm.id = fc.file_id
+             WHERE fm.volume_id = ?1 AND fm.rel_path = ?2
+               AND cr.node_id = ?3 AND cr.state = 'synced'",
+            rusqlite::params![&self.volume_id, rel_path, &self.state.node_id],
+            |row| row.get(0),
+        ).unwrap_or(0);
+        count > 0
     }
 
-    /// Fetch a file from a peer and store it on a local backend.
-    fn fetch_from_peer(&self, rel_path: &str) -> Option<PathBuf> {
-        // Find which peer has this file
-        let peer_info = {
+    /// Check if a file exists (in file_map or has remote chunks).
+    fn file_exists(&self, rel_path: &str) -> bool {
+        let db = self.state.db.lock().unwrap();
+        let count: i64 = db.query_row(
+            "SELECT COUNT(*) FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
+            rusqlite::params![&self.volume_id, rel_path], |row| row.get(0),
+        ).unwrap_or(0);
+        count > 0
+    }
+
+    /// Fetch all chunks of a file from peers and store locally.
+    /// Used when FUSE needs data that isn't available locally.
+    fn fetch_chunks_from_peer(&self, rel_path: &str) -> bool {
+        let file_info = {
             let db = self.state.db.lock().unwrap();
             db.query_row(
-                "SELECT b.node_id FROM file_replicas fr
-                 JOIN backends b ON b.id = fr.backend_id
-                 JOIN file_map fm ON fm.id = fr.file_id
-                 WHERE fm.volume_id = ?1 AND fm.rel_path = ?2
-                   AND fr.state = 'synced' AND b.node_id != ?3
-                 LIMIT 1",
-                rusqlite::params![&self.volume_id, rel_path, &self.state.node_id],
-                |row| row.get::<_, String>(0),
+                "SELECT fm.id, fm.size_bytes, v.chunk_size_bytes, v.local_raid
+                 FROM file_map fm
+                 JOIN volumes v ON v.id = fm.volume_id
+                 WHERE fm.volume_id = ?1 AND fm.rel_path = ?2",
+                rusqlite::params![&self.volume_id, rel_path],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, u64>(1)?,
+                           row.get::<_, u64>(2)?, row.get::<_, String>(3)?)),
             ).ok()
         };
 
-        let peer_node_id = peer_info?;
-        let peer_addr = self.state.peers.get(&peer_node_id)?.address.clone();
+        let (file_id, file_size, chunk_size, local_raid) = match file_info {
+            Some(info) => info,
+            None => return false,
+        };
 
-        // Pull file from peer (blocking on async)
+        if file_size == 0 {
+            return true;
+        }
+
+        let chunk_count = ((file_size - 1) / chunk_size + 1) as u32;
+
+        // Find peers that have chunks for this file
+        let peer_sources: Vec<(u32, String)> = {
+            let db = self.state.db.lock().unwrap();
+            let mut stmt = db.prepare(
+                "SELECT fc.chunk_index, cr.node_id FROM chunk_replicas cr
+                 JOIN file_chunks fc ON fc.id = cr.chunk_id
+                 WHERE fc.file_id = ?1 AND cr.state = 'synced' AND cr.node_id != ?2
+                 GROUP BY fc.chunk_index"
+            ).unwrap();
+            stmt.query_map(
+                rusqlite::params![file_id, &self.state.node_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).unwrap().filter_map(|r| r.ok()).collect()
+        };
+
         let client = PeerClient::new(&self.state.config.peer.secret);
         let volume_id = self.volume_id.clone();
-        let rel = rel_path.to_string();
 
-        let data = self.rt.block_on(async {
-            client.pull_file(&peer_addr, &volume_id, &rel).await.ok()
-        })?;
+        for (chunk_index, source_node_id) in &peer_sources {
+            let peer_addr = match self.state.peers.get(source_node_id) {
+                Some(p) => p.address.clone(),
+                None => continue,
+            };
 
-        // Find a local backend to cache the file on
-        let local_backend = {
-            let db = self.state.db.lock().unwrap();
-            db.query_row(
-                "SELECT id, path FROM backends
-                 WHERE node_id = ?1 AND status = 'online'
-                 ORDER BY free_bytes DESC LIMIT 1",
-                rusqlite::params![&self.state.node_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            ).ok()
-        };
+            let ci = *chunk_index;
+            let fid = file_id;
+            let vid = volume_id.clone();
+            let addr = peer_addr.clone();
 
-        if let Some((backend_id, backend_path)) = local_backend {
-            let full_path = Path::new(&backend_path).join(rel_path);
-            if let Some(parent) = full_path.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
-            if std::fs::write(&full_path, &data).is_ok() {
-                // Register as synced replica
+            let data = self.rt.block_on(async {
+                client.pull_chunk(&addr, &vid, fid, ci).await.ok()
+            });
+
+            if let Some(data) = data {
+                // Store chunk locally
                 let db = self.state.db.lock().unwrap();
-                let now = chrono::Utc::now().to_rfc3339();
+                let placements = crate::storage::chunk::place_chunk(
+                    &db, &volume_id, &self.state.node_id, ci, &local_raid,
+                );
+                for (backend_id, backend_path) in &placements {
+                    let path = crate::storage::chunk::chunk_path(backend_path, &volume_id, fid, ci);
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).ok();
+                    }
+                    if std::fs::write(&path, &data).is_ok() {
+                        // Ensure file_chunks entry exists
+                        let offset = ci as u64 * chunk_size;
+                        let size = chunk_size.min(file_size.saturating_sub(offset));
+                        db.execute(
+                            "INSERT OR IGNORE INTO file_chunks (file_id, chunk_index, offset_bytes, size_bytes)
+                             VALUES (?1, ?2, ?3, ?4)",
+                            rusqlite::params![fid, ci, offset, size],
+                        ).ok();
 
-                // Get file_id
-                if let Ok(file_id) = db.query_row(
-                    "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
-                    rusqlite::params![&self.volume_id, rel_path],
-                    |row| row.get::<_, i64>(0),
-                ) {
-                    db.execute(
-                        "INSERT OR REPLACE INTO file_replicas (file_id, backend_id, state, synced_at)
-                         VALUES (?1, ?2, 'synced', ?3)",
-                        rusqlite::params![file_id, &backend_id, &now],
-                    ).ok();
+                        if let Ok(chunk_id) = db.query_row(
+                            "SELECT id FROM file_chunks WHERE file_id = ?1 AND chunk_index = ?2",
+                            rusqlite::params![fid, ci], |row| row.get::<_, i64>(0),
+                        ) {
+                            let now = chrono::Utc::now().to_rfc3339();
+                            db.execute(
+                                "INSERT OR REPLACE INTO chunk_replicas (chunk_id, backend_id, node_id, state, synced_at)
+                                 VALUES (?1, ?2, ?3, 'synced', ?4)",
+                                rusqlite::params![chunk_id, backend_id, &self.state.node_id, &now],
+                            ).ok();
+                        }
+                    }
                 }
-
-                tracing::debug!("FUSE: fetched {}/{} from peer {}", self.volume_id, rel_path, peer_node_id);
-                return Some(full_path);
             }
         }
 
-        // No local backend to store it, serve from memory via a temp file
-        let tmp = std::env::temp_dir().join(format!("coresan-{}", uuid::Uuid::new_v4()));
-        std::fs::write(&tmp, &data).ok()?;
-        Some(tmp)
+        true
     }
 
-    /// Find the best local backend path for writing new files.
-    /// Find the backend that already holds a file (for writes to existing files).
+    /// Legacy resolve_file — kept for attr_from_path compatibility.
+    /// Now checks chunk-based storage instead of file_replicas.
+    fn resolve_file(&self, rel_path: &str) -> Option<PathBuf> {
+        // For chunk-based storage, there's no single "file path" on disk.
+        // We return None and let attr_from_db handle the metadata.
+        // Actual reads go through read_chunk_data in the FUSE read() handler.
+        if self.has_local_chunks(rel_path) || self.file_exists(rel_path) {
+            // Return a dummy path — attr_from_db will be used for metadata
+            return None;
+        }
+        // File not known at all
+        None
+    }
+
+    /// Find a local backend that holds chunk replicas for an existing file.
     fn backend_for_existing_file(&self, rel_path: &str) -> Option<(String, String)> {
         let db = self.state.db.lock().unwrap();
         db.query_row(
-            "SELECT b.id, b.path FROM file_replicas fr
-             JOIN backends b ON b.id = fr.backend_id
-             JOIN file_map fm ON fm.id = fr.file_id
+            "SELECT b.id, b.path FROM chunk_replicas cr
+             JOIN backends b ON b.id = cr.backend_id
+             JOIN file_chunks fc ON fc.id = cr.chunk_id
+             JOIN file_map fm ON fm.id = fc.file_id
              WHERE fm.volume_id = ?1 AND fm.rel_path = ?2
-               AND b.node_id = ?3 AND b.status = 'online'
+               AND cr.node_id = ?3 AND b.status = 'online'
              LIMIT 1",
             rusqlite::params![&self.volume_id, rel_path, &self.state.node_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -371,47 +391,21 @@ impl Filesystem for CoreSanFS {
             count > 0
         };
 
-        // Also check local filesystem directly (for files not yet in DB)
-        let exists_on_disk = {
-            let paths: Vec<String> = {
-                let db = self.state.db.lock().unwrap();
-                let result = db.prepare(
-                    "SELECT path FROM backends WHERE node_id = ?1 AND status = 'online'"
-                );
-                match result {
-                    Ok(mut stmt) => {
-                        let rows = stmt.query_map(
-                            rusqlite::params![&self.state.node_id],
-                            |row| row.get(0),
-                        );
-                        rows.map(|r| r.filter_map(|v| v.ok()).collect()).unwrap_or_default()
-                    }
-                    Err(_) => Vec::new(),
-                }
-            };
-            paths.iter().any(|bp| {
-                let full = Path::new(bp).join(&rel_path);
-                full.exists()
-            })
-        };
+        // Also check if chunks exist locally (file data present as chunks)
+        let has_chunks = self.has_local_chunks(&rel_path);
 
-        if !is_dir && !is_file && !exists_on_disk {
-            tracing::debug!("FUSE lookup: '{}' → ENOENT (dir={}, file={}, disk={})", rel_path, is_dir, is_file, exists_on_disk);
+        if !is_dir && !is_file && !has_chunks {
+            tracing::debug!("FUSE lookup: '{}' → ENOENT (dir={}, file={}, chunks={})", rel_path, is_dir, is_file, has_chunks);
             reply.error(libc::ENOENT);
             return;
         }
-        tracing::debug!("FUSE lookup: '{}' → found (dir={}, file={}, disk={})", rel_path, is_dir, is_file, exists_on_disk);
+        tracing::debug!("FUSE lookup: '{}' → found (dir={}, file={}, chunks={})", rel_path, is_dir, is_file, has_chunks);
 
         let actual_is_dir = is_dir && !is_file;
         let ino = self.inodes.lock().unwrap().get_or_create(&self.volume_id, &rel_path, actual_is_dir);
 
-        if actual_is_dir {
-            reply.entry(&TTL, &self.attr_from_db(ino, true), 0);
-        } else if let Some(path) = self.resolve_file(&rel_path) {
-            reply.entry(&TTL, &self.attr_from_path(ino, &path, false), 0);
-        } else {
-            reply.entry(&TTL, &self.attr_from_db(ino, false), 0);
-        }
+        // All metadata comes from the database — chunks are on disk but not as single files
+        reply.entry(&TTL, &self.attr_from_db(ino, actual_is_dir), 0);
     }
 
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
@@ -420,13 +414,8 @@ impl Filesystem for CoreSanFS {
             None => { reply.error(libc::ENOENT); return; }
         };
 
-        if entry.is_dir {
-            reply.attr(&TTL, &self.attr_from_db(ino, true));
-        } else if let Some(path) = self.resolve_file(&entry.rel_path) {
-            reply.attr(&TTL, &self.attr_from_path(ino, &path, false));
-        } else {
-            reply.attr(&TTL, &self.attr_from_db(ino, false));
-        }
+        // All metadata comes from DB — no single-file paths on disk anymore
+        reply.attr(&TTL, &self.attr_from_db(ino, entry.is_dir));
     }
 
     fn setattr(
@@ -442,25 +431,21 @@ impl Filesystem for CoreSanFS {
             None => { reply.error(libc::ENOENT); return; }
         };
 
-        // Handle truncate (size change)
+        // Handle truncate (size change) — update file_map size
         if let Some(new_size) = size {
             if !entry.is_dir {
-                if let Some(path) = self.resolve_file(&entry.rel_path) {
-                    if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&path) {
-                        f.set_len(new_size).ok();
-                    }
-                }
+                let db = self.state.db.lock().unwrap();
+                db.execute(
+                    "UPDATE file_map SET size_bytes = ?1, updated_at = datetime('now')
+                     WHERE volume_id = ?2 AND rel_path = ?3",
+                    rusqlite::params![new_size as i64, &self.volume_id, &entry.rel_path],
+                ).ok();
+                // TODO: truncate/extend chunks if size changed significantly
             }
         }
 
-        // Return current attrs
-        if entry.is_dir {
-            reply.attr(&TTL, &self.attr_from_db(ino, true));
-        } else if let Some(path) = self.resolve_file(&entry.rel_path) {
-            reply.attr(&TTL, &self.attr_from_path(ino, &path, false));
-        } else {
-            reply.attr(&TTL, &self.attr_from_db(ino, false));
-        }
+        // All metadata comes from DB
+        reply.attr(&TTL, &self.attr_from_db(ino, entry.is_dir));
     }
 
     fn open(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
@@ -513,6 +498,12 @@ impl Filesystem for CoreSanFS {
             Some(id) => id,
             None => { reply.data(&[]); return; }
         };
+
+        // Check if we have local chunks — if not, fetch from peers first
+        if !self.has_local_chunks(&entry.rel_path) {
+            tracing::debug!("FUSE read: no local chunks for '{}', fetching from peers", entry.rel_path);
+            self.fetch_chunks_from_peer(&entry.rel_path);
+        }
 
         let (chunk_size, _, _) = self.volume_config();
         let db = self.state.db.lock().unwrap();
@@ -620,11 +611,18 @@ impl Filesystem for CoreSanFS {
 
         // Push changed chunks to peers (non-blocking)
         if !changed_chunks.is_empty() {
+            let version = {
+                let db = self.state.db.lock().unwrap();
+                db.query_row(
+                    "SELECT version FROM file_map WHERE id = ?1",
+                    rusqlite::params![file_id], |row| row.get::<_, i64>(0),
+                ).unwrap_or(0)
+            };
             let _ = self.state.write_tx.send(crate::engine::push_replicator::WriteEvent {
                 volume_id: self.volume_id.clone(),
                 rel_path: entry.rel_path.clone(),
-                version: 0, // version tracked per-file, not critical here
-                data: std::sync::Arc::new(Vec::new()), // chunks are pushed individually
+                file_id,
+                version,
                 writer_node_id: self.state.node_id.clone(),
             });
         }
@@ -747,32 +745,10 @@ impl Filesystem for CoreSanFS {
 
         tracing::info!("FUSE unlink: {}/{}", self.volume_id, rel_path);
 
-        // Delete from local backends
-        let backends: Vec<String> = {
-            let db = self.state.db.lock().unwrap();
-            let mut stmt = db.prepare(
-                "SELECT path FROM backends WHERE node_id = ?1 AND status = 'online'"
-            ).unwrap();
-            stmt.query_map(
-                rusqlite::params![&self.state.node_id],
-                |row| row.get(0),
-            ).unwrap().filter_map(|r| r.ok()).collect()
-        };
-
-        let mut deleted = false;
-        for bp in &backends {
-            let full = Path::new(bp).join(&rel_path);
-            if std::fs::remove_file(&full).is_ok() {
-                tracing::debug!("FUSE unlink: removed {}", full.display());
-                deleted = true;
-            }
-        }
-
-        // Remove from DB — delete replicas first, then file_map
+        // Remove from DB and delete chunk files
         {
             let db = self.state.db.lock().unwrap();
 
-            // Delete replicas explicitly (in case CASCADE doesn't work on migrated DBs)
             let file_id: Option<i64> = db.query_row(
                 "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
                 rusqlite::params![&self.volume_id, &rel_path],
@@ -780,23 +756,42 @@ impl Filesystem for CoreSanFS {
             ).ok();
 
             if let Some(fid) = file_id {
+                // Delete physical chunk files on local backends
+                let chunk_files: Vec<(u32, String)> = {
+                    let mut stmt = db.prepare(
+                        "SELECT fc.chunk_index, b.path FROM chunk_replicas cr
+                         JOIN file_chunks fc ON fc.id = cr.chunk_id
+                         JOIN backends b ON b.id = cr.backend_id
+                         WHERE fc.file_id = ?1 AND cr.node_id = ?2"
+                    ).unwrap();
+                    stmt.query_map(
+                        rusqlite::params![fid, &self.state.node_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    ).unwrap().filter_map(|r| r.ok()).collect()
+                };
+
+                for (chunk_index, backend_path) in &chunk_files {
+                    let path = crate::storage::chunk::chunk_path(backend_path, &self.volume_id, fid, *chunk_index);
+                    std::fs::remove_file(&path).ok();
+                    if let Some(parent) = path.parent() {
+                        std::fs::remove_dir(parent).ok();
+                    }
+                }
+
+                // Clean up DB records
                 db.execute("DELETE FROM integrity_log WHERE file_id = ?1", rusqlite::params![fid]).ok();
+                db.execute("DELETE FROM chunk_replicas WHERE chunk_id IN (SELECT id FROM file_chunks WHERE file_id = ?1)", rusqlite::params![fid]).ok();
+                db.execute("DELETE FROM file_chunks WHERE file_id = ?1", rusqlite::params![fid]).ok();
                 db.execute("DELETE FROM file_replicas WHERE file_id = ?1", rusqlite::params![fid]).ok();
                 db.execute("DELETE FROM write_log WHERE file_id = ?1", rusqlite::params![fid]).ok();
             }
 
-            match db.execute(
+            db.execute(
                 "DELETE FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
                 rusqlite::params![&self.volume_id, &rel_path],
-            ) {
-                Ok(rows) => {
-                    tracing::info!("FUSE unlink: deleted '{}' (rows={}, replicas cleared)", rel_path, rows);
-                    if rows > 0 { deleted = true; }
-                }
-                Err(e) => {
-                    tracing::error!("FUSE unlink: file_map DELETE failed: {}", e);
-                }
-            }
+            ).ok();
+
+            tracing::info!("FUSE unlink: deleted '{}' (chunks removed)", rel_path);
         }
 
         // Remove inode
@@ -882,29 +877,8 @@ impl Filesystem for CoreSanFS {
                 }
             }
 
-            // Also scan backend directories on disk (files/dirs not yet in file_map)
-            let backend_paths: Vec<String> = db.prepare(
-                "SELECT path FROM backends WHERE node_id = ?1 AND status = 'online'"
-            ).ok().map(|mut stmt| {
-                stmt.query_map(rusqlite::params![&self.state.node_id], |row| row.get(0))
-                    .ok().map(|rows| rows.filter_map(|r| r.ok()).collect())
-                    .unwrap_or_default()
-            }).unwrap_or_default();
-
-            for bp in &backend_paths {
-                let scan_dir = Path::new(bp).join(&entry.rel_path);
-                if let Ok(read) = std::fs::read_dir(&scan_dir) {
-                    for fs_entry in read.flatten() {
-                        let name = fs_entry.file_name().to_string_lossy().to_string();
-                        if name.starts_with('.') { continue; } // skip hidden / .coresan
-                        if seen.insert(name.clone()) {
-                            let is_dir = fs_entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                            result.push((name, is_dir));
-                        }
-                    }
-                }
-            }
-
+            // file_map is the single source of truth — no disk scanning needed
+            // (chunks are stored under .coresan/ structure, not as flat files)
             result
         };
 

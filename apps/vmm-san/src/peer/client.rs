@@ -189,6 +189,72 @@ impl PeerClient {
         Ok(body.get("allowed").and_then(|v| v.as_bool()).unwrap_or(false))
     }
 
+    /// Push a single chunk to a peer node.
+    pub async fn push_chunk(
+        &self,
+        peer_address: &str,
+        volume_id: &str,
+        file_id: i64,
+        chunk_index: u32,
+        data: Vec<u8>,
+    ) -> Result<(), String> {
+        let url = format!("{}/api/chunks/{}/{}/{}", peer_address, volume_id, file_id, chunk_index);
+        let resp = self.http.put(&url)
+            .header(PEER_SECRET_HEADER, &self.secret)
+            .body(data)
+            .send().await
+            .map_err(|e| format!("Chunk push failed: {}", e))?;
+
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!("Chunk push returned status {}", resp.status()))
+        }
+    }
+
+    /// Pull a single chunk from a peer node.
+    pub async fn pull_chunk(
+        &self,
+        peer_address: &str,
+        volume_id: &str,
+        file_id: i64,
+        chunk_index: u32,
+    ) -> Result<Vec<u8>, String> {
+        let url = format!("{}/api/chunks/{}/{}/{}", peer_address, volume_id, file_id, chunk_index);
+        let resp = self.http.get(&url)
+            .header(PEER_SECRET_HEADER, &self.secret)
+            .send().await
+            .map_err(|e| format!("Chunk pull failed: {}", e))?;
+
+        if resp.status().is_success() {
+            resp.bytes().await
+                .map(|b| b.to_vec())
+                .map_err(|e| format!("Chunk pull read error: {}", e))
+        } else {
+            Err(format!("Chunk pull returned status {}", resp.status()))
+        }
+    }
+
+    /// Push file metadata to a peer (so they know the file exists and its chunk layout).
+    pub async fn push_file_meta(
+        &self,
+        peer_address: &str,
+        meta: &serde_json::Value,
+    ) -> Result<(), String> {
+        let url = format!("{}/api/file-meta/sync", peer_address);
+        let resp = self.http.post(&url)
+            .header(PEER_SECRET_HEADER, &self.secret)
+            .json(meta)
+            .send().await
+            .map_err(|e| format!("Meta sync failed: {}", e))?;
+
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!("Meta sync returned status {}", resp.status()))
+        }
+    }
+
     /// Notify a peer to delete a volume.
     pub async fn delete_volume(
         &self,

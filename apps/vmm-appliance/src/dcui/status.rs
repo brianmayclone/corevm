@@ -3,7 +3,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Widget};
@@ -11,6 +11,17 @@ use sysinfo::System;
 
 use crate::common::config::{ApplianceConfig, ApplianceRole};
 use crate::common::network::read_current_ip;
+
+/// CoreSAN status info — only populated when vmm-san has claimed disks.
+struct SanStatus {
+    quorum: String,
+    peers: u32,
+    volumes: u32,
+    claimed_disks: u32,
+    free_bytes: u64,
+    total_bytes: u64,
+    is_leader: bool,
+}
 
 pub struct StatusBar {
     sys: System,
@@ -27,6 +38,7 @@ pub struct StatusBar {
     ram_used: u64,
     ram_total: u64,
     interface: String,
+    san_status: Option<SanStatus>,
 }
 
 impl StatusBar {
@@ -68,6 +80,7 @@ impl StatusBar {
             ram_used: 0,
             ram_total: 0,
             interface: detect_primary_interface(),
+            san_status: None,
         };
         bar.refresh();
         bar
@@ -105,9 +118,36 @@ impl StatusBar {
         self.cpu_pct = self.sys.global_cpu_usage();
         self.ram_used = self.sys.used_memory();
         self.ram_total = self.sys.total_memory();
+
+        // CoreSAN status — only if vmm-san service is running
+        self.san_status = fetch_san_status();
+    }
+
+    /// Returns the required height for the status bar (including borders).
+    pub fn height(&self) -> u16 {
+        7 // 5 lines + 2 border — always fixed, SAN goes in the right panel
     }
 
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
+        // Split horizontally: left = system info, right = CoreSAN (if active)
+        if self.san_status.is_some() {
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(55),
+                    Constraint::Percentage(45),
+                ])
+                .split(area);
+
+            self.render_system(cols[0], buf);
+            self.render_san(cols[1], buf);
+        } else {
+            self.render_system(area, buf);
+        }
+    }
+
+    /// Render the left panel: system information.
+    fn render_system(&self, area: Rect, buf: &mut Buffer) {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Double)
@@ -119,7 +159,7 @@ impl StatusBar {
         // Line 1: Title + Role
         let line1 = Line::from(vec![
             Span::styled(
-                format!(" CoreVM Appliance v{}", self.version),
+                format!(" CoreVM v{}", self.version),
                 Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -132,12 +172,12 @@ impl StatusBar {
         let (days, hours, mins) = uptime_parts(self.uptime_secs);
         let uptime_str = format!("{}d {}h {}m", days, hours, mins);
         let line2 = Line::from(vec![
-            Span::styled(" Hostname: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(" Host: ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                format!("{:<20}", self.hostname),
+                format!("{:<18}", self.hostname),
                 Style::default().fg(Color::White),
             ),
-            Span::styled("Uptime: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Up: ", Style::default().fg(Color::DarkGray)),
             Span::styled(uptime_str, Style::default().fg(Color::Green)),
         ]);
 
@@ -169,13 +209,13 @@ impl StatusBar {
             ("○ stopped", Color::Red)
         };
         let line4 = Line::from(vec![
-            Span::styled(" Service: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(" Svc: ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                format!("{:<15}", self.service_name),
+                format!("{:<14}", self.service_name),
                 Style::default().fg(Color::White),
             ),
             Span::styled(indicator, Style::default().fg(status_color)),
-            Span::styled("  Port: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("  :", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 self.port.to_string(),
                 Style::default().fg(Color::Cyan),
@@ -191,8 +231,95 @@ impl StatusBar {
             ),
         ]);
 
-        let lines = vec![line1, line2, line3, line4, line5];
-        let para = Paragraph::new(lines);
+        let para = Paragraph::new(vec![line1, line2, line3, line4, line5]);
+        para.render(inner, buf);
+    }
+
+    /// Render the right panel: CoreSAN status.
+    fn render_san(&self, area: Rect, buf: &mut Buffer) {
+        let san = match self.san_status {
+            Some(ref s) => s,
+            None => return,
+        };
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Double)
+            .style(Style::default().fg(Color::Magenta));
+
+        let inner = block.inner(area);
+        block.render(area, buf);
+
+        let (status_icon, status_color) = match san.quorum.as_str() {
+            "active" => ("●", Color::Green),
+            "degraded" => ("●", Color::Yellow),
+            "sanitizing" => ("◌", Color::Yellow),
+            "solo" => ("●", Color::Cyan),
+            "fenced" => ("●", Color::Red),
+            _ => ("○", Color::DarkGray),
+        };
+
+        let leader_str = if san.is_leader { "  ★ Leader" } else { "" };
+
+        // Line 1: CoreSAN title + quorum status
+        let san1 = Line::from(vec![
+            Span::styled(
+                " CoreSAN ",
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{} {}", status_icon, san.quorum),
+                Style::default().fg(status_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(leader_str, Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        ]);
+
+        // Line 2: Peers + Volumes
+        let san2 = Line::from(vec![
+            Span::styled(" Peers: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{:<6}", san.peers),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled("Volumes: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}", san.volumes),
+                Style::default().fg(Color::White),
+            ),
+        ]);
+
+        // Line 3: Claimed disks
+        let san3 = Line::from(vec![
+            Span::styled(" Disks: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{} claimed", san.claimed_disks),
+                Style::default().fg(Color::White),
+            ),
+        ]);
+
+        // Line 4: Storage capacity
+        let free_gb = san.free_bytes / 1024 / 1024 / 1024;
+        let total_gb = san.total_bytes / 1024 / 1024 / 1024;
+        let used_gb = total_gb.saturating_sub(free_gb);
+        let pct_used = if total_gb > 0 { (used_gb * 100) / total_gb } else { 0 };
+        let capacity_color = if pct_used > 90 { Color::Red } else if pct_used > 75 { Color::Yellow } else { Color::Green };
+
+        let san4 = Line::from(vec![
+            Span::styled(" Storage: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}/{} GB", free_gb, total_gb),
+                Style::default().fg(capacity_color),
+            ),
+            Span::styled(
+                format!(" ({}% used)", pct_used),
+                Style::default().fg(capacity_color),
+            ),
+        ]);
+
+        // Line 5: empty / padding
+        let san5 = Line::from(vec![]);
+
+        let para = Paragraph::new(vec![san1, san2, san3, san4, san5]);
         para.render(inner, buf);
     }
 }
@@ -234,6 +361,88 @@ fn detect_primary_interface() -> String {
         }
     }
     "eth0".to_string()
+}
+
+/// Fetch CoreSAN status from the local vmm-san daemon.
+/// Returns None if vmm-san is not running or has no claimed disks.
+fn fetch_san_status() -> Option<SanStatus> {
+    // Check if vmm-san service is active first (cheap check)
+    let service_active = Command::new("systemctl")
+        .args(["is-active", "vmm-san"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "active")
+        .unwrap_or(false);
+
+    if !service_active {
+        return None;
+    }
+
+    // Read vmm-san port from config
+    let san_port = read_port_from_toml("/etc/vmm/vmm-san.toml", "server").unwrap_or(7443);
+
+    // Fetch dashboard/status from local vmm-san
+    let url = format!("http://127.0.0.1:{}/api/dashboard", san_port);
+    let output = Command::new("curl")
+        .args(["-s", "-m", "2", &url])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let body = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&body).ok()?;
+
+    // Check if there are claimed disks — only show SAN status if disks are claimed
+    let claimed_disks = json["claimed_disks"].as_u64().unwrap_or(0) as u32;
+    if claimed_disks == 0 {
+        // Also try the status endpoint for claimed_disks count
+        let status_url = format!("http://127.0.0.1:{}/api/status", san_port);
+        let status_output = Command::new("curl")
+            .args(["-s", "-m", "2", &status_url])
+            .output()
+            .ok()?;
+        if status_output.status.success() {
+            let status_body = String::from_utf8_lossy(&status_output.stdout);
+            let status_json: serde_json::Value = serde_json::from_str(&status_body).ok()?;
+            let disks_from_status = status_json["claimed_disks"].as_u64().unwrap_or(0) as u32;
+            if disks_from_status == 0 {
+                return None;
+            }
+        } else {
+            return None;
+        }
+    }
+
+    let quorum = json["quorum_status"].as_str()
+        .or_else(|| json["quorum"].as_str())
+        .unwrap_or("unknown").to_string();
+    let peers = json["peer_count"].as_u64()
+        .or_else(|| json["peers"].as_u64())
+        .unwrap_or(0) as u32;
+    let volumes = json["volume_count"].as_u64()
+        .or_else(|| json["volumes"].as_u64())
+        .unwrap_or(0) as u32;
+    let is_leader = json["is_leader"].as_bool().unwrap_or(false);
+
+    // Storage capacity
+    let free_bytes = json["free_bytes"].as_u64()
+        .or_else(|| json["storage_free_bytes"].as_u64())
+        .unwrap_or(0);
+    let total_bytes = json["total_bytes"].as_u64()
+        .or_else(|| json["storage_total_bytes"].as_u64())
+        .unwrap_or(0);
+
+    Some(SanStatus {
+        quorum,
+        peers,
+        volumes,
+        claimed_disks,
+        free_bytes,
+        total_bytes,
+        is_leader,
+    })
 }
 
 fn read_port_from_toml(path: &str, section: &str) -> Option<u16> {

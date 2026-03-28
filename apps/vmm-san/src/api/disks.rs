@@ -180,7 +180,12 @@ pub async fn release(
     // Remove backend (triggers drain if it has files)
     {
         let db = state.db.lock().unwrap();
-        // Delete file replicas on this backend
+        // Delete chunk replicas on this backend
+        db.execute(
+            "DELETE FROM chunk_replicas WHERE backend_id = ?1",
+            rusqlite::params![&backend_id],
+        ).ok();
+        // Also clean up legacy file_replicas
         db.execute(
             "DELETE FROM file_replicas WHERE backend_id = ?1",
             rusqlite::params![&backend_id],

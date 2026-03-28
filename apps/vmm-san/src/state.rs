@@ -27,6 +27,8 @@ pub enum PeerStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum QuorumStatus {
+    /// Node is starting up, performing integrity check — not yet available
+    Sanitizing,
     /// All peers reachable, full read/write
     Active,
     /// Quorum met but some peers unreachable, full read/write

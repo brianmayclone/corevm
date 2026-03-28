@@ -76,19 +76,21 @@ pub fn select_new_replica_target(
     file_id: i64,
     volume_id: &str,
 ) -> Option<(String, String, String)> {
-    // Find backends that don't already have a replica for this file,
-    // preferring backends on different nodes from existing replicas.
+    // Find backends that don't already have chunk replicas for this file,
+    // preferring backends on different nodes from existing chunk replicas.
     db.query_row(
         "SELECT b.id, b.node_id, b.path FROM backends b
          WHERE b.status = 'online'
          AND b.id NOT IN (
-             SELECT backend_id FROM file_replicas WHERE file_id = ?2
+             SELECT cr.backend_id FROM chunk_replicas cr
+             JOIN file_chunks fc ON fc.id = cr.chunk_id
+             WHERE fc.file_id = ?2
          )
          ORDER BY
              CASE WHEN b.node_id NOT IN (
-                 SELECT b2.node_id FROM file_replicas fr2
-                 JOIN backends b2 ON b2.id = fr2.backend_id
-                 WHERE fr2.file_id = ?2
+                 SELECT DISTINCT cr2.node_id FROM chunk_replicas cr2
+                 JOIN file_chunks fc2 ON fc2.id = cr2.chunk_id
+                 WHERE fc2.file_id = ?2
              ) THEN 0 ELSE 1 END,
              b.free_bytes DESC
          LIMIT 1",

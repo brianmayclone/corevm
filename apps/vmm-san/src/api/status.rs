@@ -121,7 +121,7 @@ pub async fn dashboard(
     ).unwrap_or(0);
 
     let replication_pending: u64 = db.query_row(
-        "SELECT COUNT(*) FROM file_replicas WHERE state != 'synced'", [], |row| row.get(0),
+        "SELECT COUNT(*) FROM chunk_replicas WHERE state != 'synced'", [], |row| row.get(0),
     ).unwrap_or(0);
 
     let integrity_errors: u64 = db.query_row(
@@ -204,15 +204,17 @@ fn query_volume_summaries(db: &rusqlite::Connection) -> Vec<VolumeStatusSummary>
 fn query_file_sync_counts(db: &rusqlite::Connection, volume_id: &str) -> (u64, u64) {
     let synced: u64 = db.query_row(
         "SELECT COUNT(DISTINCT fm.id) FROM file_map fm
-         JOIN file_replicas fr ON fr.file_id = fm.id
-         WHERE fm.volume_id = ?1 AND fr.state = 'synced'",
+         JOIN file_chunks fc ON fc.file_id = fm.id
+         JOIN chunk_replicas cr ON cr.chunk_id = fc.id
+         WHERE fm.volume_id = ?1 AND cr.state = 'synced'",
         rusqlite::params![volume_id], |row| row.get(0),
     ).unwrap_or(0);
 
     let syncing: u64 = db.query_row(
         "SELECT COUNT(DISTINCT fm.id) FROM file_map fm
-         JOIN file_replicas fr ON fr.file_id = fm.id
-         WHERE fm.volume_id = ?1 AND fr.state = 'syncing'",
+         JOIN file_chunks fc ON fc.file_id = fm.id
+         JOIN chunk_replicas cr ON cr.chunk_id = fc.id
+         WHERE fm.volume_id = ?1 AND cr.state IN ('syncing', 'stale')",
         rusqlite::params![volume_id], |row| row.get(0),
     ).unwrap_or(0);
 
