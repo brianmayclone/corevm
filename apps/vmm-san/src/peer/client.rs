@@ -198,10 +198,26 @@ impl PeerClient {
         chunk_index: u32,
         data: Vec<u8>,
     ) -> Result<(), String> {
+        self.push_chunk_with_path(peer_address, volume_id, file_id, chunk_index, data, "").await
+    }
+
+    /// Push a chunk with the file's rel_path so the receiver can resolve the local file_id.
+    pub async fn push_chunk_with_path(
+        &self,
+        peer_address: &str,
+        volume_id: &str,
+        file_id: i64,
+        chunk_index: u32,
+        data: Vec<u8>,
+        rel_path: &str,
+    ) -> Result<(), String> {
         let url = format!("{}/api/chunks/{}/{}/{}", peer_address, volume_id, file_id, chunk_index);
-        let resp = self.http.put(&url)
-            .header(PEER_SECRET_HEADER, &self.secret)
-            .body(data)
+        let mut req = self.http.put(&url)
+            .header(PEER_SECRET_HEADER, &self.secret);
+        if !rel_path.is_empty() {
+            req = req.header("X-CoreSAN-Rel-Path", rel_path);
+        }
+        let resp = req.body(data)
             .send().await
             .map_err(|e| format!("Chunk push failed: {}", e))?;
 

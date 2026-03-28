@@ -210,7 +210,15 @@ async fn repair_single_chunk(
         .map(|p| (p.node_id.clone(), p.address.clone()));
 
     if let Some((target_node_id, target_addr)) = target_peer {
-        if client.push_chunk(&target_addr, volume_id, file_id, chunk_index, data).await.is_ok() {
+        // Get rel_path so receiver can resolve its local file_id
+        let rel_path = {
+            let db = state.db.lock().unwrap();
+            db.query_row("SELECT rel_path FROM file_map WHERE id = ?1",
+                rusqlite::params![file_id], |row| row.get::<_, String>(0))
+                .unwrap_or_default()
+        };
+
+        if client.push_chunk_with_path(&target_addr, volume_id, file_id, chunk_index, data, &rel_path).await.is_ok() {
             // Record in our LOCAL DB that this peer now has the chunk.
             // Without this, the repair engine would keep thinking the chunk is under-replicated.
             let db = state.db.lock().unwrap();

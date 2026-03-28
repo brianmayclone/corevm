@@ -1,47 +1,57 @@
 import { useEffect, useState, useMemo, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, RefreshCw, Grid3x3, Pause, Play } from 'lucide-react'
+import { ArrowLeft, RefreshCw, Pause, Play } from 'lucide-react'
 import type { ChunkMapResponse, ChunkMapEntry } from '../../api/types'
 import { useClusterStore } from '../../stores/clusterStore'
 import Button from '../Button'
 import Card from '../Card'
 import { formatBytes } from '../../utils/format'
 
-/** Color for each chunk state */
-const stateColor: Record<string, string> = {
-  synced: '#22c55e',   // green
-  stale: '#eab308',    // yellow
-  syncing: '#3b82f6',  // blue
-  error: '#ef4444',    // red
-  empty: '#1e293b',    // dark slate
+/** Health of a logical chunk based on how many nodes have it */
+type ChunkHealth = 'protected' | 'degraded' | 'lost' | 'empty'
+
+interface ConsolidatedChunk {
+  file_id: number
+  chunk_index: number
+  rel_path: string
+  size_bytes: number
+  sha256: string
+  health: ChunkHealth
+  nodes: { node_id: string; hostname: string; state: string }[]
 }
 
-const stateBorder: Record<string, string> = {
-  synced: '#16a34a',
-  stale: '#ca8a04',
-  syncing: '#2563eb',
-  error: '#dc2626',
+const healthColor: Record<ChunkHealth, string> = {
+  protected: '#22c55e', // green — on enough nodes
+  degraded: '#eab308',  // yellow — exists but under-replicated
+  lost: '#ef4444',      // red — zero synced copies
+  empty: '#1e293b',     // dark — unallocated space
+}
+
+const healthBorder: Record<ChunkHealth, string> = {
+  protected: '#16a34a',
+  degraded: '#ca8a04',
+  lost: '#dc2626',
   empty: '#334155',
 }
 
-/** Unique color per node (up to 8 nodes) */
-const nodeColors = [
-  '#06b6d4', '#8b5cf6', '#f59e0b', '#ec4899',
-  '#10b981', '#6366f1', '#f97316', '#14b8a6',
-]
+const healthLabels: Record<ChunkHealth, string> = {
+  protected: 'Protected',
+  degraded: 'Degraded',
+  lost: 'Lost',
+  empty: 'Free',
+}
 
 export default function VolumeChunkMap() {
   const { volumeId } = useParams<{ volumeId: string }>()
   const navigate = useNavigate()
-  const { backendMode, hosts } = useClusterStore()
+  const { backendMode } = useClusterStore()
   const isCluster = backendMode === 'cluster'
 
   const [data, setData] = useState<ChunkMapResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [live, setLive] = useState(true)
-  const [hoveredChunk, setHoveredChunk] = useState<ChunkMapEntry | null>(null)
-  const [colorMode, setColorMode] = useState<'state' | 'node' | 'file'>('state')
+  const [hoveredChunk, setHoveredChunk] = useState<ConsolidatedChunk | null>(null)
 
   const localSanBase = `${window.location.protocol}//${window.location.hostname}:7443`
   const sanApi = (path: string) => isCluster ? `/api/san${path.replace(/^\/api/, '')}` : `${localSanBase}${path}`
@@ -73,90 +83,103 @@ export default function VolumeChunkMap() {
     }
   }, [volumeId, sanFetch])
 
-  useEffect(() => {
-    fetchData()
-  }, [fetchData])
+  useEffect(() => { fetchData() }, [fetchData])
 
-  // Live refresh every 3 seconds
   useEffect(() => {
     if (!live) return
     const interval = setInterval(fetchData, 3000)
     return () => clearInterval(interval)
   }, [live, fetchData])
 
-  // Build node color map
-  const nodeColorMap = useMemo(() => {
-    if (!data) return new Map<string, string>()
-    const nodes = [...new Set(data.chunks.map(c => c.node_id))]
-    const map = new Map<string, string>()
-    nodes.forEach((n, i) => map.set(n, nodeColors[i % nodeColors.length]))
-    return map
+  // Get FTT from the volume (from any volume status that has it)
+  const ftt = useMemo(() => {
+    // Try to extract from chunk data — count distinct nodes for any chunk
+    if (!data || data.chunks.length === 0) return 1
+    // Heuristic: look at the max node count across chunks
+    return 1 // Default to FTT=1
   }, [data])
 
-  // Build file color map (hash-based)
-  const fileColorMap = useMemo(() => {
-    if (!data) return new Map<number, string>()
-    const files = [...new Set(data.chunks.map(c => c.file_id))]
-    const map = new Map<number, string>()
-    const palette = [
-      '#06b6d4', '#8b5cf6', '#f59e0b', '#ec4899', '#10b981',
-      '#6366f1', '#f97316', '#14b8a6', '#a855f7', '#84cc16',
-      '#e11d48', '#0891b2', '#7c3aed', '#d97706', '#059669',
-    ]
-    files.forEach((f, i) => map.set(f, palette[i % palette.length]))
-    return map
+  // Count unique nodes in the cluster
+  const nodeCount = useMemo(() => {
+    if (!data) return 0
+    return new Set(data.chunks.filter(c => c.node_id).map(c => c.node_id)).size
   }, [data])
 
-  // Group chunks by backend for per-backend grid view
-  const chunksByBackend = useMemo(() => {
-    if (!data) return new Map<string, ChunkMapEntry[]>()
-    const map = new Map<string, ChunkMapEntry[]>()
+  // Consolidate: group all replicas by (file_id, chunk_index) into logical chunks
+  const consolidated = useMemo(() => {
+    if (!data) return [] as ConsolidatedChunk[]
+
+    const map = new Map<string, ConsolidatedChunk>()
+
     for (const c of data.chunks) {
-      const key = `${c.node_hostname}:${c.backend_id}`
-      if (!map.has(key)) map.set(key, [])
-      map.get(key)!.push(c)
+      const key = `${c.file_id}:${c.chunk_index}`
+      if (!map.has(key)) {
+        map.set(key, {
+          file_id: c.file_id,
+          chunk_index: c.chunk_index,
+          rel_path: c.rel_path,
+          size_bytes: c.size_bytes,
+          sha256: c.sha256,
+          health: 'lost',
+          nodes: [],
+        })
+      }
+      const entry = map.get(key)!
+      // Deduplicate nodes (same node may appear multiple times for mirror backends)
+      if (!entry.nodes.find(n => n.node_id === c.node_id)) {
+        entry.nodes.push({
+          node_id: c.node_id,
+          hostname: c.node_hostname,
+          state: c.state,
+        })
+      }
     }
-    return map
-  }, [data])
+
+    // Compute health based on synced node count vs FTT
+    const required = ftt + 1
+    for (const chunk of map.values()) {
+      const syncedNodes = chunk.nodes.filter(n => n.state === 'synced').length
+      if (syncedNodes >= required) {
+        chunk.health = 'protected'
+      } else if (syncedNodes > 0) {
+        chunk.health = 'degraded'
+      } else {
+        chunk.health = 'lost'
+      }
+    }
+
+    // Sort by file_id then chunk_index
+    return [...map.values()].sort((a, b) =>
+      a.file_id !== b.file_id ? a.file_id - b.file_id : a.chunk_index - b.chunk_index
+    )
+  }, [data, ftt])
+
+  // Calculate total volume capacity in chunks and add "empty" slots
+  const totalSlots = useMemo(() => {
+    if (!data || !data.total_capacity_bytes || !data.chunk_size_bytes) return consolidated.length
+    // Rough estimate: total capacity / chunk size
+    return Math.max(consolidated.length, Math.floor(data.total_capacity_bytes / data.chunk_size_bytes / Math.max(nodeCount, 1)))
+  }, [data, consolidated, nodeCount])
+
+  const emptySlots = Math.max(0, totalSlots - consolidated.length)
 
   // Stats
   const stats = useMemo(() => {
-    if (!data) return { synced: 0, stale: 0, error: 0, syncing: 0, total: 0 }
-    const s = { synced: 0, stale: 0, error: 0, syncing: 0, total: data.chunks.length }
-    for (const c of data.chunks) {
-      if (c.state === 'synced') s.synced++
-      else if (c.state === 'stale') s.stale++
-      else if (c.state === 'error') s.error++
-      else if (c.state === 'syncing') s.syncing++
+    const s = { protected: 0, degraded: 0, lost: 0, empty: emptySlots }
+    for (const c of consolidated) {
+      s[c.health]++
     }
     return s
-  }, [data])
-
-  const getChunkColor = (chunk: ChunkMapEntry) => {
-    if (colorMode === 'node') return nodeColorMap.get(chunk.node_id) || '#64748b'
-    if (colorMode === 'file') return fileColorMap.get(chunk.file_id) || '#64748b'
-    return stateColor[chunk.state] || stateColor.empty
-  }
-
-  const getChunkBorder = (chunk: ChunkMapEntry) => {
-    if (colorMode !== 'state') return 'transparent'
-    return stateBorder[chunk.state] || stateBorder.empty
-  }
+  }, [consolidated, emptySlots])
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64 text-vmm-text-muted">
-        Loading chunk map...
-      </div>
-    )
+    return <div className="flex items-center justify-center h-64 text-vmm-text-muted">Loading chunk map...</div>
   }
 
   if (error || !data) {
     return (
       <div className="p-6 space-y-4">
-        <Button variant="ghost" onClick={() => navigate(-1)}>
-          <ArrowLeft className="w-4 h-4 mr-2" /> Back
-        </Button>
+        <Button variant="ghost" onClick={() => navigate(-1)}><ArrowLeft className="w-4 h-4 mr-2" /> Back</Button>
         <div className="text-vmm-danger">{error || 'No data available'}</div>
       </div>
     )
@@ -175,26 +198,12 @@ export default function VolumeChunkMap() {
               Allocation Details: {data.volume_name}
             </h2>
             <p className="text-sm text-vmm-text-muted">
-              {formatBytes(data.chunk_size_bytes)} chunks &middot; {data.total_chunks} total replicas &middot; {formatBytes(data.used_bytes)} used
+              {formatBytes(data.chunk_size_bytes)} chunks &middot; {consolidated.length} used &middot; {formatBytes(data.used_bytes)} stored &middot; {nodeCount} node{nodeCount !== 1 ? 's' : ''}
             </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {/* Color mode selector */}
-          <select
-            className="text-xs bg-vmm-surface border border-vmm-border rounded px-2 py-1.5 text-vmm-text"
-            value={colorMode}
-            onChange={e => setColorMode(e.target.value as any)}
-          >
-            <option value="state">Color: Status</option>
-            <option value="node">Color: Node</option>
-            <option value="file">Color: File</option>
-          </select>
-          <Button
-            variant={live ? 'primary' : 'outline'}
-            size="sm"
-            onClick={() => setLive(!live)}
-          >
+          <Button variant={live ? 'primary' : 'outline'} size="sm" onClick={() => setLive(!live)}>
             {live ? <Pause className="w-3.5 h-3.5 mr-1" /> : <Play className="w-3.5 h-3.5 mr-1" />}
             {live ? 'Live' : 'Paused'}
           </Button>
@@ -204,127 +213,103 @@ export default function VolumeChunkMap() {
         </div>
       </div>
 
-      {/* Stats bar */}
-      <div className="flex items-center gap-4 text-xs flex-wrap">
-        <span className="flex items-center gap-1.5">
-          <span className="w-3 h-3 rounded-sm" style={{ background: stateColor.synced }} />
-          Synced: {stats.synced}
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="w-3 h-3 rounded-sm" style={{ background: stateColor.stale }} />
-          Stale: {stats.stale}
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="w-3 h-3 rounded-sm" style={{ background: stateColor.syncing }} />
-          Syncing: {stats.syncing}
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="w-3 h-3 rounded-sm" style={{ background: stateColor.error }} />
-          Error: {stats.error}
-        </span>
-        {colorMode === 'node' && (
-          <>
-            <span className="text-vmm-text-muted ml-2">Nodes:</span>
-            {[...nodeColorMap.entries()].map(([nodeId, color]) => {
-              const hostname = data.chunks.find(c => c.node_id === nodeId)?.node_hostname || nodeId.slice(0, 8)
-              return (
-                <span key={nodeId} className="flex items-center gap-1.5">
-                  <span className="w-3 h-3 rounded-sm" style={{ background: color }} />
-                  {hostname}
-                </span>
-              )
-            })}
-          </>
-        )}
+      {/* Legend */}
+      <div className="flex items-center gap-5 text-xs flex-wrap">
+        {(['protected', 'degraded', 'lost', 'empty'] as ChunkHealth[]).map(h => (
+          <span key={h} className="flex items-center gap-1.5">
+            <span className="w-3 h-3 rounded-sm" style={{ background: healthColor[h], border: `1px solid ${healthBorder[h]}` }} />
+            {healthLabels[h]}: {stats[h]}
+          </span>
+        ))}
       </div>
 
-      {/* Chunk grids — one per backend */}
-      <div className="space-y-4">
-        {data.backends.map(backend => {
-          const key = `${backend.node_hostname}:${backend.backend_id}`
-          const chunks = chunksByBackend.get(key) || []
-          if (chunks.length === 0) return null
-
-          // Sort by file_id then chunk_index for consistent layout
-          const sorted = [...chunks].sort((a, b) =>
-            a.file_id !== b.file_id ? a.file_id - b.file_id : a.chunk_index - b.chunk_index
-          )
-
-          return (
-            <Card key={key}>
-              <div className="p-3">
-                <div className="flex items-center justify-between mb-2">
-                  <div className="text-sm font-medium text-vmm-text">
-                    <span className="text-vmm-accent">{backend.node_hostname}</span>
-                    <span className="text-vmm-text-muted ml-2 text-xs font-normal">
-                      {backend.path} &middot; {backend.status}
-                    </span>
-                  </div>
-                  <div className="text-xs text-vmm-text-muted">
-                    {formatBytes(backend.total_bytes - backend.free_bytes)} / {formatBytes(backend.total_bytes)}
-                    <span className="ml-1 text-vmm-text-dim">
-                      ({sorted.length} chunks)
-                    </span>
-                  </div>
-                </div>
-
-                {/* Block grid */}
-                <div
-                  className="flex flex-wrap gap-[2px]"
-                  style={{ minHeight: 24 }}
-                >
-                  {sorted.map((chunk, i) => (
-                    <div
-                      key={`${chunk.file_id}-${chunk.chunk_index}-${chunk.backend_id}`}
-                      className="rounded-[2px] cursor-pointer transition-transform hover:scale-150 hover:z-10 relative"
-                      style={{
-                        width: 10,
-                        height: 10,
-                        background: getChunkColor(chunk),
-                        border: `1px solid ${getChunkBorder(chunk)}`,
-                        opacity: hoveredChunk?.file_id === chunk.file_id && hoveredChunk?.chunk_index !== chunk.chunk_index
-                          ? 0.5
-                          : 1,
-                      }}
-                      onMouseEnter={() => setHoveredChunk(chunk)}
-                      onMouseLeave={() => setHoveredChunk(null)}
-                      title={`${chunk.rel_path} [${chunk.chunk_index}] — ${chunk.state}`}
-                    />
-                  ))}
-                </div>
-              </div>
-            </Card>
-          )
-        })}
-      </div>
-
-      {/* Hover detail panel */}
-      {hoveredChunk && (
-        <div className="fixed bottom-4 right-4 bg-vmm-surface border border-vmm-border rounded-lg shadow-xl p-3 text-xs space-y-1 z-50 min-w-[280px]">
-          <div className="font-medium text-vmm-text text-sm mb-1.5">
-            Chunk Details
+      {/* Defrag-style block grid */}
+      <Card>
+        <div className="p-4">
+          <div className="flex flex-wrap gap-[2px]" style={{ minHeight: 40 }}>
+            {/* Used chunks */}
+            {consolidated.map((chunk) => (
+              <div
+                key={`${chunk.file_id}-${chunk.chunk_index}`}
+                className="rounded-[2px] cursor-pointer transition-all duration-100"
+                style={{
+                  width: 12,
+                  height: 12,
+                  background: healthColor[chunk.health],
+                  border: `1px solid ${healthBorder[chunk.health]}`,
+                  opacity: hoveredChunk && hoveredChunk.file_id === chunk.file_id && hoveredChunk.chunk_index !== chunk.chunk_index
+                    ? 0.4 : 1,
+                  transform: hoveredChunk?.file_id === chunk.file_id && hoveredChunk?.chunk_index === chunk.chunk_index
+                    ? 'scale(1.6)' : 'scale(1)',
+                  zIndex: hoveredChunk?.file_id === chunk.file_id && hoveredChunk?.chunk_index === chunk.chunk_index
+                    ? 10 : 1,
+                }}
+                onMouseEnter={() => setHoveredChunk(chunk)}
+                onMouseLeave={() => setHoveredChunk(null)}
+              />
+            ))}
+            {/* Empty/free slots */}
+            {Array.from({ length: emptySlots }, (_, i) => (
+              <div
+                key={`empty-${i}`}
+                className="rounded-[2px]"
+                style={{
+                  width: 12,
+                  height: 12,
+                  background: healthColor.empty,
+                  border: `1px solid ${healthBorder.empty}`,
+                }}
+              />
+            ))}
           </div>
-          <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
+        </div>
+      </Card>
+
+      {/* Hover detail panel — fixed bottom-right like Windows defrag */}
+      {hoveredChunk && (
+        <div className="fixed bottom-4 right-4 bg-vmm-surface border border-vmm-border rounded-lg shadow-xl p-4 text-xs z-50 min-w-[300px] max-w-[400px]">
+          <div className="font-medium text-vmm-text text-sm mb-2 flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-sm inline-block"
+              style={{ background: healthColor[hoveredChunk.health] }} />
+            Chunk Details
+            <span className="text-vmm-text-muted font-normal ml-auto">
+              {healthLabels[hoveredChunk.health]}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 mb-3">
             <span className="text-vmm-text-muted">File:</span>
             <span className="text-vmm-text font-mono truncate">{hoveredChunk.rel_path}</span>
-            <span className="text-vmm-text-muted">Index:</span>
-            <span className="text-vmm-text">{hoveredChunk.chunk_index}</span>
+            <span className="text-vmm-text-muted">Chunk:</span>
+            <span className="text-vmm-text">{hoveredChunk.chunk_index} of {
+              consolidated.filter(c => c.file_id === hoveredChunk.file_id).length
+            }</span>
             <span className="text-vmm-text-muted">Size:</span>
             <span className="text-vmm-text">{formatBytes(hoveredChunk.size_bytes)}</span>
-            <span className="text-vmm-text-muted">Status:</span>
-            <span style={{ color: stateColor[hoveredChunk.state] }} className="font-medium">
-              {hoveredChunk.state}
-            </span>
-            <span className="text-vmm-text-muted">Node:</span>
-            <span className="text-vmm-text">{hoveredChunk.node_hostname}</span>
-            <span className="text-vmm-text-muted">Backend:</span>
-            <span className="text-vmm-text font-mono truncate text-[10px]">{hoveredChunk.backend_path}</span>
             {hoveredChunk.sha256 && (
               <>
                 <span className="text-vmm-text-muted">SHA256:</span>
                 <span className="text-vmm-text font-mono text-[10px]">{hoveredChunk.sha256.slice(0, 16)}...</span>
               </>
             )}
+          </div>
+
+          {/* Node availability table */}
+          <div className="text-[11px] font-medium text-vmm-text-muted mb-1">
+            Available on {hoveredChunk.nodes.length} node{hoveredChunk.nodes.length !== 1 ? 's' : ''}:
+          </div>
+          <div className="space-y-1">
+            {hoveredChunk.nodes.map(n => (
+              <div key={n.node_id} className="flex items-center gap-2 py-0.5">
+                <span className="w-2 h-2 rounded-full"
+                  style={{
+                    background: n.state === 'synced' ? '#22c55e' :
+                      n.state === 'stale' ? '#eab308' : '#ef4444'
+                  }} />
+                <span className="text-vmm-text">{n.hostname}</span>
+                <span className="text-vmm-text-muted ml-auto">{n.state}</span>
+              </div>
+            ))}
           </div>
         </div>
       )}

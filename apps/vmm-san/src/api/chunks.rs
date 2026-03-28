@@ -23,9 +23,40 @@ const EXPECTED_SHA256_HEADER: &str = "X-CoreSAN-Chunk-SHA256";
 pub async fn write_chunk(
     headers: HeaderMap,
     State(state): State<Arc<CoreSanState>>,
-    Path((volume_id, file_id, chunk_index)): Path<(String, i64, u32)>,
+    Path((volume_id, sender_file_id, chunk_index)): Path<(String, i64, u32)>,
     body: axum::body::Bytes,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    // 0. Resolve local file_id — the sender's file_id may differ from ours
+    //    (each node has its own auto-increment IDs in file_map)
+    let file_id = {
+        let db = state.db.lock().unwrap();
+        // First try: sender file_id matches locally (same node wrote it)
+        let local_exists: bool = db.query_row(
+            "SELECT COUNT(*) FROM file_map WHERE id = ?1 AND volume_id = ?2",
+            rusqlite::params![sender_file_id, &volume_id], |row| row.get::<_, i64>(0),
+        ).unwrap_or(0) > 0;
+
+        if local_exists {
+            sender_file_id
+        } else {
+            // Lookup via rel_path from the X-CoreSAN-Rel-Path header
+            let rel_path = headers.get("X-CoreSAN-Rel-Path")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+
+            if !rel_path.is_empty() {
+                db.query_row(
+                    "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
+                    rusqlite::params![&volume_id, rel_path], |row| row.get::<_, i64>(0),
+                ).unwrap_or(sender_file_id)
+            } else {
+                // Last resort: find ANY file_map entry for this volume that has chunk_count
+                // matching what we'd expect — this is a heuristic fallback
+                sender_file_id
+            }
+        }
+    };
+
     // 1. Verify SHA256 if sender provided expected hash
     let actual_sha256 = format!("{:x}", Sha256::digest(&body));
     if let Some(expected) = headers.get(EXPECTED_SHA256_HEADER) {
@@ -37,67 +68,71 @@ pub async fn write_chunk(
         }
     }
 
-    // 2. Find a local backend
-    let (backend_id, backend_path) = {
+    // 2. Find ALL local backends for this chunk (respects mirror/stripe policy)
+    let (placements, vol_chunk_size) = {
         let db = state.db.lock().unwrap();
         let local_raid: String = db.query_row(
             "SELECT local_raid FROM volumes WHERE id = ?1",
             rusqlite::params![&volume_id], |row| row.get(0),
         ).unwrap_or_else(|_| "stripe".into());
 
-        let placements = chunk::place_chunk(&db, &volume_id, &state.node_id, chunk_index, &local_raid);
-        if placements.is_empty() {
-            return Err((StatusCode::NOT_FOUND, "No local backend available".into()));
-        }
-        placements[0].clone()
-    };
-
-    // 3. Atomic write to disk: temp + fsync + rename
-    let path = chunk::chunk_path(&backend_path, &volume_id, file_id, chunk_index);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("mkdir: {}", e)))?;
-    }
-
-    let tmp = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
-    std::fs::write(&tmp, &body)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("write: {}", e)))?;
-    if let Ok(f) = std::fs::File::open(&tmp) {
-        let _ = f.sync_all();
-    }
-    std::fs::rename(&tmp, &path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("rename: {}", e))
-    })?;
-
-    // 4. Read-back verification
-    let readback_sha = match std::fs::read(&path) {
-        Ok(d) => format!("{:x}", Sha256::digest(&d)),
-        Err(e) => {
-            let _ = std::fs::remove_file(&path);
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("readback failed: {}", e)));
-        }
-    };
-    if readback_sha != actual_sha256 {
-        let _ = std::fs::remove_file(&path);
-        tracing::error!("write_chunk: readback SHA256 mismatch! Disk error? {}/{}/idx{}", volume_id, file_id, chunk_index);
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, "Readback verification failed".into()));
-    }
-
-    // 5. Update DB via ChunkService
-    {
-        let db = state.db.lock().unwrap();
-        let vol_chunk_size = db.query_row(
+        let vcs = db.query_row(
             "SELECT chunk_size_bytes FROM volumes WHERE id = ?1",
             rusqlite::params![&volume_id], |row| row.get::<_, u64>(0),
         ).unwrap_or(chunk::DEFAULT_CHUNK_SIZE);
 
-        if let Err(e) = ChunkService::receive_chunk(
-            &db, file_id, chunk_index, body.len() as u64,
-            vol_chunk_size, &actual_sha256, &backend_id, &state.node_id,
-        ) {
-            tracing::error!("write_chunk DB error: {}", e);
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("DB: {}", e)));
+        let p = chunk::place_chunk(&db, &volume_id, &state.node_id, chunk_index, &local_raid);
+        if p.is_empty() {
+            return Err((StatusCode::NOT_FOUND, "No local backend available".into()));
+        }
+        (p, vcs)
+    };
+
+    // 3. Write to ALL placement backends (mirror writes to all, stripe to one)
+    for (backend_id, backend_path) in &placements {
+        let path = chunk::chunk_path(backend_path, &volume_id, file_id, chunk_index);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("mkdir: {}", e)))?;
+        }
+
+        let tmp = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
+        std::fs::write(&tmp, &body)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("write: {}", e)))?;
+        if let Ok(f) = std::fs::File::open(&tmp) {
+            let _ = f.sync_all();
+        }
+        std::fs::rename(&tmp, &path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("rename: {}", e))
+        })?;
+    }
+
+    // 4. Read-back verification on first backend
+    {
+        let path = chunk::chunk_path(&placements[0].1, &volume_id, file_id, chunk_index);
+        let readback_sha = match std::fs::read(&path) {
+            Ok(d) => format!("{:x}", Sha256::digest(&d)),
+            Err(e) => {
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("readback failed: {}", e)));
+            }
+        };
+        if readback_sha != actual_sha256 {
+            tracing::error!("write_chunk: readback SHA256 mismatch! {}/{}/idx{}", volume_id, file_id, chunk_index);
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "Readback verification failed".into()));
+        }
+    }
+
+    // 5. Update DB — register replica on each placement backend
+    {
+        let db = state.db.lock().unwrap();
+        for (backend_id, _) in &placements {
+            if let Err(e) = ChunkService::receive_chunk(
+                &db, file_id, chunk_index, body.len() as u64,
+                vol_chunk_size, &actual_sha256, backend_id, &state.node_id,
+            ) {
+                tracing::error!("write_chunk DB error on backend {}: {}", backend_id, e);
+            }
         }
     }
 

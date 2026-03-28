@@ -45,6 +45,10 @@ fn run_rebalance(state: &CoreSanState) {
 
     let db = state.db.lock().unwrap();
 
+    // Phase 1: Repair missing local mirror copies
+    repair_local_mirrors(&db, state);
+
+    // Phase 2: Evacuate chunks from degraded/draining backends
     let chunks_to_move = ChunkService::find_chunks_on_bad_backends(&db, &state.node_id, MAX_CHUNKS_PER_CYCLE);
 
     if chunks_to_move.is_empty() {
@@ -171,9 +175,136 @@ fn run_rebalance(state: &CoreSanState) {
 
     for backend_id in drained {
         tracing::info!("Rebalancer: backend {} fully drained", backend_id);
-        db.execute(
+        log_err!(db.execute(
             "UPDATE backends SET status = 'offline' WHERE id = ?1",
             rusqlite::params![&backend_id],
-        ).ok();
+        ), "rebalancer: mark drained backend offline");
+    }
+}
+
+/// Repair missing local mirror copies.
+/// For volumes with local_raid=mirror, every chunk should exist on ALL local online backends.
+/// If a chunk only exists on some backends, copy it to the missing ones.
+fn repair_local_mirrors(db: &rusqlite::Connection, state: &CoreSanState) {
+    use crate::services::chunk::ChunkService;
+
+    // Find volumes with mirror or stripe_mirror that have local backends
+    let mirror_volumes: Vec<(String, String)> = {
+        let mut stmt = db.prepare(
+            "SELECT id, local_raid FROM volumes WHERE local_raid IN ('mirror', 'stripe_mirror') AND status = 'online'"
+        ).unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap().filter_map(|r| r.ok()).collect()
+    };
+
+    if mirror_volumes.is_empty() {
+        return;
+    }
+
+    // Get all local online backends
+    let local_backends: Vec<(String, String)> = {
+        let mut stmt = db.prepare(
+            "SELECT id, path FROM backends WHERE node_id = ?1 AND status = 'online'"
+        ).unwrap();
+        stmt.query_map(rusqlite::params![&state.node_id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap().filter_map(|r| r.ok()).collect()
+    };
+
+    if local_backends.len() < 2 {
+        return; // Mirror needs at least 2 backends
+    }
+
+    let mut repaired = 0u32;
+
+    for (volume_id, _raid) in &mirror_volumes {
+        // Find chunks that exist on some local backends but not all
+        // For each chunk on this node, check if it's on every local backend
+        let local_chunks: Vec<(i64, i64, u32)> = {
+            let mut stmt = db.prepare(
+                "SELECT DISTINCT fc.id, fc.file_id, fc.chunk_index
+                 FROM chunk_replicas cr
+                 JOIN file_chunks fc ON fc.id = cr.chunk_id
+                 JOIN file_map fm ON fm.id = fc.file_id
+                 WHERE cr.node_id = ?1 AND fm.volume_id = ?2 AND cr.state = 'synced'
+                   AND cr.backend_id != ''"
+            ).unwrap();
+            stmt.query_map(rusqlite::params![&state.node_id, volume_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            }).unwrap().filter_map(|r| r.ok()).collect()
+        };
+
+        for (chunk_id, file_id, chunk_index) in &local_chunks {
+            if repaired >= MAX_CHUNKS_PER_CYCLE {
+                return;
+            }
+
+            // Which backends have this chunk?
+            let backends_with_chunk: Vec<String> = {
+                let mut stmt = db.prepare(
+                    "SELECT backend_id FROM chunk_replicas
+                     WHERE chunk_id = ?1 AND node_id = ?2 AND state = 'synced' AND backend_id != ''"
+                ).unwrap();
+                stmt.query_map(rusqlite::params![chunk_id, &state.node_id], |row| row.get(0))
+                    .unwrap().filter_map(|r| r.ok()).collect()
+            };
+
+            // Find backends that are missing this chunk
+            for (backend_id, backend_path) in &local_backends {
+                if backends_with_chunk.contains(backend_id) {
+                    continue; // Already has it
+                }
+
+                // Find a source backend that has this chunk
+                let source = backends_with_chunk.first();
+                let source_path = source.and_then(|sid| {
+                    local_backends.iter().find(|(id, _)| id == sid).map(|(_, p)| p.as_str())
+                });
+
+                let source_path = match source_path {
+                    Some(p) => p,
+                    None => continue,
+                };
+
+                // Copy chunk from source to missing backend
+                let src = chunk::chunk_path(source_path, volume_id, *file_id, *chunk_index);
+                let dst = chunk::chunk_path(backend_path, volume_id, *file_id, *chunk_index);
+
+                if !src.exists() {
+                    continue;
+                }
+
+                if let Some(parent) = dst.parent() {
+                    if std::fs::create_dir_all(parent).is_err() { continue; }
+                }
+
+                // Atomic copy: read → tmp → fsync → rename
+                let data = match std::fs::read(&src) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+
+                let tmp = dst.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
+                if std::fs::write(&tmp, &data).is_err() { continue; }
+                if let Ok(f) = std::fs::File::open(&tmp) {
+                    let _ = f.sync_all();
+                }
+                if std::fs::rename(&tmp, &dst).is_err() {
+                    let _ = std::fs::remove_file(&tmp);
+                    continue;
+                }
+
+                // Register in DB
+                log_err!(ChunkService::set_replica_synced(db, *chunk_id, backend_id, &state.node_id),
+                    "rebalancer: mirror repair set_replica_synced");
+
+                repaired += 1;
+                tracing::info!("Mirror repair: copied chunk {}/idx{} → backend {}",
+                    file_id, chunk_index, &backend_id[..8]);
+            }
+        }
+    }
+
+    if repaired > 0 {
+        tracing::info!("Mirror repair: {} missing local copies restored", repaired);
     }
 }
