@@ -255,6 +255,26 @@ impl PeerClient {
         }
     }
 
+    /// Notify a peer to delete a file and its chunks.
+    pub async fn delete_file(
+        &self,
+        peer_address: &str,
+        volume_id: &str,
+        rel_path: &str,
+    ) -> Result<(), String> {
+        let url = format!("{}/api/volumes/{}/files/{}", peer_address, volume_id, rel_path);
+        let resp = self.http.delete(&url)
+            .header(PEER_SECRET_HEADER, &self.secret)
+            .send().await
+            .map_err(|e| format!("File delete sync failed: {}", e))?;
+
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!("File delete sync returned status {}", resp.status()))
+        }
+    }
+
     /// Notify a peer to delete a volume.
     pub async fn delete_volume(
         &self,

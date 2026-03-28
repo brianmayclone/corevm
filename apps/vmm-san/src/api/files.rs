@@ -253,49 +253,69 @@ pub async fn write(
 }
 
 /// DELETE /api/volumes/{id}/files/*path — delete a file and all chunk replicas.
+/// Propagates deletion to all online peers (unless this is a peer-originated delete).
 pub async fn delete(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<CoreSanState>>,
     Path((volume_id, rel_path)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let db = state.db.lock().unwrap();
+    let is_peer_request = headers.get(crate::auth::PEER_SECRET_HEADER).is_some();
 
-    let file_id: Option<i64> = db.query_row(
-        "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
-        rusqlite::params![&volume_id, &rel_path], |row| row.get(0),
-    ).ok();
+    // 1. Delete local chunk files from disk
+    {
+        let db = state.db.lock().unwrap();
 
-    if let Some(fid) = file_id {
-        // Delete physical chunk files on all local backends
-        let chunk_files: Vec<(u32, String)> = {
-            let mut stmt = db.prepare(
-                "SELECT fc.chunk_index, b.path FROM chunk_replicas cr
-                 JOIN file_chunks fc ON fc.id = cr.chunk_id
-                 JOIN backends b ON b.id = cr.backend_id
-                 WHERE fc.file_id = ?1 AND cr.node_id = ?2"
-            ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
-            let rows = stmt.query_map(
-                rusqlite::params![fid, &state.node_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
-            rows.filter_map(|r| r.ok()).collect()
-        };
+        let file_id: Option<i64> = db.query_row(
+            "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
+            rusqlite::params![&volume_id, &rel_path], |row| row.get(0),
+        ).ok();
 
-        for (chunk_index, backend_path) in &chunk_files {
-            let path = crate::storage::chunk::chunk_path(backend_path, &volume_id, fid, *chunk_index);
-            std::fs::remove_file(&path).ok();
-            // Clean up empty parent dirs
-            if let Some(parent) = path.parent() {
-                std::fs::remove_dir(parent).ok(); // only succeeds if empty
+        if let Some(fid) = file_id {
+            let chunk_files: Vec<(u32, String)> = {
+                let mut stmt = db.prepare(
+                    "SELECT fc.chunk_index, b.path FROM chunk_replicas cr
+                     JOIN file_chunks fc ON fc.id = cr.chunk_id
+                     JOIN backends b ON b.id = cr.backend_id
+                     WHERE fc.file_id = ?1 AND cr.node_id = ?2"
+                ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+                let rows = stmt.query_map(
+                    rusqlite::params![fid, &state.node_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+                rows.filter_map(|r| r.ok()).collect()
+            };
+
+            for (chunk_index, backend_path) in &chunk_files {
+                let path = crate::storage::chunk::chunk_path(backend_path, &volume_id, fid, *chunk_index);
+                let _ = std::fs::remove_file(&path);
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::remove_dir(parent); // only succeeds if empty
+                }
             }
         }
 
+        // 2. Delete from local DB atomically
+        crate::services::file::FileService::delete(&db, &volume_id, &rel_path)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
     }
 
-    // Delete file + all chunks/replicas atomically via FileService
-    crate::services::file::FileService::delete(&db, &volume_id, &rel_path)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+    tracing::info!("Deleted file {}/{} (local chunks removed)", volume_id, rel_path);
 
-    tracing::info!("Deleted file {}/{} (chunks removed)", volume_id, rel_path);
+    // 3. Propagate deletion to all online peers (not for peer-originated requests)
+    if !is_peer_request {
+        let client = crate::peer::client::PeerClient::new(&state.config.peer.secret);
+        let online_peers: Vec<(String, String)> = state.peers.iter()
+            .filter(|p| p.status == crate::state::PeerStatus::Online)
+            .map(|p| (p.node_id.clone(), p.address.clone()))
+            .collect();
+
+        for (peer_id, peer_addr) in &online_peers {
+            match client.delete_file(peer_addr, &volume_id, &rel_path).await {
+                Ok(_) => tracing::info!("Delete propagated to peer {}", peer_id),
+                Err(e) => tracing::warn!("Delete propagation to {} failed: {}", peer_id, e),
+            }
+        }
+    }
 
     Ok(Json(serde_json::json!({ "success": true })))
 }
