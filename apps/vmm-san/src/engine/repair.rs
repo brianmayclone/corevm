@@ -260,7 +260,18 @@ async fn repair_single_chunk(
 
     if let Some((target_node_id, target_addr)) = target_peer {
         if client.push_chunk(&target_addr, volume_id, file_id, chunk_index, data).await.is_ok() {
-            tracing::info!("Repair: pushed chunk {} (file {}, idx {}) to {} (verified)",
+            // Record in our LOCAL DB that this peer now has the chunk.
+            // Without this, the repair engine would keep thinking the chunk is under-replicated.
+            let db = state.db.lock().unwrap();
+            let now = chrono::Utc::now().to_rfc3339();
+            // Use a placeholder backend_id for remote nodes (the actual backend_id is in their DB)
+            db.execute(
+                "INSERT OR REPLACE INTO chunk_replicas (chunk_id, backend_id, node_id, state, synced_at)
+                 VALUES (?1, ?2, ?3, 'synced', ?4)",
+                rusqlite::params![chunk_id, format!("remote-{}", target_node_id), &target_node_id, &now],
+            ).ok();
+
+            tracing::info!("Repair: pushed chunk {} (file {}, idx {}) to {} (verified, tracked locally)",
                 chunk_id, file_id, chunk_index, target_node_id);
             return true;
         }

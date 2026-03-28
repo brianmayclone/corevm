@@ -380,22 +380,28 @@ fn fetch_san_status() -> Option<SanStatus> {
     // Read vmm-san port from config
     let san_port = read_port_from_toml("/etc/vmm/vmm-san.toml", "server").unwrap_or(7443);
 
-    // Fetch dashboard/status from local vmm-san
-    let url = format!("http://127.0.0.1:{}/api/dashboard", san_port);
+    // Try /api/status first (simpler, flat response)
+    let url = format!("http://127.0.0.1:{}/api/status", san_port);
     let output = Command::new("curl")
-        .args(["-s", "-m", "2", &url])
+        .args(["-s", "-m", "2", "--connect-timeout", "1", &url])
         .output()
         .ok()?;
 
-    if !output.status.success() {
+    let body = String::from_utf8_lossy(&output.stdout);
+    if body.is_empty() {
         return None;
     }
 
-    let body = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&body).ok()?;
 
-    // Dashboard response has nested structure: { status: { ... }, total_capacity_bytes, ... }
-    let st = &json["status"];
+    // /api/status returns a flat structure directly (not nested under "status")
+    // But /api/dashboard wraps it in { status: {...}, total_capacity_bytes, ... }
+    // Handle both:
+    let st = if json.get("status").is_some() && json["status"].is_object() {
+        &json["status"]
+    } else {
+        &json
+    };
 
     // Check if there are claimed disks — only show SAN status if disks are claimed
     let claimed_disks = st["claimed_disks"].as_u64().unwrap_or(0) as u32;
@@ -408,10 +414,19 @@ fn fetch_san_status() -> Option<SanStatus> {
     let volumes = st["volumes"].as_array().map(|a| a.len() as u32).unwrap_or(0);
     let is_leader = st["is_leader"].as_bool().unwrap_or(false);
 
-    // Storage capacity from top-level dashboard fields
-    let total_bytes = json["total_capacity_bytes"].as_u64().unwrap_or(0);
+    // Storage capacity — try various field names
+    let total_bytes = json["total_capacity_bytes"].as_u64()
+        .or_else(|| st["volumes"].as_array().map(|vols|
+            vols.iter().filter_map(|v| v["total_bytes"].as_u64()).sum()))
+        .unwrap_or(0);
     let used_bytes = json["used_capacity_bytes"].as_u64().unwrap_or(0);
-    let free_bytes = total_bytes.saturating_sub(used_bytes);
+    let free_bytes = if total_bytes > 0 {
+        total_bytes.saturating_sub(used_bytes)
+    } else {
+        st["volumes"].as_array().map(|vols|
+            vols.iter().filter_map(|v| v["free_bytes"].as_u64()).sum()
+        ).unwrap_or(0)
+    };
 
     Some(SanStatus {
         quorum,

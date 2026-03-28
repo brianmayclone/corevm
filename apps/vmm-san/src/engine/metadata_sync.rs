@@ -4,8 +4,8 @@
 //! (file_map + file_chunks layout) to all online peers so they know about all
 //! files in the cluster, even if they don't have local chunk replicas yet.
 //!
-//! This solves the problem where Host B doesn't see files that Host A wrote,
-//! because each node has its own independent SQLite DB.
+//! Only syncs files that have changed since the last sync cycle (tracked via
+//! updated_at timestamp) to avoid redundant traffic.
 
 use std::sync::Arc;
 use tokio::time::{interval, Duration};
@@ -15,51 +15,61 @@ use crate::peer::client::PeerClient;
 /// Spawn the metadata sync engine as a background task.
 pub fn spawn(state: Arc<CoreSanState>) {
     tokio::spawn(async move {
-        // Sync every 10 seconds — fast enough for near-real-time visibility
         let mut tick = interval(Duration::from_secs(10));
         let client = PeerClient::new(&state.config.peer.secret);
+        let mut last_sync_at = String::new(); // tracks last synced updated_at
 
         loop {
             tick.tick().await;
 
-            // Leader does full metadata sync; non-leaders sync only files they own
-            // (write_owner == our node_id). This ensures metadata reaches peers even
-            // if the leader election is delayed.
             let is_leader = state.is_leader.load(std::sync::atomic::Ordering::Relaxed);
 
             let quorum = *state.quorum_status.read().unwrap();
-            if quorum == crate::state::QuorumStatus::Fenced {
+            if quorum == crate::state::QuorumStatus::Fenced
+                || quorum == crate::state::QuorumStatus::Sanitizing {
                 continue;
             }
 
-            sync_metadata_to_peers(&state, &client, is_leader).await;
+            last_sync_at = sync_metadata_to_peers(&state, &client, is_leader, &last_sync_at).await;
         }
     });
 }
 
-/// Push file metadata to all online peers.
-/// Leader syncs ALL files; non-leaders only sync files they currently own (write_owner).
-async fn sync_metadata_to_peers(state: &CoreSanState, client: &PeerClient, is_leader: bool) {
+/// Push changed file metadata to all online peers.
+/// Returns the new last_sync_at watermark.
+async fn sync_metadata_to_peers(
+    state: &CoreSanState,
+    client: &PeerClient,
+    is_leader: bool,
+    last_sync_at: &str,
+) -> String {
     let files: Vec<serde_json::Value> = {
         let db = state.db.lock().unwrap();
 
-        let query = if is_leader {
-            // Leader: sync all files
-            "SELECT fm.id, fm.volume_id, fm.rel_path, fm.size_bytes, fm.sha256,
-                    fm.version, fm.chunk_count, v.chunk_size_bytes, v.ftt, v.local_raid
-             FROM file_map fm
-             JOIN volumes v ON v.id = fm.volume_id
-             WHERE fm.size_bytes > 0 OR fm.chunk_count > 0"
+        // Only sync files changed since last cycle (or all on first run)
+        let time_filter = if last_sync_at.is_empty() {
+            "1=1".to_string()
         } else {
-            // Non-leader: only sync files we own (recently wrote to)
-            "SELECT fm.id, fm.volume_id, fm.rel_path, fm.size_bytes, fm.sha256,
-                    fm.version, fm.chunk_count, v.chunk_size_bytes, v.ftt, v.local_raid
-             FROM file_map fm
-             JOIN volumes v ON v.id = fm.volume_id
-             WHERE fm.write_owner = ?1 AND (fm.size_bytes > 0 OR fm.chunk_count > 0)"
+            format!("fm.updated_at > '{}'", last_sync_at)
         };
 
-        let mut stmt = db.prepare(query).unwrap();
+        let query = if is_leader {
+            format!(
+                "SELECT fm.id, fm.volume_id, fm.rel_path, fm.size_bytes, fm.sha256,
+                        fm.version, fm.chunk_count, v.chunk_size_bytes, v.ftt, v.local_raid
+                 FROM file_map fm
+                 JOIN volumes v ON v.id = fm.volume_id
+                 WHERE ({}) AND (fm.size_bytes > 0 OR fm.chunk_count > 0)", time_filter)
+        } else {
+            format!(
+                "SELECT fm.id, fm.volume_id, fm.rel_path, fm.size_bytes, fm.sha256,
+                        fm.version, fm.chunk_count, v.chunk_size_bytes, v.ftt, v.local_raid
+                 FROM file_map fm
+                 JOIN volumes v ON v.id = fm.volume_id
+                 WHERE fm.write_owner = ?1 AND ({}) AND (fm.size_bytes > 0 OR fm.chunk_count > 0)", time_filter)
+        };
+
+        let mut stmt = db.prepare(&query).unwrap();
 
         let mapper = |row: &rusqlite::Row| {
             Ok(serde_json::json!({
@@ -84,8 +94,11 @@ async fn sync_metadata_to_peers(state: &CoreSanState, client: &PeerClient, is_le
         }
     };
 
+    // Remember current time as watermark for next cycle
+    let new_watermark = chrono::Utc::now().to_rfc3339();
+
     if files.is_empty() {
-        return;
+        return new_watermark;
     }
 
     // Get online peers
@@ -95,7 +108,7 @@ async fn sync_metadata_to_peers(state: &CoreSanState, client: &PeerClient, is_le
         .collect();
 
     if peers.is_empty() {
-        return;
+        return new_watermark;
     }
 
     let mut synced_count = 0;
@@ -114,8 +127,8 @@ async fn sync_metadata_to_peers(state: &CoreSanState, client: &PeerClient, is_le
         }
     }
 
-    if synced_count > 0 {
-        tracing::debug!("Leader metadata sync: {} file entries synced to {} peers",
-            files.len(), peers.len());
-    }
+    tracing::info!("Metadata sync: {} file(s) synced to {} peer(s)",
+        files.len(), peers.len());
+
+    new_watermark
 }

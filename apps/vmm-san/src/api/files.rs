@@ -548,22 +548,28 @@ pub async fn chunk_map(
         rows.filter_map(|r| r.ok()).collect()
     };
 
-    // All chunks with their replicas
+    // All chunks with their replicas (including remote replicas tracked locally)
     let chunks: Vec<ChunkMapEntry> = {
         let mut stmt = db.prepare(
             "SELECT fc.chunk_index, fc.file_id, fm.rel_path, fc.size_bytes,
                     COALESCE(fc.sha256, ''), cr.state,
-                    cr.backend_id, b.path, cr.node_id,
-                    COALESCE(p.hostname, ?2)
+                    cr.backend_id, COALESCE(b.path, 'remote'), cr.node_id,
+                    COALESCE(p.hostname, cr.node_id)
              FROM chunk_replicas cr
              JOIN file_chunks fc ON fc.id = cr.chunk_id
              JOIN file_map fm ON fm.id = fc.file_id
-             JOIN backends b ON b.id = cr.backend_id
+             LEFT JOIN backends b ON b.id = cr.backend_id
              LEFT JOIN peers p ON p.node_id = cr.node_id
              WHERE fm.volume_id = ?1
              ORDER BY fc.file_id, fc.chunk_index, cr.node_id"
         ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
-        let rows = stmt.query_map(rusqlite::params![&volume_id, &state.hostname], |row| {
+        let rows = stmt.query_map(rusqlite::params![&volume_id], |row| {
+            let node_id: String = row.get(8)?;
+            let mut hostname: String = row.get(9)?;
+            // For local node, use our hostname
+            if node_id == state.node_id {
+                hostname = state.hostname.clone();
+            }
             Ok(ChunkMapEntry {
                 chunk_index: row.get(0)?,
                 file_id: row.get(1)?,
@@ -573,8 +579,8 @@ pub async fn chunk_map(
                 state: row.get(5)?,
                 backend_id: row.get(6)?,
                 backend_path: row.get(7)?,
-                node_id: row.get(8)?,
-                node_hostname: row.get(9)?,
+                node_id,
+                node_hostname: hostname,
             })
         }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
         rows.filter_map(|r| r.ok()).collect()
