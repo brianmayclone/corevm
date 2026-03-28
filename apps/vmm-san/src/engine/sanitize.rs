@@ -19,6 +19,10 @@ use crate::peer::client::PeerClient;
 pub async fn run_startup_sanitize(state: &Arc<CoreSanState>) -> (u64, u64, u64) {
     tracing::info!("Sanitize: starting startup integrity check...");
 
+    // Phase 0: Clean up orphaned .tmp files from previous crashed writes
+    cleanup_orphaned_tmp_files(state);
+
+
     // Get all local chunk replicas that should be synced
     let chunks: Vec<(i64, i64, String, u32, String, String, String)> = {
         let db = state.db.lock().unwrap();
@@ -170,4 +174,60 @@ async fn repair_chunk_from_peer(
     tracing::warn!("Sanitize: could NOT repair chunk {}/{}/idx{} — no peer had it",
         volume_id, file_id, chunk_index);
     false
+}
+
+/// Clean up orphaned .tmp files left over from crashed writes.
+/// Scans all backend .coresan directories for files matching *.tmp.*
+fn cleanup_orphaned_tmp_files(state: &CoreSanState) {
+    let backend_paths: Vec<String> = {
+        let db = state.db.lock().unwrap();
+        let mut stmt = db.prepare(
+            "SELECT path FROM backends WHERE node_id = ?1"
+        ).unwrap();
+        stmt.query_map(rusqlite::params![&state.node_id], |row| row.get(0))
+            .unwrap().filter_map(|r| r.ok()).collect()
+    };
+
+    let mut cleaned = 0u64;
+    for bp in &backend_paths {
+        let coresan_dir = std::path::Path::new(bp).join(".coresan");
+        if !coresan_dir.exists() {
+            continue;
+        }
+        if let Ok(entries) = walkdir(coresan_dir) {
+            for path in entries {
+                let name = path.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if name.contains(".tmp.") {
+                    if std::fs::remove_file(&path).is_ok() {
+                        cleaned += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    if cleaned > 0 {
+        tracing::info!("Sanitize: cleaned up {} orphaned .tmp files", cleaned);
+    }
+}
+
+/// Simple recursive directory walker — returns all file paths.
+fn walkdir(dir: std::path::PathBuf) -> std::io::Result<Vec<std::path::PathBuf>> {
+    let mut files = Vec::new();
+    let mut stack = vec![dir];
+    while let Some(d) = stack.pop() {
+        if let Ok(entries) = std::fs::read_dir(&d) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+    }
+    Ok(files)
 }

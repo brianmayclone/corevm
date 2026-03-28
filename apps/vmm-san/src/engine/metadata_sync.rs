@@ -22,35 +22,46 @@ pub fn spawn(state: Arc<CoreSanState>) {
         loop {
             tick.tick().await;
 
-            // Only the leader syncs metadata to prevent conflicts
-            if !state.is_leader.load(std::sync::atomic::Ordering::Relaxed) {
-                continue;
-            }
+            // Leader does full metadata sync; non-leaders sync only files they own
+            // (write_owner == our node_id). This ensures metadata reaches peers even
+            // if the leader election is delayed.
+            let is_leader = state.is_leader.load(std::sync::atomic::Ordering::Relaxed);
 
             let quorum = *state.quorum_status.read().unwrap();
             if quorum == crate::state::QuorumStatus::Fenced {
                 continue;
             }
 
-            sync_metadata_to_peers(&state, &client).await;
+            sync_metadata_to_peers(&state, &client, is_leader).await;
         }
     });
 }
 
-/// Push all file metadata to all online peers.
-async fn sync_metadata_to_peers(state: &CoreSanState, client: &PeerClient) {
-    // Gather all files with their chunk info
+/// Push file metadata to all online peers.
+/// Leader syncs ALL files; non-leaders only sync files they currently own (write_owner).
+async fn sync_metadata_to_peers(state: &CoreSanState, client: &PeerClient, is_leader: bool) {
     let files: Vec<serde_json::Value> = {
         let db = state.db.lock().unwrap();
-        let mut stmt = db.prepare(
+
+        let query = if is_leader {
+            // Leader: sync all files
             "SELECT fm.id, fm.volume_id, fm.rel_path, fm.size_bytes, fm.sha256,
                     fm.version, fm.chunk_count, v.chunk_size_bytes, v.ftt, v.local_raid
              FROM file_map fm
              JOIN volumes v ON v.id = fm.volume_id
              WHERE fm.size_bytes > 0 OR fm.chunk_count > 0"
-        ).unwrap();
+        } else {
+            // Non-leader: only sync files we own (recently wrote to)
+            "SELECT fm.id, fm.volume_id, fm.rel_path, fm.size_bytes, fm.sha256,
+                    fm.version, fm.chunk_count, v.chunk_size_bytes, v.ftt, v.local_raid
+             FROM file_map fm
+             JOIN volumes v ON v.id = fm.volume_id
+             WHERE fm.write_owner = ?1 AND (fm.size_bytes > 0 OR fm.chunk_count > 0)"
+        };
 
-        stmt.query_map([], |row| {
+        let mut stmt = db.prepare(query).unwrap();
+
+        let mapper = |row: &rusqlite::Row| {
             Ok(serde_json::json!({
                 "file_id": row.get::<_, i64>(0)?,
                 "volume_id": row.get::<_, String>(1)?,
@@ -63,7 +74,14 @@ async fn sync_metadata_to_peers(state: &CoreSanState, client: &PeerClient) {
                 "ftt": row.get::<_, u32>(8)?,
                 "local_raid": row.get::<_, String>(9)?,
             }))
-        }).unwrap().filter_map(|r| r.ok()).collect()
+        };
+
+        if is_leader {
+            stmt.query_map([], mapper).unwrap().filter_map(|r| r.ok()).collect()
+        } else {
+            stmt.query_map(rusqlite::params![&state.node_id], mapper)
+                .unwrap().filter_map(|r| r.ok()).collect()
+        }
     };
 
     if files.is_empty() {

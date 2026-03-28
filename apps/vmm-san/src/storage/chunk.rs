@@ -169,10 +169,10 @@ pub fn read_chunk_data(
     let mut result = Vec::with_capacity(size as usize);
 
     for range in ranges {
-        // Find ALL local replicas for this chunk (multiple backends = local mirror)
-        let replicas: Vec<(String, String)> = {
+        // Find ALL local replicas for this chunk with expected SHA256
+        let replicas: Vec<(String, String, String)> = {
             let mut stmt = db.prepare(
-                "SELECT cr.backend_id, b.path FROM chunk_replicas cr
+                "SELECT cr.backend_id, b.path, COALESCE(fc.sha256, '') FROM chunk_replicas cr
                  JOIN backends b ON b.id = cr.backend_id
                  JOIN file_chunks fc ON fc.id = cr.chunk_id
                  WHERE fc.file_id = ?1 AND fc.chunk_index = ?2
@@ -180,20 +180,59 @@ pub fn read_chunk_data(
             ).unwrap();
             stmt.query_map(
                 rusqlite::params![file_id, range.chunk_index, node_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             ).unwrap().filter_map(|r| r.ok()).collect()
         };
 
         let mut read_ok = false;
 
-        // Try each local replica until one succeeds
-        for (backend_id, bp) in &replicas {
+        // Try each local replica until one succeeds with valid data
+        for (backend_id, bp, expected_sha) in &replicas {
             let path = chunk_path(bp, volume_id, file_id, range.chunk_index);
+
+            // For full-chunk reads (offset=0, size=full), verify SHA256 before serving.
+            // For partial reads within a chunk, skip verification (too expensive for FUSE seeks).
+            let is_full_chunk_read = range.local_offset == 0;
 
             match std::fs::File::open(&path) {
                 Ok(mut file) => {
+                    // If we have an expected SHA and this is a full-chunk read, verify first
+                    if is_full_chunk_read && !expected_sha.is_empty() {
+                        // Read the whole chunk for verification
+                        let full_data = match std::fs::read(&path) {
+                            Ok(d) => d,
+                            Err(_) => { continue; }
+                        };
+                        let actual_sha = format!("{:x}", Sha256::digest(&full_data));
+                        if actual_sha != *expected_sha {
+                            tracing::warn!("Chunk SHA256 MISMATCH on read: {}/{}/idx{} backend={} — trying next replica",
+                                volume_id, file_id, range.chunk_index, backend_id);
+                            db.execute(
+                                "UPDATE chunk_replicas SET state = 'error'
+                                 WHERE chunk_id = (SELECT id FROM file_chunks WHERE file_id = ?1 AND chunk_index = ?2)
+                                   AND backend_id = ?3",
+                                rusqlite::params![file_id, range.chunk_index, backend_id],
+                            ).ok();
+                            continue; // Try next replica — this one is corrupt
+                        }
+                        // SHA verified — extract the requested range
+                        let end = (range.local_offset as usize + range.size as usize).min(full_data.len());
+                        let start = range.local_offset as usize;
+                        if start < full_data.len() {
+                            result.extend_from_slice(&full_data[start..end]);
+                            if (end - start) < range.size as usize {
+                                result.extend(std::iter::repeat(0u8).take(range.size as usize - (end - start)));
+                            }
+                        } else {
+                            result.extend(std::iter::repeat(0u8).take(range.size as usize));
+                        }
+                        read_ok = true;
+                        break;
+                    }
+
+                    // Partial read or no SHA available — read directly
                     if file.seek(SeekFrom::Start(range.local_offset)).is_err() {
-                        continue; // Try next replica
+                        continue;
                     }
                     let mut buf = vec![0u8; range.size as usize];
                     match file.read(&mut buf) {
@@ -203,10 +242,9 @@ pub fn read_chunk_data(
                                 result.extend(std::iter::repeat(0u8).take((range.size as usize) - n));
                             }
                             read_ok = true;
-                            break; // Success — don't try other replicas
+                            break;
                         }
                         Err(e) => {
-                            // Read error (bad sector, I/O error) — mark this replica as error
                             tracing::warn!("Chunk read error on backend {}: {} — trying fallback", backend_id, e);
                             db.execute(
                                 "UPDATE chunk_replicas SET state = 'error'
@@ -214,12 +252,11 @@ pub fn read_chunk_data(
                                    AND backend_id = ?3",
                                 rusqlite::params![file_id, range.chunk_index, backend_id],
                             ).ok();
-                            continue; // Try next replica
+                            continue;
                         }
                     }
                 }
                 Err(_) => {
-                    // File missing — mark replica as error and try next
                     db.execute(
                         "UPDATE chunk_replicas SET state = 'error'
                          WHERE chunk_id = (SELECT id FROM file_chunks WHERE file_id = ?1 AND chunk_index = ?2)

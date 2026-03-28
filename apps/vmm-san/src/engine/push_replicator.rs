@@ -159,18 +159,44 @@ async fn run_push_replicator(
     tracing::warn!("Push replicator channel closed");
 }
 
-/// Also clean up old write_log entries periodically.
+/// Clean up old write_log entries periodically.
+/// Only deletes entries where ALL chunks of the file have been replicated to at least
+/// one other node (i.e., not just time-based deletion).
 pub fn spawn_log_cleanup(state: Arc<CoreSanState>) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(300));
         loop {
             tick.tick().await;
             let db = state.db.lock().unwrap();
-            // Keep last 1 hour of write log
-            db.execute(
-                "DELETE FROM write_log WHERE written_at < datetime('now', '-1 hour')",
+
+            // Delete write_log entries older than 1 hour ONLY IF the file's chunks
+            // have at least one synced replica on another node.
+            // This prevents deleting logs for files that never got replicated.
+            let deleted = db.execute(
+                "DELETE FROM write_log WHERE written_at < datetime('now', '-1 hour')
+                 AND file_id IN (
+                    SELECT fm.id FROM file_map fm
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM file_chunks fc
+                        JOIN volumes v ON v.id = fm.volume_id
+                        WHERE fc.file_id = fm.id AND v.ftt > 0
+                          AND (SELECT COUNT(DISTINCT cr.node_id) FROM chunk_replicas cr
+                               WHERE cr.chunk_id = fc.id AND cr.state = 'synced') < 2
+                    )
+                 )",
                 [],
-            ).ok();
+            ).unwrap_or(0);
+
+            // Also clean up very old entries (>24h) unconditionally as a safety net
+            // to prevent unbounded growth if replication is permanently stuck
+            let forced = db.execute(
+                "DELETE FROM write_log WHERE written_at < datetime('now', '-24 hours')",
+                [],
+            ).unwrap_or(0);
+
+            if deleted > 0 || forced > 0 {
+                tracing::debug!("Write log cleanup: {} replicated, {} forced-expired", deleted, forced);
+            }
         }
     });
 }
