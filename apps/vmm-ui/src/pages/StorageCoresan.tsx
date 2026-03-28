@@ -16,6 +16,7 @@ import CreateVolumeDialog from '../components/coresan/CreateVolumeDialog'
 import AddHostDialog from '../components/coresan/AddHostDialog'
 import ClaimDiskDialog from '../components/coresan/ClaimDiskDialog'
 import AutoClaimDialog from '../components/coresan/AutoClaimDialog'
+import SmartDetailDialog from '../components/coresan/SmartDetailDialog'
 
 export default function StorageCoresan() {
   const navigate = useNavigate()
@@ -52,6 +53,9 @@ export default function StorageCoresan() {
   const [addHostOpen, setAddHostOpen] = useState(false)
   const [deleteVolume, setDeleteVolume] = useState<CoreSanVolume | null>(null)
   const [deleteBackend, setDeleteBackend] = useState<CoreSanBackend | null>(null)
+
+  // SMART detail dialog
+  const [smartDisk, setSmartDisk] = useState<DiscoveredDisk | null>(null)
 
   // Tab navigation
   const [activeTab, setActiveTab] = useState<'volumes' | 'disks' | 'performance'>('volumes')
@@ -477,6 +481,9 @@ export default function StorageCoresan() {
                   <th className="text-left py-2 px-2 text-vmm-text-muted">Device</th>
                   <th className="text-left py-2 px-2 text-vmm-text-muted">Size</th>
                   <th className="text-left py-2 px-2 text-vmm-text-muted">Model</th>
+                  <th className="text-left py-2 px-2 text-vmm-text-muted">Health</th>
+                  <th className="text-left py-2 px-2 text-vmm-text-muted">Temp</th>
+                  <th className="text-left py-2 px-2 text-vmm-text-muted">Hours</th>
                   <th className="text-left py-2 px-2 text-vmm-text-muted">Status</th>
                   <th className="text-right py-2 px-2 text-vmm-text-muted">Actions</th>
                 </tr>
@@ -491,6 +498,39 @@ export default function StorageCoresan() {
                     </td>
                     <td className="py-2 px-2 text-vmm-text">{formatBytes(d.size_bytes)}</td>
                     <td className="py-2 px-2 text-vmm-text-dim">{d.model || '—'}</td>
+                    {/* SMART Health */}
+                    <td className="py-2 px-2">
+                      {!d.smart ? (
+                        <span className="text-vmm-text-muted">—</span>
+                      ) : !d.smart.supported ? (
+                        <span className="text-vmm-warning text-[10px] font-medium cursor-help" title="This disk does not support S.M.A.R.T. — proactive failure detection unavailable">
+                          No SMART
+                        </span>
+                      ) : d.smart.health_passed === false ? (
+                        <button onClick={() => { setSmartDisk(d) }}
+                          className="text-vmm-danger font-bold text-[10px] cursor-pointer hover:underline">FAILED</button>
+                      ) : d.smart.reallocated_sectors && d.smart.reallocated_sectors > 0 ? (
+                        <button onClick={() => { setSmartDisk(d) }}
+                          className="text-vmm-warning font-medium text-[10px] cursor-pointer hover:underline">Warning</button>
+                      ) : (
+                        <button onClick={() => { setSmartDisk(d) }}
+                          className="text-vmm-success text-[10px] cursor-pointer hover:underline">OK</button>
+                      )}
+                    </td>
+                    {/* Temperature */}
+                    <td className="py-2 px-2">
+                      {d.smart?.supported && d.smart?.temperature_celsius != null ? (
+                        <span className={d.smart.temperature_celsius > 55 ? 'text-vmm-warning font-medium' : d.smart.temperature_celsius > 65 ? 'text-vmm-danger font-bold' : 'text-vmm-text'}>
+                          {d.smart.temperature_celsius}&deg;C
+                        </span>
+                      ) : <span className="text-vmm-text-muted">—</span>}
+                    </td>
+                    {/* Power-On Hours */}
+                    <td className="py-2 px-2 text-vmm-text-dim">
+                      {d.smart?.supported && d.smart?.power_on_hours != null
+                        ? `${Math.round(d.smart.power_on_hours / 24)}d`
+                        : '—'}
+                    </td>
                     <td className="py-2 px-2">
                       <Badge label={d.status.replace('_', ' ')} color={
                         d.status === 'available' ? statusColors.online :
@@ -905,6 +945,16 @@ export default function StorageCoresan() {
         autoClaimSelected={autoClaimSelected} setAutoClaimSelected={setAutoClaimSelected}
         autoClaimRunning={autoClaimRunning}
         autoClaimError={autoClaimError}
+      />
+
+      {/* SMART Detail Dialog */}
+      <SmartDetailDialog
+        open={!!smartDisk}
+        onClose={() => setSmartDisk(null)}
+        deviceName={smartDisk?.name || ''}
+        hostId={smartDisk?._host_id}
+        hostName={smartDisk?._host_name}
+        sanAddress={smartDisk?._san_address}
       />
     </div>
   )

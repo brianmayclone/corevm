@@ -51,6 +51,11 @@ pub async fn network_stats(_auth: AuthUser) -> Result<Json<NetworkStats>, AppErr
     }))
 }
 
+/// Read host network interfaces for agent API (public, no auth wrapper).
+pub fn list_interfaces_raw() -> Result<Vec<NetworkInterface>, String> {
+    read_host_interfaces()
+}
+
 /// Read host network interfaces from /sys/class/net (Linux).
 fn read_host_interfaces() -> Result<Vec<NetworkInterface>, String> {
     let mut interfaces = Vec::new();
@@ -295,6 +300,166 @@ fn get_default_route_dev() -> Option<String> {
     // "default via 192.168.1.1 dev eth0 ..."
     let parts: Vec<&str> = stdout.split_whitespace().collect();
     parts.iter().position(|&p| p == "dev").and_then(|i| parts.get(i + 1).map(|s| s.to_string()))
+}
+
+// ── viSwitch Management ──────────────────────────────────────────────────
+
+/// Set up a viSwitch: bridge + optional bonding device + uplinks.
+pub fn setup_viswitch(req: &vmm_core::cluster::SetupViSwitchRequest) -> Result<(), String> {
+    let bridge = &req.bridge_name;
+
+    // Check if bridge already exists
+    if std::path::Path::new(&format!("/sys/class/net/{}", bridge)).exists() {
+        eprintln!("[viswitch] Bridge '{}' already exists, tearing down first", bridge);
+        let _ = teardown_viswitch(bridge);
+    }
+
+    // 1. Create bridge with configured MTU
+    run_ip(&["link", "add", bridge, "type", "bridge"])?;
+    if req.mtu > 0 {
+        let mtu_str = req.mtu.to_string();
+        run_ip(&["link", "set", bridge, "mtu", &mtu_str])?;
+    }
+    run_ip(&["link", "set", bridge, "up"])?;
+    eprintln!("[viswitch] Created bridge '{}' (MTU={})", bridge, req.mtu);
+
+    // Filter uplinks to only those with "vm" traffic type (bridge carries VM traffic)
+    let vm_uplinks: Vec<_> = req.uplinks.iter()
+        .filter(|u| u.traffic_types.split(',').any(|t| t.trim() == "vm"))
+        .collect();
+
+    if vm_uplinks.is_empty() {
+        eprintln!("[viswitch] No VM-traffic uplinks configured for '{}'", bridge);
+        return Ok(());
+    }
+
+    if vm_uplinks.len() > 1 {
+        // Multiple uplinks: create bond device
+        let bond_name = format!("bond-{}", bridge);
+        setup_viswitch_bond(&bond_name, &req.uplink_policy, &vm_uplinks, bridge)?;
+    } else if let Some(uplink) = vm_uplinks.first() {
+        // Single uplink: join directly to bridge
+        let iface = resolve_uplink_interface(uplink, bridge)?;
+        run_ip(&["link", "set", &iface, "master", bridge])?;
+        run_ip(&["link", "set", &iface, "up"])?;
+        eprintln!("[viswitch] Uplink '{}' joined to bridge '{}'", iface, bridge);
+    }
+
+    Ok(())
+}
+
+/// Create a Linux bonding device for viSwitch uplink teaming.
+fn setup_viswitch_bond(
+    bond_name: &str,
+    policy: &str,
+    uplinks: &[&vmm_core::cluster::ViSwitchUplink],
+    bridge: &str,
+) -> Result<(), String> {
+    let mode = match policy {
+        "roundrobin" => "balance-rr",
+        "failover" | "rulebased" => "active-backup",
+        _ => "active-backup",
+    };
+
+    // Load bonding module if not loaded
+    let _ = std::process::Command::new("modprobe").arg("bonding").output();
+
+    run_ip(&["link", "add", bond_name, "type", "bond", "mode", mode])?;
+    run_ip(&["link", "set", bond_name, "up"])?;
+
+    for uplink in uplinks {
+        let iface = resolve_uplink_interface(uplink, bridge)?;
+        // Bond slaves must be down before enslaving
+        let _ = run_ip(&["link", "set", &iface, "down"]);
+        run_ip(&["link", "set", &iface, "master", bond_name])?;
+        run_ip(&["link", "set", &iface, "up"])?;
+        eprintln!("[viswitch] Bond '{}' slave: '{}'", bond_name, iface);
+    }
+
+    // Join bond to bridge
+    run_ip(&["link", "set", bond_name, "master", bridge])?;
+    eprintln!("[viswitch] Bond '{}' (mode={}) joined to bridge '{}'", bond_name, mode, bridge);
+
+    if policy == "rulebased" {
+        eprintln!("[viswitch] Warning: rule-based routing not yet implemented, using failover");
+    }
+
+    Ok(())
+}
+
+/// Resolve an uplink to a Linux interface name.
+fn resolve_uplink_interface(
+    uplink: &vmm_core::cluster::ViSwitchUplink,
+    bridge: &str,
+) -> Result<String, String> {
+    match uplink.uplink_type.as_str() {
+        "physical" => Ok(uplink.physical_nic.clone()),
+        "virtual" => {
+            if let Some(ref vxlan) = uplink.vxlan {
+                let vxlan_name = format!("vxs{}-{}", bridge.trim_start_matches("vs"), uplink.uplink_index);
+                let vni_str = vxlan.vni.to_string();
+                let port_str = vxlan.port.to_string();
+
+                let mut args = vec![
+                    "link", "add", &vxlan_name, "type", "vxlan",
+                    "id", &vni_str, "dstport", &port_str,
+                ];
+                if !vxlan.group.is_empty() {
+                    args.extend(&["group", &vxlan.group]);
+                }
+                if !vxlan.local_ip.is_empty() {
+                    args.extend(&["local", &vxlan.local_ip]);
+                }
+                if let Some(dev) = get_default_route_dev() {
+                    args.extend(&["dev", &dev]);
+                    run_ip(&args)?;
+                } else {
+                    run_ip(&args)?;
+                }
+                run_ip(&["link", "set", &vxlan_name, "up"])?;
+                eprintln!("[viswitch] Created VXLAN '{}' (VNI={})", vxlan_name, vxlan.vni);
+                Ok(vxlan_name)
+            } else {
+                Err("Virtual uplink requires VXLAN config".into())
+            }
+        }
+        _ => Err(format!("Unknown uplink type: {}", uplink.uplink_type)),
+    }
+}
+
+/// Tear down a viSwitch: remove bond, VXLAN interfaces, and bridge.
+pub fn teardown_viswitch(bridge_name: &str) -> Result<(), String> {
+    let bridge_path = format!("/sys/class/net/{}", bridge_name);
+    if !std::path::Path::new(&bridge_path).exists() {
+        return Ok(());
+    }
+
+    // Remove bond device if exists
+    let bond_name = format!("bond-{}", bridge_name);
+    if std::path::Path::new(&format!("/sys/class/net/{}", bond_name)).exists() {
+        let _ = run_ip(&["link", "set", &bond_name, "down"]);
+        let _ = run_ip(&["link", "del", &bond_name]);
+        eprintln!("[viswitch] Removed bond '{}'", bond_name);
+    }
+
+    // Remove VXLAN interfaces belonging to this viSwitch (vxs{id}-*)
+    let vs_id = bridge_name.trim_start_matches("vs");
+    let vxlan_prefix = format!("vxs{}-", vs_id);
+    if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(&vxlan_prefix) {
+                let _ = run_ip(&["link", "del", &name]);
+                eprintln!("[viswitch] Removed VXLAN '{}'", name);
+            }
+        }
+    }
+
+    // Remove bridge
+    run_ip(&["link", "set", bridge_name, "down"])?;
+    run_ip(&["link", "del", bridge_name])?;
+    eprintln!("[viswitch] Removed bridge '{}'", bridge_name);
+    Ok(())
 }
 
 fn get_ipv6_address(iface: &str) -> Option<String> {

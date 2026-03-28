@@ -25,6 +25,9 @@ pub struct CreateVmRequest {
     /// Optional: SDN network to attach the VM to.
     /// When set, the cluster enriches the config with bridge mode + sdn_config.
     pub network_id: Option<i64>,
+    /// Optional: viSwitch to attach the VM to.
+    /// When set, auto-allocates a port and configures bridge mode.
+    pub viswitch_id: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -71,7 +74,20 @@ pub async fn create(
 
     // Enrich VM config with SDN network details (bridge mode + sdn_config)
     let mut config = body.config.clone();
-    if let Some(network_id) = body.network_id {
+    if let Some(viswitch_id) = body.viswitch_id {
+        // viSwitch mode: allocate a port and connect via viSwitch bridge
+        let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock error".into()))?;
+        let _port_index = crate::services::viswitch::ViSwitchService::assign_port(&db, viswitch_id, &vm_id, None)
+            .map_err(|e| AppError(StatusCode::BAD_REQUEST, format!("Cannot allocate viSwitch port: {}", e)))?;
+        let bridge_name = crate::services::viswitch::ViSwitchService::bridge_name(viswitch_id);
+        drop(db);
+
+        if let Some(obj) = config.as_object_mut() {
+            obj.insert("net_mode".into(), serde_json::json!("bridge"));
+            obj.insert("net_host_nic".into(), serde_json::json!(bridge_name));
+            obj.insert("net_enabled".into(), serde_json::json!(true));
+        }
+    } else if let Some(network_id) = body.network_id {
         let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock error".into()))?;
         let net = crate::services::network::NetworkService::get_network(&db, network_id)
             .map_err(|e| AppError(StatusCode::BAD_REQUEST, format!("Network not found: {}", e)))?;
@@ -353,6 +369,20 @@ pub async fn delete(
 
     // Remove from cluster DB (authoritative deletion)
     let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock error".into()))?;
+
+    // Release viSwitch port if assigned
+    let viswitch_ids: Vec<i64> = {
+        let mut stmt = db.prepare("SELECT DISTINCT viswitch_id FROM viswitch_ports WHERE vm_id = ?1").ok();
+        stmt.as_mut().map(|s| {
+            s.query_map(rusqlite::params![&id], |row| row.get::<_, i64>(0))
+                .ok().map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default()
+        }).unwrap_or_default()
+    };
+    for vs_id in viswitch_ids {
+        let _ = crate::services::viswitch::ViSwitchService::release_port(&db, vs_id, &id);
+    }
+
     VmService::delete(&db, &id).map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
     AuditService::log(&db, user.id, "vm.delete", "vm", &id, None);
 

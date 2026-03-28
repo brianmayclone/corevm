@@ -532,6 +532,34 @@ export interface ChunkMapResponse {
 
 // ── Physical Disk Discovery ──────────────────────────────────────────────
 
+export interface SmartSummary {
+  supported: boolean
+  health_passed: boolean | null
+  temperature_celsius: number | null
+  power_on_hours: number | null
+  reallocated_sectors: number | null
+  wear_leveling_pct: number | null
+}
+
+export interface SmartDetail {
+  device_path: string
+  supported: boolean
+  health_passed: boolean | null
+  transport: string
+  power_on_hours: number | null
+  temperature_celsius: number | null
+  reallocated_sectors: number | null
+  pending_sectors: number | null
+  uncorrectable_sectors: number | null
+  wear_leveling_pct: number | null
+  media_errors: number | null
+  percentage_used: number | null
+  model: string
+  serial: string
+  firmware: string
+  collected_at: string
+}
+
 export interface DiscoveredDisk {
   name: string
   path: string
@@ -546,6 +574,7 @@ export interface DiscoveredDisk {
   disk_id?: string
   backend_id?: string
   fs_type_detail?: string
+  smart?: SmartSummary
   /** Set client-side when aggregating disks from multiple SAN hosts. */
   _host_id?: string
   _host_name?: string
@@ -569,6 +598,51 @@ export interface HostLogsResponse {
 
 export interface AllHostLogsResponse {
   hosts: HostLogsResponse[]
+}
+
+// ── viSwitch (Virtual Switch) ───────────────────────────────────────────
+
+export interface ViSwitch {
+  id: number
+  cluster_id: string
+  name: string
+  description: string
+  max_ports: number
+  max_uplinks: number
+  mtu: number
+  uplink_policy: 'roundrobin' | 'failover' | 'rulebased'
+  uplink_rules: string
+  enabled: boolean
+  created_at: string
+}
+
+export interface ViSwitchUplink {
+  id: number
+  viswitch_id: number
+  uplink_index: number
+  uplink_type: 'physical' | 'virtual'
+  physical_nic: string
+  network_name: string | null
+  network_id: number | null
+  active: boolean
+  traffic_types: string
+  created_at: string
+}
+
+export interface ViSwitchPort {
+  id: number
+  viswitch_id: number
+  port_index: number
+  vm_id: string | null
+  vm_name: string | null
+  vlan_id: number | null
+  created_at: string
+}
+
+export interface HostNicInfo {
+  host_id: string
+  hostname: string
+  nics: { name: string; mac: string; speed_mbps: number | null; state: string }[]
 }
 
 // ── Network Discovery ───────────────────────────────────────────────────

@@ -28,6 +28,7 @@ pub mod resource_group;
 pub mod notification;
 pub mod settings;
 pub mod network;
+pub mod viswitch;
 pub mod ldap;
 pub mod validation;
 pub mod group;

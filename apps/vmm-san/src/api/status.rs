@@ -343,6 +343,59 @@ pub async fn get_network_config(
     })
 }
 
+/// PUT /api/network/config — update SAN network configuration from cluster.
+/// Used by vmm-cluster to push viSwitch SAN interface assignments.
+pub async fn update_network_config(
+    State(state): State<Arc<CoreSanState>>,
+    axum::Json(body): axum::Json<UpdateNetworkConfigRequest>,
+) -> axum::Json<serde_json::Value> {
+    // Update in-memory config (state.config is read-only after load, so we log the change)
+    // In production, this would persist to the TOML config file and trigger rebind.
+    tracing::info!(
+        "[san-network] Config update from cluster: interfaces={:?}, teaming={}, mtu={}",
+        body.interfaces, body.teaming, body.mtu
+    );
+
+    // Write to config file for persistence across restarts
+    let san_interface = body.interfaces.join(",");
+    let config_updates = format!(
+        "\n[network]\nsan_interface = \"{}\"\nsan_teaming = \"{}\"\nsan_mtu = {}\n",
+        san_interface, body.teaming, body.mtu
+    );
+
+    // Try to update the config file
+    let config_path = state.config_path.as_ref().map(|p| p.as_path());
+    if let Some(path) = config_path {
+        if let Ok(mut content) = std::fs::read_to_string(path) {
+            // Remove existing [network] section if present
+            if let Some(start) = content.find("[network]") {
+                let end = content[start + 9..].find("\n[")
+                    .map(|e| start + 9 + e)
+                    .unwrap_or(content.len());
+                content.replace_range(start..end, "");
+            }
+            content.push_str(&config_updates);
+            if let Err(e) = std::fs::write(path, &content) {
+                tracing::warn!("[san-network] Failed to write config: {}", e);
+            }
+        }
+    }
+
+    axum::Json(serde_json::json!({"ok": true, "san_interface": san_interface}))
+}
+
+#[derive(serde::Deserialize)]
+pub struct UpdateNetworkConfigRequest {
+    /// List of interface names to bind SAN traffic to.
+    pub interfaces: Vec<String>,
+    /// Teaming policy: "none", "roundrobin", "failover".
+    #[serde(default)]
+    pub teaming: String,
+    /// MTU for SAN traffic.
+    #[serde(default)]
+    pub mtu: u32,
+}
+
 /// GET /api/network/interfaces — list all network interfaces on this host.
 pub async fn list_interfaces() -> Json<Vec<NetworkInterface>> {
     let interfaces = discover_interfaces();

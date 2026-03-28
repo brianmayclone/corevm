@@ -55,6 +55,20 @@ pub async fn create(
     let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock error".into()))?;
     let id = ClusterService::create(&db, &body.name, &body.description)
         .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+
+    // Auto-create a default viSwitch for the new cluster
+    let vs_id = crate::services::viswitch::ViSwitchService::create_viswitch(
+        &db, &id, "Default Switch", "Auto-created default virtual switch",
+        1024, 128, 1500, "failover",
+    ).ok();
+    if let Some(vs_id) = vs_id {
+        let _ = db.execute(
+            "UPDATE clusters SET default_viswitch_id = ?1 WHERE id = ?2",
+            rusqlite::params![vs_id, &id],
+        );
+        tracing::info!("Auto-created 'Default Switch' (id={}) for cluster '{}'", vs_id, body.name);
+    }
+
     AuditService::log(&db, user.id, "cluster.create", "cluster", &id, Some(&body.name));
     Ok(Json(serde_json::json!({"id": id})))
 }

@@ -1,6 +1,6 @@
 //! Disk management API — discover, claim, release, and reset physical disks.
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
@@ -15,6 +15,59 @@ pub async fn list(
 ) -> Json<Vec<disk::DiscoveredDisk>> {
     let db = state.db.lock().unwrap();
     Json(disk::discover_disks(&db))
+}
+
+/// GET /api/disks/{device_name}/smart — full SMART detail for a specific disk.
+pub async fn smart_detail(
+    State(state): State<Arc<CoreSanState>>,
+    Path(device_name): Path<String>,
+) -> Result<Json<crate::storage::smart::SmartData>, (StatusCode, String)> {
+    let device_path = format!("/dev/{}", device_name);
+
+    // Try DB first (cached data from smart_monitor)
+    let cached = {
+        let db = state.db.lock().unwrap();
+        db.query_row(
+            "SELECT device_path, supported, health_passed, transport, power_on_hours, temperature_c,
+                    reallocated_sectors, pending_sectors, uncorrectable_sectors, wear_leveling_pct,
+                    media_errors, percentage_used, model, serial, firmware, raw_json, collected_at
+             FROM smart_data WHERE device_path = ?1",
+            rusqlite::params![&device_path],
+            |row| {
+                Ok(crate::storage::smart::SmartData {
+                    device_path: row.get(0)?,
+                    supported: row.get::<_, i32>(1)? != 0,
+                    health_passed: row.get::<_, Option<i32>>(2)?.map(|v| v != 0),
+                    transport: row.get(3)?,
+                    power_on_hours: row.get(4)?,
+                    temperature_celsius: row.get(5)?,
+                    reallocated_sectors: row.get(6)?,
+                    pending_sectors: row.get(7)?,
+                    uncorrectable_sectors: row.get(8)?,
+                    wear_leveling_pct: row.get::<_, Option<i64>>(9)?.map(|v| v as u8),
+                    media_errors: row.get(10)?,
+                    percentage_used: row.get::<_, Option<i64>>(11)?.map(|v| v as u8),
+                    model: row.get(12)?,
+                    serial: row.get(13)?,
+                    firmware: row.get(14)?,
+                    raw_json: row.get(15)?,
+                    collected_at: row.get(16)?,
+                })
+            },
+        ).ok()
+    };
+
+    if let Some(data) = cached {
+        return Ok(Json(data));
+    }
+
+    // Not in DB yet — read directly (blocks, but only on demand)
+    let path = device_path.clone();
+    let data = tokio::task::spawn_blocking(move || {
+        crate::storage::smart::read_smart(&path)
+    }).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+
+    Ok(Json(data))
 }
 
 #[derive(Deserialize)]

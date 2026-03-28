@@ -425,6 +425,16 @@ pub async fn browse_volume_root(
     client.browse_volume(&id, "").await.map(Json).map_err(san_err)
 }
 
+/// GET /api/san/disks/{host_id}/{device_name}/smart — SMART detail for a specific disk on a host.
+pub async fn disk_smart_detail(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Path((host_id, device_name)): Path<(String, String)>,
+) -> Result<Json<Value>, AppError> {
+    let client = san_client_for_host(&state, &host_id)?;
+    client.disk_smart(&device_name).await.map(Json).map_err(san_err)
+}
+
 /// GET /api/san/volumes/{id}/chunk-map — fan-out to ALL SAN hosts, aggregate chunk maps.
 pub async fn chunk_map(
     State(state): State<Arc<ClusterState>>,

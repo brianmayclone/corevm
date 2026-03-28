@@ -73,7 +73,14 @@ const clusterNavItems: NavItem[] = [
       { to: '/machines/resource-groups', icon: FolderOpen, label: 'Resource Groups' },
     ],
   },
-  { to: '/networks/overview', icon: Network, label: 'Networks' },
+  {
+    to: '/networks', icon: Network, label: 'Networks',
+    children: [
+      { to: '/networks/topology', icon: Share2, label: 'Topology' },
+      { to: '/networks/overview', icon: Network, label: 'Virtual Networks' },
+      { to: '/networks/viswitches', icon: Cable, label: 'viSwitches' },
+    ],
+  },
   {
     to: '/storage', icon: HardDrive, label: 'Storage',
     children: [

@@ -21,6 +21,8 @@ struct SanStatus {
     free_bytes: u64,
     total_bytes: u64,
     is_leader: bool,
+    unhealthy_disks: u32,
+    unsupported_smart: u32,
 }
 
 pub struct StatusBar {
@@ -317,7 +319,29 @@ impl StatusBar {
         ]);
 
         // Line 5: empty / padding
-        let san5 = Line::from(vec![]);
+        // Line 5: Disk health warnings
+        let san5 = if san.unhealthy_disks > 0 {
+            Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(
+                    format!("{} disk(s) unhealthy!", san.unhealthy_disks),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+            ])
+        } else if san.unsupported_smart > 0 {
+            Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(
+                    format!("{} disk(s) no SMART", san.unsupported_smart),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled(" Disks: ", Style::default().fg(Color::DarkGray)),
+                Span::styled("all healthy", Style::default().fg(Color::Green)),
+            ])
+        };
 
         let para = Paragraph::new(vec![san1, san2, san3, san4, san5]);
         para.render(inner, buf);
@@ -422,6 +446,22 @@ fn fetch_san_status() -> Option<SanStatus> {
         })
         .unwrap_or((0, 0));
 
+    // Fetch disk health info
+    let (unhealthy_disks, unsupported_smart) = http_get_json(&format!("127.0.0.1:{}", san_port), "/api/disks")
+        .and_then(|disks_json| disks_json.as_array().cloned())
+        .map(|disks| {
+            let unhealthy = disks.iter().filter(|d| {
+                let smart = &d["smart"];
+                smart["supported"].as_bool() == Some(true) && smart["health_passed"].as_bool() == Some(false)
+                    || smart.get("reallocated_sectors").and_then(|v| v.as_u64()).unwrap_or(0) > 0
+            }).count() as u32;
+            let no_smart = disks.iter().filter(|d| {
+                d["smart"].is_object() && d["smart"]["supported"].as_bool() == Some(false)
+            }).count() as u32;
+            (unhealthy, no_smart)
+        })
+        .unwrap_or((0, 0));
+
     Some(SanStatus {
         quorum,
         peers,
@@ -430,6 +470,8 @@ fn fetch_san_status() -> Option<SanStatus> {
         free_bytes,
         total_bytes,
         is_leader,
+        unhealthy_disks,
+        unsupported_smart,
     })
 }
 

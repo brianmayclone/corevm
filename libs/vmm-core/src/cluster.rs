@@ -189,6 +189,49 @@ pub struct TeardownBridgeRequest {
     pub bridge_name: String,
 }
 
+// ── viSwitch Commands (Cluster → Node) ─────────────────────────────────
+
+/// Describes a single uplink attached to a viSwitch.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ViSwitchUplink {
+    /// Uplink index (0–127), used for ordering and bonding.
+    pub uplink_index: u32,
+    /// "physical" (host NIC) or "virtual" (VXLAN to a VirtualNetwork).
+    pub uplink_type: String,
+    /// Physical NIC name (e.g. "eth0"). Empty for virtual uplinks.
+    pub physical_nic: String,
+    /// VirtualNetwork ID for virtual uplinks. None for physical.
+    pub network_id: Option<i64>,
+    /// VXLAN config for virtual uplinks. None for physical.
+    pub vxlan: Option<VxlanConfig>,
+    /// For failover policy: true = active, false = standby.
+    pub active: bool,
+    /// Comma-separated traffic types: "vm", "san", "vm,san".
+    pub traffic_types: String,
+}
+
+/// Command to set up a viSwitch (bridge + bonding + uplinks) on a node.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SetupViSwitchRequest {
+    pub viswitch_id: i64,
+    /// Linux bridge name (e.g. "vs42").
+    pub bridge_name: String,
+    pub mtu: u32,
+    /// Uplink teaming policy: "roundrobin", "failover", "rulebased".
+    pub uplink_policy: String,
+    /// JSON rules for rule-based policy (empty/[] for other modes).
+    pub uplink_rules: String,
+    /// All configured uplinks for this viSwitch.
+    pub uplinks: Vec<ViSwitchUplink>,
+}
+
+/// Command to tear down a viSwitch on a node.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TeardownViSwitchRequest {
+    pub viswitch_id: i64,
+    pub bridge_name: String,
+}
+
 // ── Generic Agent Response ──────────────────────────────────────────────
 
 /// Simple success/error response from agent operations.

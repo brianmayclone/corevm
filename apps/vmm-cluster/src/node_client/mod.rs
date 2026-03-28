@@ -6,7 +6,7 @@ pub mod types;
 
 use crate::node_client::types::*;
 use vmm_core::cluster::{HostStatus, ProvisionVmRequest, ProvisionVmResponse,
-    MountDatastoreRequest, AgentResponse};
+    MountDatastoreRequest, AgentResponse, SetupViSwitchRequest, TeardownViSwitchRequest};
 
 /// Client for a single vmm-server node's Agent API.
 pub struct NodeClient {
@@ -120,6 +120,42 @@ impl NodeClient {
             .json(req)
             .send().await
             .map_err(|e| format!("Connection failed: {}", e))?;
+
+        resp.json().await.map_err(|e| format!("Invalid response: {}", e))
+    }
+
+    /// POST /agent/network/viswitch/setup — Set up a viSwitch on this node.
+    pub async fn setup_viswitch(&self, req: &SetupViSwitchRequest) -> Result<AgentResponse, String> {
+        let resp = self.http.post(format!("{}/agent/network/viswitch/setup", &self.base_url))
+            .header("X-Agent-Token", &self.agent_token)
+            .json(req)
+            .send().await
+            .map_err(|e| format!("Connection failed: {}", e))?;
+
+        resp.json().await.map_err(|e| format!("Invalid response: {}", e))
+    }
+
+    /// POST /agent/network/viswitch/teardown — Remove a viSwitch from this node.
+    pub async fn teardown_viswitch(&self, req: &TeardownViSwitchRequest) -> Result<AgentResponse, String> {
+        let resp = self.http.post(format!("{}/agent/network/viswitch/teardown", &self.base_url))
+            .header("X-Agent-Token", &self.agent_token)
+            .json(req)
+            .send().await
+            .map_err(|e| format!("Connection failed: {}", e))?;
+
+        resp.json().await.map_err(|e| format!("Invalid response: {}", e))
+    }
+
+    /// GET /agent/network/interfaces — list network interfaces on this node.
+    pub async fn get_network_interfaces(&self) -> Result<serde_json::Value, String> {
+        let resp = self.http.get(format!("{}/agent/network/interfaces", &self.base_url))
+            .header("X-Agent-Token", &self.agent_token)
+            .send().await
+            .map_err(|e| format!("Connection failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("Interface request failed: {}", resp.status()));
+        }
 
         resp.json().await.map_err(|e| format!("Invalid response: {}", e))
     }

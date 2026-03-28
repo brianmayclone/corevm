@@ -3,7 +3,8 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Plus, HardDrive, Trash2, Link, Maximize2 } from 'lucide-react'
 import api from '../api/client'
-import type { DiskImage, StoragePool } from '../api/types'
+import type { DiskImage, StoragePool, CoreSanStatus } from '../api/types'
+import { useClusterStore } from '../stores/clusterStore'
 import Card from '../components/Card'
 import SectionLabel from '../components/SectionLabel'
 import Button from '../components/Button'
@@ -13,8 +14,11 @@ import { formatBytes } from '../utils/format'
 
 export default function StorageDisks() {
   const navigate = useNavigate()
+  const { backendMode } = useClusterStore()
+  const isCluster = backendMode === 'cluster'
   const [images, setImages] = useState<DiskImage[]>([])
   const [pools, setPools] = useState<StoragePool[]>([])
+  const [sanVolumes, setSanVolumes] = useState<{ id: string; name: string }[]>([])
   const [deleteImage, setDeleteImage] = useState<DiskImage | null>(null)
   const [showCreate, setShowCreate] = useState(false)
   const [filter, setFilter] = useState<'all' | 'orphaned' | 'attached'>('all')
@@ -27,6 +31,15 @@ export default function StorageDisks() {
   const refresh = () => {
     api.get<DiskImage[]>('/api/storage/images').then(({ data }) => setImages(data))
     api.get<StoragePool[]>('/api/storage/pools').then(({ data }) => setPools(data))
+    // Fetch CoreSAN volumes for pool dropdown
+    const sanUrl = isCluster ? '/api/san/status' : `${window.location.protocol}//${window.location.hostname}:7443/api/status`
+    const sanHeaders: HeadersInit = isCluster ? { Authorization: `Bearer ${localStorage.getItem('vmm_token') || ''}` } : {}
+    fetch(sanUrl, { headers: sanHeaders }).then(r => r.json()).then(d => {
+      const status = Array.isArray(d) ? d[0] : d
+      if (status?.volumes) {
+        setSanVolumes(status.volumes.map((v: any) => ({ id: v.volume_id, name: v.volume_name })))
+      }
+    }).catch(() => {})
   }
   useEffect(() => { refresh() }, [])
 
@@ -104,8 +117,17 @@ export default function StorageDisks() {
               <label className="text-[10px] text-vmm-text-muted uppercase tracking-wider block mb-1">Storage Pool</label>
               <select value={createPool} onChange={(e) => setCreatePool(parseInt(e.target.value))}
                 className="w-full bg-vmm-bg-alt border border-vmm-border rounded-lg px-3 py-2 text-sm text-vmm-text focus:border-vmm-accent focus:outline-none">
-                <option value={0}>Select pool...</option>
-                {pools.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                <option value={0}>Select storage...</option>
+                {pools.length > 0 && (
+                  <optgroup label="Local Pools">
+                    {pools.map(p => <option key={p.id} value={p.id}>{p.name} ({p.shared ? 'Shared' : 'Local'})</option>)}
+                  </optgroup>
+                )}
+                {sanVolumes.length > 0 && (
+                  <optgroup label="CoreSAN Volumes">
+                    {sanVolumes.map(v => <option key={v.id} value={-1}>{v.name} (CoreSAN)</option>)}
+                  </optgroup>
+                )}
               </select>
             </div>
           </div>

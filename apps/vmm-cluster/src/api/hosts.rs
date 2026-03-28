@@ -143,6 +143,39 @@ pub async fn register(
         &state, &address_clone, &agent_token_clone, &body.cluster_id, &node_id,
     ).await;
 
+    // Step 7: Deploy all cluster viSwitches to the new host
+    {
+        let viswitches_to_deploy: Vec<i64> = {
+            let db = state.db.lock().ok();
+            db.and_then(|db| {
+                let mut stmt = db.prepare(
+                    "SELECT id FROM viswitches WHERE cluster_id = ?1 AND enabled = 1"
+                ).ok()?;
+                let rows = stmt.query_map(rusqlite::params![&body.cluster_id], |row| row.get::<_, i64>(0)).ok()?;
+                Some(rows.filter_map(|r| r.ok()).collect())
+            }).unwrap_or_default()
+        };
+
+        if let Ok(nc) = crate::node_client::NodeClient::new(&address_clone, &agent_token_clone) {
+            for vs_id in viswitches_to_deploy {
+                let setup_req = {
+                    let db = state.db.lock().ok();
+                    db.and_then(|db| crate::api::viswitch::build_setup_request_pub(&db, vs_id).ok())
+                };
+                if let Some(req) = setup_req {
+                    match nc.setup_viswitch(&req).await {
+                        Ok(resp) if resp.success => {
+                            tracing::info!("viSwitch '{}' deployed to new host {}", req.bridge_name, hostname);
+                        }
+                        _ => {
+                            tracing::warn!("Failed to deploy viSwitch to new host {}", hostname);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Ok(Json(serde_json::json!({
         "id": node_id,
         "hostname": hostname,

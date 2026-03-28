@@ -179,6 +179,7 @@ async fn main() {
         peers,
         db: Mutex::new(conn),
         config,
+        config_path: Some(std::path::PathBuf::from(&config_path)),
         node_id,
         hostname,
         started_at: std::time::Instant::now(),
@@ -275,6 +276,9 @@ async fn main() {
 
     engine::metadata_sync::spawn(Arc::clone(&state));
     tracing::info!("Metadata sync engine started (leader pushes file_map to peers, 10s interval)");
+
+    engine::smart_monitor::spawn(Arc::clone(&state));
+    tracing::info!("SMART monitor started ({}s interval)", 300);
 
     engine::discovery::spawn(Arc::clone(&state));
     tracing::info!("Discovery beacon started");

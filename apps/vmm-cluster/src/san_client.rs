@@ -43,6 +43,18 @@ impl SanClient {
         self.get("/api/status").await
     }
 
+    // ── Network Configuration ────────────────────────────────────
+
+    /// Push SAN network config from viSwitch uplink assignments.
+    pub async fn update_network(&self, interfaces: &[String], teaming: &str, mtu: u32) -> Result<Value, String> {
+        let body = serde_json::json!({
+            "interfaces": interfaces,
+            "teaming": teaming,
+            "mtu": mtu,
+        });
+        self.put("/api/network/config", &body).await
+    }
+
     // ── Volumes ───────────────────────────────────────────────────
 
     pub async fn list_volumes(&self) -> Result<Value, String> {
@@ -105,6 +117,10 @@ impl SanClient {
 
     pub async fn reset_disk(&self, body: &Value) -> Result<Value, String> {
         self.post("/api/disks/reset", body).await
+    }
+
+    pub async fn disk_smart(&self, device_name: &str) -> Result<Value, String> {
+        self.get(&format!("/api/disks/{}/smart", device_name)).await
     }
 
     // ── Volume File Operations ──────────────────────────────────────

@@ -47,6 +47,8 @@ pub struct CoreSanState {
     pub db: Mutex<Connection>,
     /// Immutable configuration.
     pub config: CoreSanConfig,
+    /// Path to the TOML config file (for persisting runtime updates).
+    pub config_path: Option<std::path::PathBuf>,
     /// This node's unique ID.
     pub node_id: String,
     /// This node's hostname.

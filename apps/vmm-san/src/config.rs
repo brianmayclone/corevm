@@ -51,7 +51,8 @@ pub struct PeerSection {
 
 #[derive(Debug, Deserialize)]
 pub struct NetworkSection {
-    /// NIC to bind SAN traffic to (e.g. "eth1", "ens192"). Empty = all interfaces.
+    /// NIC(s) to bind SAN traffic to (e.g. "eth1" or "eth1,eth2" for multi-NIC).
+    /// Empty = all interfaces.
     #[serde(default)]
     pub san_interface: String,
     /// Static IP for the SAN interface. Empty = use existing/DHCP.
@@ -66,6 +67,9 @@ pub struct NetworkSection {
     /// MTU for SAN traffic (0 = default, 9000 = jumbo frames recommended).
     #[serde(default)]
     pub san_mtu: u32,
+    /// Multi-NIC teaming policy: "none", "roundrobin", "failover". Empty = none.
+    #[serde(default)]
+    pub san_teaming: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -153,6 +157,7 @@ impl Default for NetworkSection {
             san_netmask: String::new(),
             san_gateway: String::new(),
             san_mtu: 0,
+            san_teaming: String::new(),
         }
     }
 }

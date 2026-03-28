@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS clusters (
     ha_vm_restart_priority TEXT NOT NULL DEFAULT 'medium',
     ha_admission_control INTEGER NOT NULL DEFAULT 1,
     ha_failover_hosts INTEGER NOT NULL DEFAULT 1,
+    default_viswitch_id INTEGER,                    -- auto-created viSwitch for new hosts
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -435,6 +436,48 @@ CREATE TABLE IF NOT EXISTS pxe_boot_entries (
     sort_order      INTEGER NOT NULL DEFAULT 0,
     enabled         INTEGER NOT NULL DEFAULT 1,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ═══════════════════════════════════════════════════════════════
+-- viSWITCH (VIRTUAL SWITCH)
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS viswitches (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    cluster_id      TEXT NOT NULL REFERENCES clusters(id) ON DELETE CASCADE,
+    name            TEXT NOT NULL,
+    description     TEXT NOT NULL DEFAULT '',
+    max_ports       INTEGER NOT NULL DEFAULT 1024,   -- max VM ports (1–1024)
+    max_uplinks     INTEGER NOT NULL DEFAULT 128,    -- max uplink ports (1–128)
+    mtu             INTEGER NOT NULL DEFAULT 1500,
+    uplink_policy   TEXT NOT NULL DEFAULT 'failover', -- roundrobin, failover, rulebased
+    uplink_rules    TEXT NOT NULL DEFAULT '[]',       -- JSON rules for rulebased
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(cluster_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS viswitch_uplinks (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    viswitch_id     INTEGER NOT NULL REFERENCES viswitches(id) ON DELETE CASCADE,
+    uplink_index    INTEGER NOT NULL,                 -- 0–127
+    uplink_type     TEXT NOT NULL,                     -- 'physical' or 'virtual'
+    physical_nic    TEXT NOT NULL DEFAULT '',           -- NIC name for physical uplinks
+    network_id      INTEGER REFERENCES virtual_networks(id) ON DELETE SET NULL,
+    active          INTEGER NOT NULL DEFAULT 1,        -- 1=active, 0=standby (failover)
+    traffic_types   TEXT NOT NULL DEFAULT 'vm',        -- comma-separated: vm, san, vm,san
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(viswitch_id, uplink_index)
+);
+
+CREATE TABLE IF NOT EXISTS viswitch_ports (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    viswitch_id     INTEGER NOT NULL REFERENCES viswitches(id) ON DELETE CASCADE,
+    port_index      INTEGER NOT NULL,                 -- 0–1023
+    vm_id           TEXT REFERENCES vms(id) ON DELETE SET NULL,
+    vlan_id         INTEGER,                           -- port VLAN tag (NULL = untagged)
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(viswitch_id, port_index)
 );
 
 -- ═══════════════════════════════════════════════════════════════

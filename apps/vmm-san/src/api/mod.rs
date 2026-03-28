@@ -19,7 +19,7 @@ pub fn router() -> Router<Arc<CoreSanState>> {
         .route("/api/status", get(status::status))
         .route("/api/health", get(status::health))
         .route("/api/dashboard", get(status::dashboard))
-        .route("/api/network/config", get(status::get_network_config))
+        .route("/api/network/config", get(status::get_network_config).put(status::update_network_config))
         .route("/api/network/interfaces", get(status::list_interfaces))
 
         // ── Physical Disks ────────────────────────────────
@@ -27,6 +27,7 @@ pub fn router() -> Router<Arc<CoreSanState>> {
         .route("/api/disks/claim", post(disks::claim))
         .route("/api/disks/release", post(disks::release))
         .route("/api/disks/reset", post(disks::reset))
+        .route("/api/disks/{device_name}/smart", get(disks::smart_detail))
 
         // ── Volumes (CRUD + resilience policy) ────────────
         .route("/api/volumes", get(volumes::list).post(volumes::create))

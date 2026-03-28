@@ -44,6 +44,8 @@ pub struct DiscoveredDisk {
     pub device: BlockDevice,
     #[serde(flatten)]
     pub status: DiskStatus,
+    /// S.M.A.R.T. health summary (None if not yet collected).
+    pub smart: Option<crate::storage::smart::SmartSummary>,
 }
 
 // ── lsblk JSON structures ───────────────────────────────────────────────
@@ -98,6 +100,27 @@ pub fn discover_disks(db: &Connection) -> Vec<DiscoveredDisk> {
     ).and_then(|mut stmt| {
         stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
             .map(|rows| rows.filter_map(|r| r.ok()).collect())
+    }).unwrap_or_default();
+
+    // Load SMART data from DB (collected by smart_monitor engine)
+    use std::collections::HashMap;
+    let smart_map: HashMap<String, crate::storage::smart::SmartSummary> = db.prepare(
+        "SELECT device_path, supported, health_passed, temperature_c, power_on_hours, reallocated_sectors, wear_leveling_pct
+         FROM smart_data"
+    ).and_then(|mut stmt| {
+        stmt.query_map([], |row| {
+            let path: String = row.get(0)?;
+            let supported: bool = row.get::<_, i32>(1)? != 0;
+            let health: Option<bool> = row.get::<_, Option<i32>>(2)?.map(|v| v != 0);
+            Ok((path, crate::storage::smart::SmartSummary {
+                supported,
+                health_passed: health,
+                temperature_celsius: row.get(3)?,
+                power_on_hours: row.get(4)?,
+                reallocated_sectors: row.get(5)?,
+                wear_leveling_pct: row.get::<_, Option<i64>>(6)?.map(|v| v as u8),
+            }))
+        }).map(|rows| rows.filter_map(|r| r.ok()).collect())
     }).unwrap_or_default();
 
     let mut result = Vec::new();
@@ -185,7 +208,8 @@ pub fn discover_disks(db: &Connection) -> Vec<DiscoveredDisk> {
             DiskStatus::Available
         };
 
-        result.push(DiscoveredDisk { device, status });
+        let smart = smart_map.get(&path).cloned();
+        result.push(DiscoveredDisk { device, status, smart });
     }
 
     result

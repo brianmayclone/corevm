@@ -431,6 +431,37 @@ pub async fn teardown_bridge(
     Ok(Json(AgentResponse::ok()))
 }
 
+// ── viSwitch Management ────────────────────────────────────────────────
+
+/// POST /agent/network/viswitch/setup — Create a viSwitch (bridge + bond + uplinks).
+pub async fn setup_viswitch(
+    _agent: AgentAuth,
+    Json(req): Json<vmm_core::cluster::SetupViSwitchRequest>,
+) -> Result<Json<AgentResponse>, AppError> {
+    crate::api::network::setup_viswitch(&req)
+        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(AgentResponse::ok()))
+}
+
+/// POST /agent/network/viswitch/teardown — Remove a viSwitch.
+pub async fn teardown_viswitch(
+    _agent: AgentAuth,
+    Json(req): Json<vmm_core::cluster::TeardownViSwitchRequest>,
+) -> Result<Json<AgentResponse>, AppError> {
+    crate::api::network::teardown_viswitch(&req.bridge_name)
+        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(AgentResponse::ok()))
+}
+
+/// GET /agent/network/interfaces — list host network interfaces.
+pub async fn network_interfaces(
+    _agent: AgentAuth,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let ifaces = crate::api::network::list_interfaces_raw()
+        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::to_value(ifaces).unwrap()))
+}
+
 // ── Direct Host-to-Host Migration ───────────────────────────────────────
 
 /// POST /agent/migration/send — Send VM disks directly to another host.

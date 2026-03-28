@@ -218,6 +218,31 @@ CREATE INDEX IF NOT EXISTS idx_file_chunks_file ON file_chunks(file_id);
 CREATE INDEX IF NOT EXISTS idx_chunk_replicas_chunk ON chunk_replicas(chunk_id);
 CREATE INDEX IF NOT EXISTS idx_chunk_replicas_backend ON chunk_replicas(backend_id);
 CREATE INDEX IF NOT EXISTS idx_chunk_replicas_node ON chunk_replicas(node_id);
+
+-- ═══════════════════════════════════════════════════════════════
+-- SMART_DATA: S.M.A.R.T. disk health metrics per physical device
+-- Collected every 5 minutes by the smart_monitor engine
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS smart_data (
+    device_path         TEXT PRIMARY KEY,
+    supported           INTEGER NOT NULL DEFAULT 0,
+    health_passed       INTEGER,            -- 1=PASSED, 0=FAILED, NULL=unknown
+    transport           TEXT NOT NULL DEFAULT 'unknown',
+    power_on_hours      INTEGER,
+    temperature_c       INTEGER,
+    reallocated_sectors INTEGER,
+    pending_sectors     INTEGER,
+    uncorrectable_sectors INTEGER,
+    wear_leveling_pct   INTEGER,
+    media_errors        INTEGER,
+    percentage_used     INTEGER,
+    model               TEXT NOT NULL DEFAULT '',
+    serial              TEXT NOT NULL DEFAULT '',
+    firmware            TEXT NOT NULL DEFAULT '',
+    raw_json            TEXT,
+    collected_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
 "#;
 
 /// Initialize the database: create tables and indexes.

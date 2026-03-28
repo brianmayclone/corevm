@@ -20,6 +20,7 @@ pub mod activity;
 pub mod notifications;
 pub mod cluster_settings;
 pub mod network;
+pub mod viswitch;
 pub mod storage_wizard;
 pub mod discovery;
 pub mod san;
@@ -98,6 +99,14 @@ pub fn router() -> Router<Arc<ClusterState>> {
         .route("/api/networks/{id}/pxe-entries", get(network::list_pxe_entries).post(network::create_pxe_entry))
         .route("/api/networks/{network_id}/{entry_id}/pxe-entry", delete(network::delete_pxe_entry))
 
+        // ── viSwitches ──────────────────────────────────
+        .route("/api/viswitches", get(viswitch::list).post(viswitch::create))
+        .route("/api/viswitches/host-nics", get(viswitch::host_nics))
+        .route("/api/viswitches/{id}", get(viswitch::get).put(viswitch::update).delete(viswitch::delete))
+        .route("/api/viswitches/{id}/uplinks", post(viswitch::add_uplink))
+        .route("/api/viswitches/{id}/ports", get(viswitch::list_ports))
+        .route("/api/viswitches/{vid}/{uid}/uplink", delete(viswitch::remove_uplink))
+
         // ── Network (compat stubs) ──────────────────────
         .route("/api/network/interfaces", get(activity::network_interfaces))
         .route("/api/network/stats", get(activity::network_stats))
@@ -152,6 +161,7 @@ pub fn router() -> Router<Arc<ClusterState>> {
         .route("/api/san/volumes/{vid}/backends/{bid}", delete(san::remove_backend))
         .route("/api/san/peers", get(san::list_peers))
         .route("/api/san/disks", get(san::list_disks))
+        .route("/api/san/disks/{host_id}/{device_name}/smart", get(san::disk_smart_detail))
         .route("/api/san/disks/claim", post(san::claim_disk))
         .route("/api/san/disks/release", post(san::release_disk))
         .route("/api/san/disks/reset", post(san::reset_disk))

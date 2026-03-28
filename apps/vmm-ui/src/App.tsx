@@ -48,6 +48,9 @@ import DrsPage from './pages/DrsPage'
 import AlarmsList from './pages/AlarmsList'
 import NotificationsPage from './pages/NotificationsPage'
 import SdnNetworks from './pages/SdnNetworks'
+import ViSwitches from './pages/ViSwitches'
+import ViSwitchDetail from './pages/ViSwitchDetail'
+import NetworkTopology from './pages/NetworkTopology'
 import StorageWizard from './pages/StorageWizard'
 import SdnNetworkDetail from './pages/SdnNetworkDetail'
 import LogsPage from './pages/LogsPage'
@@ -143,6 +146,9 @@ export default function App() {
           <Route path="operations/notifications" element={<NotificationsPage />} />
           <Route path="cluster/networks" element={<SdnNetworks />} />
           <Route path="cluster/networks/:id" element={<SdnNetworkDetail />} />
+          <Route path="networks/topology" element={<NetworkTopology />} />
+          <Route path="networks/viswitches" element={<ViSwitches />} />
+          <Route path="networks/viswitches/:id" element={<ViSwitchDetail />} />
         </Route>
       </Routes>
     </BrowserRouter>

@@ -51,8 +51,28 @@ export default function Storage() {
     api.get<StorageStats>('/api/storage/stats').then(({ data }) => setStats(data)).catch(() => {})
     api.get<DiskImage[]>('/api/storage/images').then(({ data }) => setImages(data)).catch(() => {})
     api.get<Iso[]>('/api/storage/isos').then(({ data }) => setIsos(data)).catch(() => {})
-    // Try to reach local CoreSAN daemon
-    fetch(`${window.location.protocol}//${window.location.hostname}:7443/api/status`).then(r => r.json()).then(setSanStatus).catch(() => setSanStatus(null))
+    // Fetch CoreSAN status — use cluster proxy in cluster mode, direct in standalone
+    const sanUrl = isCluster ? '/api/san/status' : `${window.location.protocol}//${window.location.hostname}:7443/api/status`
+    const sanHeaders: HeadersInit = isCluster ? { Authorization: `Bearer ${localStorage.getItem('vmm_token') || ''}` } : {}
+    fetch(sanUrl, { headers: sanHeaders })
+      .then(r => r.json())
+      .then(d => {
+        // Cluster mode returns array of statuses — pick first or merge
+        if (Array.isArray(d) && d.length > 0) {
+          const merged = d[0]
+          // Aggregate peer count and volumes from all hosts
+          if (d.length > 1) {
+            merged.peer_count = Math.max(...d.map((s: any) => s.peer_count || 0))
+            merged.claimed_disks = d.reduce((sum: number, s: any) => sum + (s.claimed_disks || 0), 0)
+          }
+          setSanStatus(merged)
+        } else if (d && d.running !== undefined) {
+          setSanStatus(d)
+        } else {
+          setSanStatus(null)
+        }
+      })
+      .catch(() => setSanStatus(null))
   }
   // Refresh when cluster selection changes, or on mount in standalone mode
   useEffect(() => {
@@ -61,9 +81,18 @@ export default function Storage() {
     refresh()
   }, [selectedClusterId, isCluster])
 
-  const usedBytes = stats?.used_bytes || 0
-  const totalBytes = stats?.total_bytes || 1
-  const freeBytes = stats?.free_bytes || 0
+  // CoreSAN capacity from volume summaries
+  const sanTotalBytes = sanStatus?.volumes?.reduce((s: number, v: any) => s + (v.total_bytes || 0), 0) || 0
+  const sanFreeBytes = sanStatus?.volumes?.reduce((s: number, v: any) => s + (v.free_bytes || 0), 0) || 0
+  const sanUsedBytes = sanTotalBytes - sanFreeBytes
+
+  // Aggregate: local pools + CoreSAN
+  const poolUsedBytes = stats?.used_bytes || 0
+  const poolTotalBytes = stats?.total_bytes || 0
+  const poolFreeBytes = stats?.free_bytes || 0
+  const usedBytes = poolUsedBytes + sanUsedBytes
+  const totalBytes = (poolTotalBytes + sanTotalBytes) || 1
+  const freeBytes = poolFreeBytes + sanFreeBytes
   const vmDiskBytes = stats?.vm_disk_bytes || 0
   const usagePercent = Math.round((usedBytes / totalBytes) * 100)
   const orphanedCount = stats?.orphaned_images || 0
@@ -146,12 +175,25 @@ export default function Storage() {
           </div>
           <div className="w-full h-4 bg-vmm-border rounded-full overflow-hidden flex mb-3">
             <div className="bg-vmm-accent-dim h-full" style={{ width: `${Math.round((vmDiskBytes / totalBytes) * 100)}%` }} />
-            <div className="bg-vmm-accent h-full" style={{ width: `${Math.max(0, usagePercent - Math.round((vmDiskBytes / totalBytes) * 100))}%` }} />
+            <div className="bg-vmm-accent h-full" style={{ width: `${Math.max(0, Math.round((poolUsedBytes / totalBytes) * 100) - Math.round((vmDiskBytes / totalBytes) * 100))}%` }} />
+            {sanUsedBytes > 0 && (
+              <div className="h-full" style={{ width: `${Math.round((sanUsedBytes / totalBytes) * 100)}%`, background: '#8b5cf6' }} />
+            )}
           </div>
-          <div className="flex items-center gap-6 text-xs text-vmm-text-muted">
+          <div className="flex items-center gap-5 text-xs text-vmm-text-muted flex-wrap">
             <span className="flex items-center gap-1.5">
               <span className="w-2.5 h-2.5 rounded-full bg-vmm-accent-dim" /> VM Disks ({formatBytes(vmDiskBytes)})
             </span>
+            {poolUsedBytes > 0 && (
+              <span className="flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-full bg-vmm-accent" /> Local Pools ({formatBytes(poolUsedBytes)})
+              </span>
+            )}
+            {sanUsedBytes > 0 && (
+              <span className="flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-full" style={{ background: '#8b5cf6' }} /> CoreSAN ({formatBytes(sanUsedBytes)})
+              </span>
+            )}
             <span className="flex items-center gap-1.5">
               <span className="w-2.5 h-2.5 rounded-full bg-vmm-border" /> Available ({formatBytes(freeBytes)})
             </span>
@@ -164,6 +206,25 @@ export default function Storage() {
             label="Storage Pools" value={`${stats?.online_pools || 0} / ${stats?.total_pools || 0}`} />
           <SpecRow icon={<CheckCircle size={16} className="text-vmm-success" />}
             label="Disk Images" value={`${stats?.total_images || 0} Active`} />
+          {sanStatus?.running && (
+            <>
+              <SpecRow
+                icon={<Boxes size={16} className={
+                  sanStatus.quorum_status === 'active' || sanStatus.quorum_status === 'solo' ? 'text-vmm-success' :
+                  sanStatus.quorum_status === 'degraded' ? 'text-vmm-warning' : 'text-vmm-danger'
+                } />}
+                label="CoreSAN"
+                value={`${sanStatus.quorum_status} — ${sanStatus.volumes?.length || 0} vol${(sanStatus.volumes?.length || 0) !== 1 ? 's' : ''}, ${(sanStatus.peer_count || 0) + 1} nodes`}
+              />
+              {sanTotalBytes > 0 && (
+                <SpecRow
+                  icon={<HardDrive size={16} className="text-vmm-accent" />}
+                  label="SAN Capacity"
+                  value={`${formatBytes(sanUsedBytes)} / ${formatBytes(sanTotalBytes)} (${Math.round(sanUsedBytes / sanTotalBytes * 100)}%)`}
+                />
+              )}
+            </>
+          )}
           <div
             className={`mt-1 cursor-pointer ${orphanedCount > 0 ? 'hover:bg-vmm-surface-hover/30' : ''} rounded-lg transition-colors`}
             onClick={() => { if (orphanedCount > 0) setFilter(filter === 'orphaned' ? 'all' : 'orphaned') }}
@@ -189,9 +250,9 @@ export default function Storage() {
                 <div className="flex items-center gap-2">
                   <h2 className="text-sm font-bold text-vmm-text">CoreSAN</h2>
                   <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold border tracking-wider uppercase ${
-                    sanStatus.quorum_status === 'healthy' ? 'bg-vmm-success/20 text-vmm-success border-vmm-success/30' :
+                    sanStatus.quorum_status === 'active' || sanStatus.quorum_status === 'solo' ? 'bg-vmm-success/20 text-vmm-success border-vmm-success/30' :
                     sanStatus.quorum_status === 'degraded' ? 'bg-vmm-warning/20 text-vmm-warning border-vmm-warning/30' :
-                    sanStatus.quorum_status === 'fenced' ? 'bg-vmm-danger/20 text-vmm-danger border-vmm-danger/30' :
+                    sanStatus.quorum_status === 'fenced' || sanStatus.quorum_status === 'sanitizing' ? 'bg-vmm-danger/20 text-vmm-danger border-vmm-danger/30' :
                     'bg-vmm-surface text-vmm-text-muted border-vmm-border'
                   }`}>{sanStatus.quorum_status || 'unknown'}</span>
                 </div>

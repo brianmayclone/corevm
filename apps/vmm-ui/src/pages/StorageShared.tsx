@@ -1,8 +1,10 @@
-/** Shared Storage — NFS, GlusterFS, Ceph shared pools. */
+/** Shared Storage — NFS, GlusterFS, Ceph, and CoreSAN shared pools. */
 import { useEffect, useState } from 'react'
-import { Plus, Server, Share2 } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { Plus, Server, Share2, Boxes } from 'lucide-react'
 import api from '../api/client'
-import type { StoragePool } from '../api/types'
+import type { StoragePool, CoreSanStatus } from '../api/types'
+import { useClusterStore } from '../stores/clusterStore'
 import Card from '../components/Card'
 import SectionLabel from '../components/SectionLabel'
 import Button from '../components/Button'
@@ -12,7 +14,11 @@ import ConfirmDialog from '../components/ConfirmDialog'
 import { formatBytes } from '../utils/format'
 
 export default function StorageShared() {
+  const navigate = useNavigate()
+  const { backendMode } = useClusterStore()
+  const isCluster = backendMode === 'cluster'
   const [pools, setPools] = useState<StoragePool[]>([])
+  const [sanStatus, setSanStatus] = useState<CoreSanStatus | null>(null)
   const [addOpen, setAddOpen] = useState(false)
   const [deletePool, setDeletePool] = useState<StoragePool | null>(null)
 
@@ -20,6 +26,13 @@ export default function StorageShared() {
     api.get<StoragePool[]>('/api/storage/pools').then(({ data }) =>
       setPools(data.filter(p => p.shared))
     )
+    // Fetch CoreSAN status
+    const sanUrl = isCluster ? '/api/san/status' : `${window.location.protocol}//${window.location.hostname}:7443/api/status`
+    const sanHeaders: HeadersInit = isCluster ? { Authorization: `Bearer ${localStorage.getItem('vmm_token') || ''}` } : {}
+    fetch(sanUrl, { headers: sanHeaders }).then(r => r.json()).then(d => {
+      const status = Array.isArray(d) ? d[0] : d
+      setSanStatus(status?.running ? status : null)
+    }).catch(() => setSanStatus(null))
   }
   useEffect(() => { refresh() }, [])
 
@@ -34,8 +47,13 @@ export default function StorageShared() {
     }
   }
 
-  const totalBytes = pools.reduce((s, p) => s + p.total_bytes, 0)
-  const freeBytes = pools.reduce((s, p) => s + p.free_bytes, 0)
+  const sanTotalBytes = sanStatus?.volumes?.reduce((s: number, v: any) => s + (v.total_bytes || 0), 0) || 0
+  const sanFreeBytes = sanStatus?.volumes?.reduce((s: number, v: any) => s + (v.free_bytes || 0), 0) || 0
+  const poolTotalBytes = pools.reduce((s, p) => s + p.total_bytes, 0)
+  const poolFreeBytes = pools.reduce((s, p) => s + p.free_bytes, 0)
+  const totalBytes = poolTotalBytes + sanTotalBytes
+  const freeBytes = poolFreeBytes + sanFreeBytes
+  const sharedCount = pools.length + (sanStatus?.volumes?.length || 0)
 
   return (
     <div className="space-y-6">
@@ -43,7 +61,7 @@ export default function StorageShared() {
         <div>
           <h1 className="text-2xl font-bold text-vmm-text">Shared Storage</h1>
           <p className="text-sm text-vmm-text-muted mt-1">
-            Network-attached storage pools (NFS, GlusterFS, Ceph) accessible across cluster nodes
+            Shared storage accessible across cluster nodes — NFS, GlusterFS, Ceph, and CoreSAN
           </p>
         </div>
         <Button variant="primary" icon={<Plus size={14} />} onClick={() => setAddOpen(true)}>
@@ -52,16 +70,16 @@ export default function StorageShared() {
       </div>
 
       {/* Shared summary */}
-      {pools.length > 0 && (
+      {(pools.length > 0 || sanStatus) && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           <Card>
             <div className="flex items-center gap-3 mb-2">
               <Share2 size={18} className="text-vmm-accent" />
               <SectionLabel>Shared Pools</SectionLabel>
             </div>
-            <div className="text-3xl font-bold text-vmm-text">{pools.length}</div>
+            <div className="text-3xl font-bold text-vmm-text">{sharedCount}</div>
             <div className="text-xs text-vmm-text-muted mt-1">
-              {pools.filter(p => p.total_bytes > 0).length} online
+              {pools.filter(p => p.total_bytes > 0).length + (sanStatus?.volumes?.length || 0)} online
             </div>
           </Card>
           <Card>
@@ -77,7 +95,7 @@ export default function StorageShared() {
               <SectionLabel>Supported Protocols</SectionLabel>
             </div>
             <div className="flex flex-wrap gap-2 mt-2">
-              {['NFS', 'GlusterFS', 'Ceph RBD', 'iSCSI'].map((proto) => (
+              {['NFS', 'GlusterFS', 'Ceph RBD', 'iSCSI', 'CoreSAN'].map((proto) => (
                 <span key={proto} className="px-2 py-1 text-[10px] font-bold tracking-wider rounded bg-vmm-accent/10 text-vmm-accent border border-vmm-accent/20">
                   {proto}
                 </span>
@@ -88,7 +106,7 @@ export default function StorageShared() {
       )}
 
       {/* Pool list */}
-      {pools.length === 0 ? (
+      {pools.length === 0 && !sanStatus ? (
         <Card>
           <div className="flex flex-col items-center justify-center py-12 text-center">
             <div className="w-16 h-16 rounded-2xl bg-vmm-bg-alt flex items-center justify-center mb-4">
@@ -114,6 +132,68 @@ export default function StorageShared() {
               onDelete={() => setDeletePool(pool)}
             />
           ))}
+        </div>
+      )}
+
+      {/* CoreSAN Volumes */}
+      {sanStatus && sanStatus.volumes && sanStatus.volumes.length > 0 && (
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <Boxes size={18} className="text-vmm-accent" />
+              <h2 className="text-lg font-bold text-vmm-text">CoreSAN Volumes</h2>
+              <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold border tracking-wider uppercase ${
+                sanStatus.quorum_status === 'active' || sanStatus.quorum_status === 'solo'
+                  ? 'bg-vmm-success/20 text-vmm-success border-vmm-success/30'
+                  : sanStatus.quorum_status === 'degraded'
+                  ? 'bg-vmm-warning/20 text-vmm-warning border-vmm-warning/30'
+                  : 'bg-vmm-danger/20 text-vmm-danger border-vmm-danger/30'
+              }`}>{sanStatus.quorum_status}</span>
+            </div>
+            <button onClick={() => navigate('/storage/coresan')}
+              className="text-xs font-medium text-vmm-accent hover:text-vmm-accent-hover transition-colors cursor-pointer">
+              Manage CoreSAN &rarr;
+            </button>
+          </div>
+          <div className="space-y-3">
+            {sanStatus.volumes.map((vol: any) => {
+              const used = vol.total_bytes - vol.free_bytes
+              const pct = vol.total_bytes > 0 ? Math.round((used / vol.total_bytes) * 100) : 0
+              return (
+                <Card key={vol.volume_id}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-lg bg-vmm-accent/10 flex items-center justify-center">
+                        <Boxes size={18} className="text-vmm-accent" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium text-vmm-text">{vol.volume_name}</span>
+                          <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold border tracking-wider uppercase ${
+                            vol.status === 'online' ? 'bg-vmm-success/20 text-vmm-success border-vmm-success/30' :
+                            'bg-vmm-warning/20 text-vmm-warning border-vmm-warning/30'
+                          }`}>{vol.status}</span>
+                          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold border tracking-wider uppercase bg-vmm-surface text-vmm-text-muted border-vmm-border">
+                            FTT={vol.ftt} &middot; {vol.local_raid}
+                          </span>
+                        </div>
+                        <div className="text-xs text-vmm-text-muted mt-0.5">
+                          {formatBytes(used)} / {formatBytes(vol.total_bytes)} ({pct}%)
+                          &middot; {vol.synced_chunks || 0} chunks synced
+                        </div>
+                      </div>
+                    </div>
+                    <div className="w-32">
+                      <div className="w-full h-2 bg-vmm-border rounded-full overflow-hidden">
+                        <div className={`h-full rounded-full ${pct > 80 ? 'bg-vmm-danger' : 'bg-vmm-accent'}`}
+                          style={{ width: `${pct}%` }} />
+                      </div>
+                    </div>
+                  </div>
+                </Card>
+              )
+            })}
+          </div>
         </div>
       )}
 
