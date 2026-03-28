@@ -380,19 +380,8 @@ fn fetch_san_status() -> Option<SanStatus> {
     // Read vmm-san port from config
     let san_port = read_port_from_toml("/etc/vmm/vmm-san.toml", "server").unwrap_or(7443);
 
-    // Try /api/status first (simpler, flat response)
-    let url = format!("http://127.0.0.1:{}/api/status", san_port);
-    let output = Command::new("curl")
-        .args(["-s", "-m", "2", "--connect-timeout", "1", &url])
-        .output()
-        .ok()?;
-
-    let body = String::from_utf8_lossy(&output.stdout);
-    if body.is_empty() {
-        return None;
-    }
-
-    let json: serde_json::Value = serde_json::from_str(&body).ok()?;
+    // Fetch /api/status via raw HTTP (no curl dependency)
+    let json = http_get_json(&format!("127.0.0.1:{}", san_port), "/api/status")?;
 
     // /api/status returns a flat structure directly (not nested under "status")
     // But /api/dashboard wraps it in { status: {...}, total_capacity_bytes, ... }
@@ -437,6 +426,29 @@ fn fetch_san_status() -> Option<SanStatus> {
         total_bytes,
         is_leader,
     })
+}
+
+/// Minimal HTTP GET that returns parsed JSON. No external dependencies needed.
+fn http_get_json(host: &str, path: &str) -> Option<serde_json::Value> {
+    use std::io::{Read as IoRead, Write as IoWrite};
+    use std::net::TcpStream;
+
+    let mut stream = TcpStream::connect(host).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
+
+    let request = format!(
+        "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        path, host
+    );
+    stream.write_all(request.as_bytes()).ok()?;
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response).ok()?;
+
+    // Skip HTTP headers — find the blank line separating headers from body
+    let body = response.split("\r\n\r\n").nth(1)?;
+    serde_json::from_str(body.trim()).ok()
 }
 
 fn read_port_from_toml(path: &str, section: &str) -> Option<u16> {

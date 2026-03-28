@@ -106,11 +106,11 @@ CREATE TABLE IF NOT EXISTS file_chunks (
 
 CREATE TABLE IF NOT EXISTS chunk_replicas (
     chunk_id        INTEGER NOT NULL REFERENCES file_chunks(id) ON DELETE CASCADE,
-    backend_id      TEXT NOT NULL REFERENCES backends(id) ON DELETE CASCADE,
+    backend_id      TEXT NOT NULL DEFAULT '',   -- local backend id (empty for remote-tracked replicas)
     node_id         TEXT NOT NULL,              -- which host holds this replica
     state           TEXT NOT NULL DEFAULT 'syncing', -- syncing, synced, stale, error
     synced_at       TEXT,
-    PRIMARY KEY (chunk_id, backend_id)
+    PRIMARY KEY (chunk_id, node_id)
 );
 
 -- ═══════════════════════════════════════════════════════════════
@@ -269,4 +269,48 @@ fn migrate(db: &Connection) {
     db.execute_batch("ALTER TABLE volumes ADD COLUMN sync_mode TEXT NOT NULL DEFAULT 'async';").ok();
     // Volume size limit
     db.execute_batch("ALTER TABLE volumes ADD COLUMN max_size_bytes INTEGER NOT NULL DEFAULT 0;").ok();
+
+    // Migrate chunk_replicas: remove FK on backend_id, change PK to (chunk_id, node_id)
+    // SQLite can't ALTER constraints, so we recreate the table if the old schema has
+    // backend_id as part of the PK. We detect this by trying to insert a test row
+    // with empty backend_id — if it fails with FK error, we need to migrate.
+    migrate_chunk_replicas(db);
+}
+
+/// Recreate chunk_replicas without FK constraint on backend_id and with PK (chunk_id, node_id).
+fn migrate_chunk_replicas(db: &Connection) {
+    // Check if we need migration: try to see if the table has the old PK
+    let needs_migrate = db.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='chunk_replicas'",
+        [], |row| row.get::<_, String>(0),
+    ).map(|sql| sql.contains("PRIMARY KEY (chunk_id, backend_id)"))
+     .unwrap_or(false);
+
+    if !needs_migrate {
+        return;
+    }
+
+    tracing::info!("Migrating chunk_replicas: PK (chunk_id, backend_id) → (chunk_id, node_id)");
+
+    db.execute_batch("
+        CREATE TABLE IF NOT EXISTS chunk_replicas_new (
+            chunk_id        INTEGER NOT NULL REFERENCES file_chunks(id) ON DELETE CASCADE,
+            backend_id      TEXT NOT NULL DEFAULT '',
+            node_id         TEXT NOT NULL,
+            state           TEXT NOT NULL DEFAULT 'syncing',
+            synced_at       TEXT,
+            PRIMARY KEY (chunk_id, node_id)
+        );
+        INSERT OR IGNORE INTO chunk_replicas_new (chunk_id, backend_id, node_id, state, synced_at)
+            SELECT chunk_id, backend_id, node_id, state, synced_at FROM chunk_replicas;
+        DROP TABLE chunk_replicas;
+        ALTER TABLE chunk_replicas_new RENAME TO chunk_replicas;
+    ").ok();
+
+    // Recreate indexes
+    db.execute_batch("
+        CREATE INDEX IF NOT EXISTS idx_chunk_replicas_chunk ON chunk_replicas(chunk_id);
+        CREATE INDEX IF NOT EXISTS idx_chunk_replicas_backend ON chunk_replicas(backend_id);
+        CREATE INDEX IF NOT EXISTS idx_chunk_replicas_node ON chunk_replicas(node_id);
+    ").ok();
 }

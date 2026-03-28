@@ -147,7 +147,7 @@ async fn run_push_replicator(
                             db.execute(
                                 "INSERT OR REPLACE INTO chunk_replicas (chunk_id, backend_id, node_id, state, synced_at)
                                  VALUES (?1, ?2, ?3, 'synced', ?4)",
-                                rusqlite::params![chunk_id, format!("remote-{}", target_node_id), target_node_id, &now],
+                                rusqlite::params![chunk_id, "", target_node_id, &now],
                             ).ok();
                         }
                         drop(db);
