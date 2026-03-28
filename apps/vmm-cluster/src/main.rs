@@ -164,8 +164,26 @@ async fn main() {
     // Vite serves the UI separately and this directory won't exist.
     let app = if let Some(ui_dir) = find_ui_dir() {
         tracing::info!("Serving UI from {}", ui_dir.display());
-        let index = ui_dir.join("index.html");
-        let serve_dir = ServeDir::new(&ui_dir).not_found_service(ServeFile::new(&index));
+        let index_path = ui_dir.join("index.html");
+        // SPA fallback: serve static files, but for unknown paths serve index.html with 200
+        // (not 404) so React Router can handle client-side routing.
+        let spa_fallback = {
+            let index_path = index_path.clone();
+            tower::service_fn(move |_req: axum::http::Request<axum::body::Body>| {
+                let index_path = index_path.clone();
+                async move {
+                    let body = tokio::fs::read(&index_path).await.unwrap_or_default();
+                    Ok::<_, std::convert::Infallible>(
+                        axum::http::Response::builder()
+                            .status(200)
+                            .header("content-type", "text/html")
+                            .body(axum::body::Body::from(body))
+                            .unwrap()
+                    )
+                }
+            })
+        };
+        let serve_dir = ServeDir::new(&ui_dir).not_found_service(spa_fallback);
         api_router.fallback_service(serve_dir)
     } else {
         tracing::info!("No UI directory found — API-only mode (use Vite dev server for UI)");

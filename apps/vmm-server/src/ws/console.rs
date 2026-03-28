@@ -31,7 +31,7 @@ pub async fn handler(
     Query(query): Query<WsQuery>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    // Validate JWT from query param
+    // Validate token — accept either a valid JWT or the agent token (for cluster bridge)
     let token = match query.token {
         Some(t) => t,
         None => {
@@ -39,8 +39,12 @@ pub async fn handler(
             return axum::http::StatusCode::UNAUTHORIZED.into_response();
         }
     };
-    if let Err(e) = jwt::validate_token(&token, &state.jwt_secret) {
-        tracing::warn!("WebSocket console: invalid token for VM {}: {}", vm_id, e);
+    let jwt_ok = jwt::validate_token(&token, &state.jwt_secret).is_ok();
+    let agent_ok = state.managed_config.lock().ok()
+        .and_then(|cfg| cfg.as_ref().map(|c| c.agent_token == token))
+        .unwrap_or(false);
+    if !jwt_ok && !agent_ok {
+        tracing::warn!("WebSocket console: invalid token for VM {}", vm_id);
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     }
 
