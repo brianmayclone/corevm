@@ -544,7 +544,7 @@ export interface DiscoveredDisk {
   is_os_disk: boolean
   status: 'available' | 'has_data' | 'os_disk' | 'in_use' | 'claimed'
   disk_id?: string
-  volume_id?: string
+  backend_id?: string
   fs_type_detail?: string
   /** Set client-side when aggregating disks from multiple SAN hosts. */
   _host_id?: string

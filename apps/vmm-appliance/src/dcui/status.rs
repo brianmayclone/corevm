@@ -433,55 +433,42 @@ fn fetch_san_status() -> Option<SanStatus> {
     })
 }
 
-/// Minimal HTTP GET that returns parsed JSON. No external dependencies needed.
-fn http_get_json(host: &str, path: &str) -> Option<serde_json::Value> {
+/// Minimal HTTP GET that returns parsed JSON. Uses raw TCP — no external deps.
+fn http_get_json(host_port: &str, path: &str) -> Option<serde_json::Value> {
     use std::io::{Read as IoRead, Write as IoWrite};
     use std::net::TcpStream;
 
-    let mut stream = match TcpStream::connect_timeout(
-        &host.parse().ok()?,
-        Duration::from_secs(1),
-    ) {
-        Ok(s) => s,
-        Err(_) => return None,
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+    // Simple connect with timeout — TcpStream::connect accepts "host:port" strings
+    let mut stream = TcpStream::connect(host_port).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
 
     let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nAccept: application/json\r\n\r\n",
-        path, host
+        "GET {} HTTP/1.0\r\nHost: {}\r\n\r\n",
+        path, host_port
     );
-    if stream.write_all(request.as_bytes()).is_err() {
-        return None;
-    }
+    stream.write_all(request.as_bytes()).ok()?;
+    stream.flush().ok();
 
-    // Read response in chunks — don't rely on read_to_string which can fail on connection close
-    let mut buf = Vec::with_capacity(8192);
+    // Read entire response
+    let mut buf = Vec::with_capacity(16384);
     let mut tmp = [0u8; 4096];
     loop {
         match stream.read(&mut tmp) {
-            Ok(0) => break,        // Connection closed — done
+            Ok(0) => break,
             Ok(n) => buf.extend_from_slice(&tmp[..n]),
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break, // Timeout — use what we have
-            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => break,
             Err(_) => break,
         }
-        if buf.len() > 65536 { break; } // Safety limit
+        if buf.len() > 131072 { break; }
     }
 
     let response = String::from_utf8_lossy(&buf);
 
-    // Skip HTTP headers — find the blank line separating headers from body
-    let body = if let Some(pos) = response.find("\r\n\r\n") {
-        &response[pos + 4..]
-    } else if let Some(pos) = response.find("\n\n") {
-        &response[pos + 2..]
-    } else {
-        return None;
-    };
+    // Find body after header separator
+    let body_start = response.find("\r\n\r\n").map(|p| p + 4)
+        .or_else(|| response.find("\n\n").map(|p| p + 2))?;
 
-    serde_json::from_str(body.trim()).ok()
+    serde_json::from_str(response[body_start..].trim()).ok()
 }
 
 fn read_port_from_toml(path: &str, section: &str) -> Option<u16> {

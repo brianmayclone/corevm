@@ -68,7 +68,7 @@ pub async fn status(
     let peer_count = state.peers.len() as u32;
     let benchmark_summary = query_benchmark_summary(&db);
 
-    // Count disks
+    // Count disks via discover_disks (now correctly reads claimed_disks table)
     let disks = crate::storage::disk::discover_disks(&db);
     let available_disks = disks.iter().filter(|d| matches!(d.status,
         crate::storage::disk::DiskStatus::Available | crate::storage::disk::DiskStatus::HasData { .. }
@@ -128,7 +128,7 @@ pub async fn dashboard(
         "SELECT COUNT(*) FROM integrity_log WHERE passed = 0", [], |row| row.get(0),
     ).unwrap_or(0);
 
-    let disks = crate::storage::disk::discover_disks(&db);
+    let disks2 = crate::storage::disk::discover_disks(&db);
     let local_addr2 = format!("http://{}:{}",
         crate::engine::discovery::get_local_ip_cached(), state.config.server.port);
     let quorum_status2 = format!("{:?}", *state.quorum_status.read().unwrap()).to_lowercase();
@@ -142,10 +142,10 @@ pub async fn dashboard(
         uptime_secs: state.started_at.elapsed().as_secs(),
         volumes,
         peer_count: state.peers.len() as u32,
-        available_disks: disks.iter().filter(|d| matches!(d.status,
+        available_disks: disks2.iter().filter(|d| matches!(d.status,
             crate::storage::disk::DiskStatus::Available | crate::storage::disk::DiskStatus::HasData { .. }
         )).count() as u32,
-        claimed_disks: disks.iter().filter(|d| matches!(d.status,
+        claimed_disks: disks2.iter().filter(|d| matches!(d.status,
             crate::storage::disk::DiskStatus::Claimed { .. }
         )).count() as u32,
         benchmark_summary,

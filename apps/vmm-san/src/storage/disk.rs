@@ -34,7 +34,7 @@ pub enum DiskStatus {
     #[serde(rename = "in_use")]
     InUse { mountpoint: String },
     #[serde(rename = "claimed")]
-    Claimed { disk_id: String, volume_id: String },
+    Claimed { disk_id: String, backend_id: String },
 }
 
 /// Combined disk info for the API response.
@@ -92,9 +92,9 @@ pub fn discover_disks(db: &Connection) -> Vec<DiscoveredDisk> {
         }
     };
 
-    // Load claimed disks from DB
+    // Load claimed disks from DB (device_path is what we match against lsblk)
     let claimed: Vec<(String, String, String)> = db.prepare(
-        "SELECT id, device_path, volume_id FROM claimed_disks WHERE status != 'released'"
+        "SELECT id, device_path, COALESCE(backend_id, '') FROM claimed_disks WHERE status != 'released'"
     ).and_then(|mut stmt| {
         stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
             .map(|rows| rows.filter_map(|r| r.ok()).collect())
@@ -168,12 +168,12 @@ pub fn discover_disks(db: &Connection) -> Vec<DiscoveredDisk> {
         let status = if let Some(ref mp) = mountpoint {
             // Check if mounted by CoreSAN
             if let Some((id, _, vol)) = claimed.iter().find(|(_, dp, _)| *dp == path) {
-                DiskStatus::Claimed { disk_id: id.clone(), volume_id: vol.clone() }
+                DiskStatus::Claimed { disk_id: id.clone(), backend_id: vol.clone() }
             } else {
                 DiskStatus::InUse { mountpoint: mp.clone() }
             }
         } else if let Some((id, _, vol)) = claimed.iter().find(|(_, dp, _)| *dp == path) {
-            DiskStatus::Claimed { disk_id: id.clone(), volume_id: vol.clone() }
+            DiskStatus::Claimed { disk_id: id.clone(), backend_id: vol.clone() }
         } else if dev.fstype.is_some() || has_partitions {
             let fs = dev.fstype.clone()
                 .or_else(|| dev.children.as_ref()

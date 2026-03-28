@@ -483,7 +483,6 @@ impl ProgressState {
                 Constraint::Length(1),  // 2: gap
                 Constraint::Length(1),  // 3: status text
                 Constraint::Length(1),  // 4: progress bar
-                Constraint::Length(1),  // 5: percentage
             ])
             .split(content);
 
@@ -535,19 +534,14 @@ impl ProgressState {
             .alignment(Alignment::Center)
             .render(chunks[3], buf);
 
-        // Progress bar
+        // Progress bar with percentage label
         let bar_area = centered_horizontal(chunks[4], 60);
         let pct = (self.progress * 100.0) as u16;
         Gauge::default()
             .gauge_style(Style::default().fg(ACCENT_COLOR).bg(Color::DarkGray))
             .percent(pct)
+            .label(format!("{}%", pct))
             .render(bar_area, buf);
-
-        // Percentage text
-        Paragraph::new(format!("{}%", pct))
-            .style(Style::default().fg(ACCENT_COLOR))
-            .alignment(Alignment::Center)
-            .render(chunks[5], buf);
     }
 }
 
