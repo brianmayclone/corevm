@@ -455,3 +455,144 @@ pub async fn browse_root(
 ) -> Result<Json<Vec<BrowseEntry>>, (StatusCode, String)> {
     browse(State(state), Path((volume_id, String::new()))).await
 }
+
+// ── Chunk Map (Allocation Details) ──────────────────────────────────
+
+#[derive(Serialize)]
+pub struct ChunkMapEntry {
+    pub chunk_index: u32,
+    pub file_id: i64,
+    pub rel_path: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+    pub state: String,       // "synced", "stale", "error", "empty"
+    pub backend_id: String,
+    pub backend_path: String,
+    pub node_id: String,
+    pub node_hostname: String,
+}
+
+#[derive(Serialize)]
+pub struct ChunkMapResponse {
+    pub volume_id: String,
+    pub volume_name: String,
+    pub chunk_size_bytes: u64,
+    pub total_chunks: u64,
+    pub total_capacity_bytes: u64,
+    pub used_bytes: u64,
+    pub backends: Vec<ChunkMapBackend>,
+    pub chunks: Vec<ChunkMapEntry>,
+}
+
+#[derive(Serialize)]
+pub struct ChunkMapBackend {
+    pub backend_id: String,
+    pub node_id: String,
+    pub node_hostname: String,
+    pub path: String,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub status: String,
+}
+
+/// GET /api/volumes/{id}/chunk-map — full chunk allocation map for visualization.
+/// Returns every chunk with its placement, status, and file association.
+pub async fn chunk_map(
+    State(state): State<Arc<CoreSanState>>,
+    Path(volume_id): Path<String>,
+) -> Result<Json<ChunkMapResponse>, (StatusCode, String)> {
+    let db = state.db.lock().unwrap();
+
+    // Volume info
+    let (vol_name, chunk_size, total_cap, free_cap): (String, u64, u64, u64) = db.query_row(
+        "SELECT v.name, v.chunk_size_bytes,
+                COALESCE((SELECT SUM(b.total_bytes) FROM backends b WHERE b.node_id IN (
+                    SELECT DISTINCT cr.node_id FROM chunk_replicas cr
+                    JOIN file_chunks fc ON fc.id = cr.chunk_id
+                    JOIN file_map fm ON fm.id = fc.file_id
+                    WHERE fm.volume_id = v.id
+                ) OR b.node_id = ?2), 0),
+                COALESCE((SELECT SUM(b.free_bytes) FROM backends b WHERE b.node_id IN (
+                    SELECT DISTINCT cr.node_id FROM chunk_replicas cr
+                    JOIN file_chunks fc ON fc.id = cr.chunk_id
+                    JOIN file_map fm ON fm.id = fc.file_id
+                    WHERE fm.volume_id = v.id
+                ) OR b.node_id = ?2), 0)
+         FROM volumes v WHERE v.id = ?1",
+        rusqlite::params![&volume_id, &state.node_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).map_err(|_| (StatusCode::NOT_FOUND, "Volume not found".into()))?;
+
+    // All backends that participate in this volume
+    let backends: Vec<ChunkMapBackend> = {
+        let mut stmt = db.prepare(
+            "SELECT b.id, b.node_id, b.path, b.total_bytes, b.free_bytes, b.status,
+                    COALESCE(p.hostname, ?2)
+             FROM backends b
+             LEFT JOIN peers p ON p.node_id = b.node_id
+             WHERE b.status != 'released'
+             ORDER BY b.node_id, b.path"
+        ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+        stmt.query_map(rusqlite::params![&state.node_id, &state.hostname], |row| {
+            Ok(ChunkMapBackend {
+                backend_id: row.get(0)?,
+                node_id: row.get(1)?,
+                path: row.get(2)?,
+                total_bytes: row.get(3)?,
+                free_bytes: row.get(4)?,
+                status: row.get(5)?,
+                node_hostname: row.get(6)?,
+            })
+        }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?
+         .filter_map(|r| r.ok()).collect()
+    };
+
+    // All chunks with their replicas
+    let chunks: Vec<ChunkMapEntry> = {
+        let mut stmt = db.prepare(
+            "SELECT fc.chunk_index, fc.file_id, fm.rel_path, fc.size_bytes,
+                    COALESCE(fc.sha256, ''), cr.state,
+                    cr.backend_id, b.path, cr.node_id,
+                    COALESCE(p.hostname, ?2)
+             FROM chunk_replicas cr
+             JOIN file_chunks fc ON fc.id = cr.chunk_id
+             JOIN file_map fm ON fm.id = fc.file_id
+             JOIN backends b ON b.id = cr.backend_id
+             LEFT JOIN peers p ON p.node_id = cr.node_id
+             WHERE fm.volume_id = ?1
+             ORDER BY fc.file_id, fc.chunk_index, cr.node_id"
+        ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+        stmt.query_map(rusqlite::params![&volume_id, &state.hostname], |row| {
+            Ok(ChunkMapEntry {
+                chunk_index: row.get(0)?,
+                file_id: row.get(1)?,
+                rel_path: row.get(2)?,
+                size_bytes: row.get(3)?,
+                sha256: row.get(4)?,
+                state: row.get(5)?,
+                backend_id: row.get(6)?,
+                backend_path: row.get(7)?,
+                node_id: row.get(8)?,
+                node_hostname: row.get(9)?,
+            })
+        }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?
+         .filter_map(|r| r.ok()).collect()
+    };
+
+    let total_chunks = chunks.len() as u64;
+    let used_bytes: u64 = db.query_row(
+        "SELECT COALESCE(SUM(fm.size_bytes), 0) FROM file_map fm WHERE fm.volume_id = ?1",
+        rusqlite::params![&volume_id], |row| row.get(0),
+    ).unwrap_or(0);
+
+    Ok(Json(ChunkMapResponse {
+        volume_id,
+        volume_name: vol_name,
+        chunk_size_bytes: chunk_size,
+        total_chunks,
+        total_capacity_bytes: total_cap,
+        used_bytes,
+        backends,
+        chunks,
+    }))
+}

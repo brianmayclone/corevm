@@ -49,6 +49,7 @@ pub fn router() -> Router<Arc<CoreSanState>> {
         .route("/api/volumes/{id}/mkdir", post(files::mkdir))
         .route("/api/volumes/{id}/browse/{*path}", get(files::browse))
         .route("/api/volumes/{id}/browse", get(files::browse_root))
+        .route("/api/volumes/{id}/chunk-map", get(files::chunk_map))
 
         // ── Chunk Operations (peer-to-peer replication) ───
         .route("/api/chunks/{volume_id}/{file_id}/{chunk_index}",

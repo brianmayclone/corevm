@@ -494,6 +494,42 @@ export interface CoreSanFile {
   synced_count: number
 }
 
+// ── CoreSAN Chunk Map (Allocation Details) ──────────────────────────────
+
+export interface ChunkMapEntry {
+  chunk_index: number
+  file_id: number
+  rel_path: string
+  size_bytes: number
+  sha256: string
+  state: 'synced' | 'stale' | 'error' | 'syncing'
+  backend_id: string
+  backend_path: string
+  node_id: string
+  node_hostname: string
+}
+
+export interface ChunkMapBackend {
+  backend_id: string
+  node_id: string
+  node_hostname: string
+  path: string
+  total_bytes: number
+  free_bytes: number
+  status: string
+}
+
+export interface ChunkMapResponse {
+  volume_id: string
+  volume_name: string
+  chunk_size_bytes: number
+  total_chunks: number
+  total_capacity_bytes: number
+  used_bytes: number
+  backends: ChunkMapBackend[]
+  chunks: ChunkMapEntry[]
+}
+
 // ── Physical Disk Discovery ──────────────────────────────────────────────
 
 export interface DiscoveredDisk {

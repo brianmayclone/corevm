@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Boxes, Plus, Trash2, RefreshCw, Shield, Zap, WifiOff, HardDrive, Activity, Server, AlertTriangle, Disc, FolderOpen } from 'lucide-react'
+import { Boxes, Plus, Trash2, RefreshCw, Shield, Zap, WifiOff, HardDrive, Activity, Server, AlertTriangle, Disc, FolderOpen, Grid3x3 } from 'lucide-react'
 import type { CoreSanVolume, CoreSanBackend, CoreSanPeer, CoreSanStatus, CoreSanBenchmarkMatrix, DiscoveredDisk } from '../api/types'
 import { useClusterStore } from '../stores/clusterStore'
 import Card from '../components/Card'
@@ -676,6 +676,9 @@ export default function StorageCoresan() {
                 <div className="flex items-center justify-between mb-4">
                   <SectionLabel>{`Volume: ${sel.name}`}</SectionLabel>
                   <div className="flex items-center gap-2">
+                    <Button variant="outline" onClick={() => navigate(`/storage/coresan/volume/${sel.id}/chunks`)}>
+                      <Grid3x3 size={13} /> Allocation Details
+                    </Button>
                     <Button variant="outline" onClick={() => setBrowseVolume(sel)}>
                       <FolderOpen size={13} /> Browse
                     </Button>
