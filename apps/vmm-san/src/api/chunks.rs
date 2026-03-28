@@ -153,11 +153,11 @@ pub async fn read_chunk(
              WHERE fc.file_id = ?1 AND fc.chunk_index = ?2
                AND cr.node_id = ?3 AND cr.state = 'synced'"
         ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
-        stmt.query_map(
+        let rows = stmt.query_map(
             rusqlite::params![file_id, chunk_index, &state.node_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?
-         .filter_map(|r| r.ok()).collect()
+        ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+        rows.filter_map(|r| r.ok()).collect()
     };
 
     for (backend_path, backend_id, expected_sha256) in &replicas {

@@ -66,24 +66,25 @@ pub async fn read(
     let is_peer_request = headers.get(crate::auth::PEER_SECRET_HEADER).is_some();
 
     // 1. Look up file in file_map
-    let (file_id, file_size, chunk_size) = {
+    let file_info = {
         let db = state.db.lock().unwrap();
-        let file_info = db.query_row(
+        db.query_row(
             "SELECT fm.id, fm.size_bytes, v.chunk_size_bytes FROM file_map fm
              JOIN volumes v ON v.id = fm.volume_id
              WHERE fm.volume_id = ?1 AND fm.rel_path = ?2",
             rusqlite::params![&volume_id, &rel_path],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, u64>(1)?, row.get::<_, u64>(2)?)),
-        );
-        match file_info {
-            Ok(info) => info,
-            Err(_) => {
-                if is_peer_request {
-                    return Err((StatusCode::NOT_FOUND, "File not found locally".into()));
-                }
-                // File not in our DB — ask peers
-                return read_from_peers(&state, &volume_id, &rel_path).await;
+        ).ok()
+    };
+
+    let (file_id, file_size, chunk_size) = match file_info {
+        Some(info) => info,
+        None => {
+            if is_peer_request {
+                return Err((StatusCode::NOT_FOUND, "File not found locally".into()));
             }
+            // File not in our DB — ask peers
+            return read_from_peers(state.clone(), volume_id, rel_path).await;
         }
     };
 
@@ -125,14 +126,14 @@ pub async fn read(
     }
 
     // 3. No local chunks — fetch whole file from a peer that has it
-    read_from_peers(&state, &volume_id, &rel_path).await
+    read_from_peers(state.clone(), volume_id, rel_path).await
 }
 
 /// Try to read a file from online peers.
 async fn read_from_peers(
-    state: &Arc<CoreSanState>,
-    volume_id: &str,
-    rel_path: &str,
+    state: Arc<CoreSanState>,
+    volume_id: String,
+    rel_path: String,
 ) -> Result<Vec<u8>, (StatusCode, String)> {
     let client = crate::peer::client::PeerClient::new(&state.config.peer.secret);
 
@@ -142,7 +143,7 @@ async fn read_from_peers(
         .collect();
 
     for (peer_id, peer_addr) in &online_peers {
-        match client.pull_file(peer_addr, volume_id, rel_path).await {
+        match client.pull_file(peer_addr, &volume_id, &rel_path).await {
             Ok(data) => {
                 tracing::debug!("Peer-fetched {}/{} ({} bytes) from {}",
                     volume_id, rel_path, data.len(), peer_id);
@@ -272,11 +273,11 @@ pub async fn delete(
                  JOIN backends b ON b.id = cr.backend_id
                  WHERE fc.file_id = ?1 AND cr.node_id = ?2"
             ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
-            stmt.query_map(
+            let rows = stmt.query_map(
                 rusqlite::params![fid, &state.node_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
-            ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?
-             .filter_map(|r| r.ok()).collect()
+            ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+            rows.filter_map(|r| r.ok()).collect()
         };
 
         for (chunk_index, backend_path) in &chunk_files {
@@ -533,7 +534,7 @@ pub async fn chunk_map(
              WHERE b.status != 'released'
              ORDER BY b.node_id, b.path"
         ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
-        stmt.query_map(rusqlite::params![&state.node_id, &state.hostname], |row| {
+        let rows = stmt.query_map(rusqlite::params![&state.node_id, &state.hostname], |row| {
             Ok(ChunkMapBackend {
                 backend_id: row.get(0)?,
                 node_id: row.get(1)?,
@@ -543,8 +544,8 @@ pub async fn chunk_map(
                 status: row.get(5)?,
                 node_hostname: row.get(6)?,
             })
-        }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?
-         .filter_map(|r| r.ok()).collect()
+        }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+        rows.filter_map(|r| r.ok()).collect()
     };
 
     // All chunks with their replicas
@@ -562,7 +563,7 @@ pub async fn chunk_map(
              WHERE fm.volume_id = ?1
              ORDER BY fc.file_id, fc.chunk_index, cr.node_id"
         ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
-        stmt.query_map(rusqlite::params![&volume_id, &state.hostname], |row| {
+        let rows = stmt.query_map(rusqlite::params![&volume_id, &state.hostname], |row| {
             Ok(ChunkMapEntry {
                 chunk_index: row.get(0)?,
                 file_id: row.get(1)?,
@@ -575,8 +576,8 @@ pub async fn chunk_map(
                 node_id: row.get(8)?,
                 node_hostname: row.get(9)?,
             })
-        }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?
-         .filter_map(|r| r.ok()).collect()
+        }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+        rows.filter_map(|r| r.ok()).collect()
     };
 
     let total_chunks = chunks.len() as u64;
