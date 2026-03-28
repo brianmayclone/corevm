@@ -100,6 +100,12 @@ export default function VmCreate() {
   const [sdnNetworks, setSdnNetworks] = useState<SdnNetwork[]>([])
   const [selectedNetworkId, setSelectedNetworkId] = useState<number | null>(null)
 
+  // viSwitch selection (cluster mode)
+  interface ViSwitchOption { id: number; cluster_id: string; name: string; uplink_policy: string; max_ports: number; port_count: number }
+  const [viSwitches, setViSwitches] = useState<ViSwitchOption[]>([])
+  const [selectedViSwitchId, setSelectedViSwitchId] = useState<number | null>(null)
+  const [netConnectionType, setNetConnectionType] = useState<'network' | 'viswitch'>('network')
+
   const [form, setForm] = useState<VmConfig>({
     uuid: '', name: '', guest_os: 'other', guest_arch: 'x64',
     ram_mb: 2048, cpu_cores: 2, disk_images: [], iso_image: '',
@@ -132,6 +138,7 @@ export default function VmCreate() {
       })
       api.get<Host[]>('/api/hosts').then(({ data }) => setHosts(data))
       api.get<SdnNetwork[]>('/api/networks').then(({ data }) => setSdnNetworks(data))
+      api.get('/api/viswitches').then(({ data }) => setViSwitches(data)).catch(() => {})
     }
   }, [isCluster])
 
@@ -158,7 +165,8 @@ export default function VmCreate() {
           cluster_id: selectedClusterId,
           host_id: selectedHostId || undefined,
           config: { ...form, uuid: '' },
-          network_id: selectedNetworkId || undefined,
+          network_id: netConnectionType === 'network' ? (selectedNetworkId || undefined) : undefined,
+          viswitch_id: netConnectionType === 'viswitch' ? (selectedViSwitchId || undefined) : undefined,
         })
         navigate(`/vms/${data.id}`)
       } else {
@@ -322,47 +330,96 @@ export default function VmCreate() {
             <Toggle label="Enable Networking" description="Connect a virtual NIC to the VM." enabled={form.net_enabled} onChange={(v) => set('net_enabled', v)} />
             {form.net_enabled && (
               <div className="mt-4 space-y-4">
-                {/* SDN network selector — cluster mode only */}
+                {/* Network connection selector — cluster mode only */}
                 {isCluster && (
-                  <FormField label="Virtual Network (SDN)">
-                    <Select
-                      options={[
-                        { value: '', label: 'Default (NAT/SLIRP — 10.0.2.0/24)' },
-                        ...sdnNetworks
-                          .filter(n => !selectedClusterId || n.cluster_id === selectedClusterId)
-                          .map(n => ({ value: String(n.id), label: `${n.name} (${n.subnet})` }))
-                      ]}
-                      value={selectedNetworkId ? String(selectedNetworkId) : ''}
-                      onChange={(e) => {
-                        const id = e.target.value ? parseInt(e.target.value) : null
-                        setSelectedNetworkId(id)
-                        // SDN networks use bridge mode — cluster auto-configures the bridge
-                        if (id) {
-                          set('net_mode', 'bridge')
-                          set('net_enabled', true)
-                        }
-                      }}
-                    />
-                    {selectedNetworkId && (
-                      <p className="text-xs text-vmm-text-muted mt-1">
-                        The VM will be bridged into this network and receive its IP via DHCP. Cross-host communication is handled via VXLAN overlay.
-                      </p>
+                  <>
+                    <FormField label="Connection Type">
+                      <Select
+                        options={[
+                          { value: 'network', label: 'Virtual Network (direct bridge)' },
+                          { value: 'viswitch', label: 'viSwitch (managed switch with uplink teaming)' },
+                        ]}
+                        value={netConnectionType}
+                        onChange={(e) => {
+                          const t = e.target.value as 'network' | 'viswitch'
+                          setNetConnectionType(t)
+                          if (t === 'viswitch') { setSelectedNetworkId(null) }
+                          else { setSelectedViSwitchId(null) }
+                        }}
+                      />
+                    </FormField>
+
+                    {netConnectionType === 'network' && (
+                      <FormField label="Virtual Network (SDN)">
+                        <Select
+                          options={[
+                            { value: '', label: 'Default (NAT/SLIRP — 10.0.2.0/24)' },
+                            ...sdnNetworks
+                              .filter(n => !selectedClusterId || n.cluster_id === selectedClusterId)
+                              .map(n => ({ value: String(n.id), label: `${n.name} (${n.subnet})` }))
+                          ]}
+                          value={selectedNetworkId ? String(selectedNetworkId) : ''}
+                          onChange={(e) => {
+                            const id = e.target.value ? parseInt(e.target.value) : null
+                            setSelectedNetworkId(id)
+                            if (id) {
+                              set('net_mode', 'bridge')
+                              set('net_enabled', true)
+                            }
+                          }}
+                        />
+                        {selectedNetworkId && (
+                          <p className="text-xs text-vmm-text-muted mt-1">
+                            The VM will be bridged into this network and receive its IP via DHCP. Cross-host communication is handled via VXLAN overlay.
+                          </p>
+                        )}
+                      </FormField>
                     )}
-                  </FormField>
+
+                    {netConnectionType === 'viswitch' && (
+                      <FormField label="viSwitch">
+                        <Select
+                          options={[
+                            { value: '', label: 'Select a viSwitch...' },
+                            ...viSwitches
+                              .filter(vs => !selectedClusterId || vs.cluster_id === selectedClusterId)
+                              .map(vs => ({
+                                value: String(vs.id),
+                                label: `${vs.name} (${vs.uplink_policy === 'roundrobin' ? 'Round-Robin' : 'Failover'}, ${vs.port_count ?? 0}/${vs.max_ports} ports)`,
+                              }))
+                          ]}
+                          value={selectedViSwitchId ? String(selectedViSwitchId) : ''}
+                          onChange={(e) => {
+                            const id = e.target.value ? parseInt(e.target.value) : null
+                            setSelectedViSwitchId(id)
+                            if (id) {
+                              set('net_mode', 'bridge')
+                              set('net_enabled', true)
+                            }
+                          }}
+                        />
+                        {selectedViSwitchId && (
+                          <p className="text-xs text-vmm-text-muted mt-1">
+                            A port on this viSwitch will be automatically allocated. The VM connects via the switch's uplinks with teaming and traffic type control.
+                          </p>
+                        )}
+                      </FormField>
+                    )}
+                  </>
                 )}
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                   <FormField label="NIC Model">
                     <Select options={nicOptions} value={form.nic_model} onChange={(e) => set('nic_model', e.target.value)} />
                   </FormField>
-                  {/* Hide network mode in cluster mode when SDN is selected */}
-                  {(!isCluster || !selectedNetworkId) && (
+                  {/* Hide network mode in cluster mode when SDN or viSwitch is selected */}
+                  {(!isCluster || (!selectedNetworkId && !selectedViSwitchId)) && (
                     <FormField label="Network Mode">
                       <Select options={netModeOptions} value={form.net_mode} onChange={(e) => set('net_mode', e.target.value)} />
                     </FormField>
                   )}
                 </div>
-                {form.net_mode === 'bridge' && !selectedNetworkId && (
+                {form.net_mode === 'bridge' && !selectedNetworkId && !selectedViSwitchId && (
                   <FormField label="Host Bridge Interface">
                     <TextInput value={form.net_host_nic} onChange={(e) => set('net_host_nic', e.target.value)} placeholder="br0" />
                   </FormField>

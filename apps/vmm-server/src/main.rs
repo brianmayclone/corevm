@@ -251,6 +251,23 @@ async fn main() {
         managed_config: Mutex::new(managed_config),
     });
 
+    // ── Startup checks + event reporting ──────────────────────────
+    // Check KVM support
+    let kvm_available = std::path::Path::new("/dev/kvm").exists();
+    if !kvm_available {
+        tracing::error!("KVM not available: /dev/kvm not found. Hardware virtualization disabled!");
+        crate::services::event_reporter::server_event(&state, "critical",
+            "KVM not available — hardware virtualization is not supported on this host. VMs will not start.");
+    } else {
+        tracing::info!("KVM available: hardware virtualization enabled");
+    }
+
+    // Report cluster join
+    if state.managed_config.lock().unwrap().is_some() {
+        crate::services::event_reporter::server_event(&state, "info",
+            "vmm-server started and connected to cluster");
+    }
+
     // Build router — managed-mode guard blocks /api/* when managed by a cluster
     // API access guard controls CLI/API access (can be disabled via config)
     let api_router = api::router()

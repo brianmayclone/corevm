@@ -56,6 +56,28 @@ pub fn calculate_is_leader(
     online_peer_ids.iter().all(|peer_id| *peer_id >= our_node_id)
 }
 
+/// Fire-and-forget event report to cluster (non-blocking).
+fn fire_event(state: &CoreSanState, severity: &str, message: &str) {
+    let cluster_url = state.config.cluster.witness_url.clone();
+    let hostname = state.hostname.clone();
+    let node_id = state.node_id.clone();
+    let sev = severity.to_string();
+    let msg = message.to_string();
+    tokio::spawn(async move {
+        if cluster_url.is_empty() { return; }
+        let url = format!("{}/api/events/ingest", cluster_url.trim_end_matches('/'));
+        let body = serde_json::json!({
+            "severity": sev, "category": "san", "message": msg,
+            "target_type": "host", "target_id": node_id, "hostname": hostname,
+        });
+        let _ = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .timeout(std::time::Duration::from_secs(5))
+            .build().ok()
+            .map(|c| c.post(&url).json(&body).send());
+    });
+}
+
 /// Spawn the peer monitor as a background task.
 pub fn spawn(state: Arc<CoreSanState>) {
     tokio::spawn(async move {
@@ -84,17 +106,20 @@ pub fn spawn(state: Arc<CoreSanState>) {
                 new_quorum
             };
 
-            // Log state transitions
+            // Log state transitions + report to cluster
             if effective_quorum != old_quorum {
                 match effective_quorum {
                     QuorumStatus::Fenced => {
                         tracing::error!("Node FENCED: no quorum, witness denied");
+                        fire_event(&state, "critical", "CoreSAN node FENCED — no quorum, writes denied");
                     }
                     QuorumStatus::Active if old_quorum == QuorumStatus::Fenced => {
                         tracing::info!("Node recovered from fenced state");
+                        fire_event(&state, "info", "CoreSAN node recovered from fenced state");
                     }
                     QuorumStatus::Degraded if old_quorum == QuorumStatus::Fenced => {
                         tracing::info!("Node recovered from fenced state");
+                        fire_event(&state, "info", "CoreSAN node recovered (degraded) from fenced state");
                     }
                     QuorumStatus::Active if old_quorum == QuorumStatus::Degraded => {
                         tracing::info!("All peers reachable, quorum fully healthy");
@@ -103,6 +128,7 @@ pub fn spawn(state: Arc<CoreSanState>) {
                         let unreachable = state.peers.iter()
                             .filter(|p| p.status != PeerStatus::Online).count();
                         tracing::warn!("Quorum degraded: {} peer(s) unreachable", unreachable);
+                        fire_event(&state, "warning", &format!("CoreSAN quorum degraded: {} peer(s) unreachable", unreachable));
                     }
                     _ => {}
                 }

@@ -17,6 +17,7 @@ import AddHostDialog from '../components/coresan/AddHostDialog'
 import ClaimDiskDialog from '../components/coresan/ClaimDiskDialog'
 import AutoClaimDialog from '../components/coresan/AutoClaimDialog'
 import SmartDetailDialog from '../components/coresan/SmartDetailDialog'
+import EventFeed from '../components/EventFeed'
 
 export default function StorageCoresan() {
   const navigate = useNavigate()
@@ -946,6 +947,10 @@ export default function StorageCoresan() {
         autoClaimRunning={autoClaimRunning}
         autoClaimError={autoClaimError}
       />
+
+      {/* SAN Events */}
+      <EventFeed category="san" limit={10} title="CoreSAN Events" />
+      <EventFeed category="disk" limit={5} title="Disk Events" />
 
       {/* SMART Detail Dialog */}
       <SmartDetailDialog

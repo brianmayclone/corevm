@@ -213,6 +213,9 @@ pub async fn add_uplink(
     // Redeploy viSwitch with updated uplinks to all nodes
     redeploy_viswitch(&state, viswitch_id, &cluster_id).await;
 
+    // Push SAN network config if any uplinks have "san" traffic type
+    push_san_network_config(&state, &cluster_id).await;
+
     Ok(Json(serde_json::json!({"id": uplink_id})))
 }
 
@@ -232,6 +235,9 @@ pub async fn remove_uplink(
     };
 
     redeploy_viswitch(&state, viswitch_id, &cluster_id).await;
+
+    // Push SAN network config if uplink changes affect "san" traffic
+    push_san_network_config(&state, &cluster_id).await;
 
     Ok(Json(serde_json::json!({"ok": true})))
 }
@@ -286,6 +292,54 @@ pub async fn host_nics(
         }
     }
     Ok(Json(serde_json::to_value(results).unwrap()))
+}
+
+// ── Host NIC IP Configuration ───────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct ConfigureNicIpRequest {
+    pub host_id: String,
+    pub interface: String,
+    /// "static" or "dhcp"
+    pub mode: String,
+    pub ip_address: Option<String>,
+    pub prefix_len: Option<u8>,
+    pub gateway: Option<String>,
+}
+
+/// POST /api/viswitches/configure-ip — configure IP on a host NIC (proxied to agent).
+pub async fn configure_ip(
+    State(state): State<Arc<ClusterState>>,
+    user: AuthUser,
+    Json(body): Json<ConfigureNicIpRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_operator(&user)?;
+
+    // Look up host
+    let (address, token) = {
+        let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock".into()))?;
+        let mut stmt = db.prepare("SELECT address, agent_token FROM hosts WHERE id = ?1")
+            .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        stmt.query_row(rusqlite::params![&body.host_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }).map_err(|_| AppError(StatusCode::NOT_FOUND, "Host not found".into()))?
+    };
+
+    let client = crate::node_client::NodeClient::new(&address, &token)
+        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let req_body = serde_json::json!({
+        "interface": body.interface,
+        "mode": body.mode,
+        "ip_address": body.ip_address,
+        "prefix_len": body.prefix_len,
+        "gateway": body.gateway,
+    });
+
+    let result = client.configure_nic_ip(&req_body).await
+        .map_err(|e| AppError(StatusCode::BAD_GATEWAY, e))?;
+
+    Ok(Json(result))
 }
 
 // ── Deployment Helpers ──────────────────────────────────────────────────
@@ -455,6 +509,75 @@ async fn teardown_viswitch_from_nodes(
                 Ok(_) => tracing::info!("viSwitch '{}' removed from node {}", req.bridge_name, node_id),
                 Err(e) => tracing::warn!("viSwitch teardown on node {} failed: {}", node_id, e),
             }
+        }
+    }
+}
+
+/// Push SAN network configuration to all CoreSAN-enabled hosts in the cluster.
+/// Collects all physical uplinks tagged with "san" traffic type across all viSwitches
+/// and pushes the interface list + teaming policy to each CoreSAN instance.
+async fn push_san_network_config(state: &Arc<ClusterState>, cluster_id: &str) {
+    // Collect all SAN-tagged physical uplinks and the teaming policy
+    let (san_interfaces, teaming, mtu) = {
+        let db = match state.db.lock() {
+            Ok(db) => db,
+            Err(_) => return,
+        };
+        let mut interfaces: Vec<String> = Vec::new();
+        let mut policy = String::from("none");
+        let mut san_mtu = 0u32;
+
+        // Get all viSwitches in this cluster
+        let viswitches = ViSwitchService::list_viswitches(&db, Some(cluster_id)).unwrap_or_default();
+        for vs in &viswitches {
+            if !vs.enabled { continue; }
+            let uplinks = ViSwitchService::list_uplinks(&db, vs.id).unwrap_or_default();
+            for u in &uplinks {
+                if u.traffic_types.split(',').any(|t| t.trim() == "san") && u.uplink_type == "physical" {
+                    if !interfaces.contains(&u.physical_nic) {
+                        interfaces.push(u.physical_nic.clone());
+                    }
+                    // Use the viSwitch's teaming policy for SAN
+                    if policy == "none" {
+                        policy = vs.uplink_policy.clone();
+                        san_mtu = vs.mtu as u32;
+                    }
+                }
+            }
+        }
+        (interfaces, policy, san_mtu)
+    };
+
+    if san_interfaces.is_empty() {
+        return; // No SAN-tagged uplinks — nothing to push
+    }
+
+    tracing::info!("Pushing SAN network config: interfaces={:?}, teaming={}, mtu={}", san_interfaces, teaming, mtu);
+
+    // Find all SAN-enabled hosts in this cluster
+    let san_hosts: Vec<String> = {
+        let db = match state.db.lock() {
+            Ok(db) => db,
+            Err(_) => return,
+        };
+        let mut stmt = match db.prepare(
+            "SELECT san_address FROM hosts WHERE cluster_id = ?1 AND san_enabled = 1 AND san_address != ''"
+        ) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let rows = match stmt.query_map(rusqlite::params![cluster_id], |row| row.get::<_, String>(0)) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    for san_addr in &san_hosts {
+        let client = crate::san_client::SanClient::new(san_addr);
+        match client.update_network(&san_interfaces, &teaming, mtu).await {
+            Ok(_) => tracing::info!("SAN network config pushed to {}", san_addr),
+            Err(e) => tracing::warn!("Failed to push SAN network config to {}: {}", san_addr, e),
         }
     }
 }

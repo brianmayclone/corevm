@@ -83,14 +83,32 @@ async fn collect_smart_data(state: &CoreSanState) {
 
         if data.has_warning() {
             warnings += 1;
-            tracing::warn!("SMART warning on {}: health={:?} realloc={:?} pending={:?} temp={:?}°C [{}]",
-                data.device_path,
-                data.health_passed,
-                data.reallocated_sectors,
-                data.pending_sectors,
-                data.temperature_celsius,
-                data.severity(),
-            );
+            let msg = format!("SMART {} on {} ({}): health={:?} realloc={:?} pending={:?} temp={:?}°C",
+                data.severity(), data.device_path, data.model,
+                data.health_passed, data.reallocated_sectors,
+                data.pending_sectors, data.temperature_celsius);
+            tracing::warn!("{}", msg);
+
+            // Report to cluster (fire-and-forget)
+            let cluster_url = state.config.cluster.witness_url.clone();
+            let hostname = state.hostname.clone();
+            let node_id = state.node_id.clone();
+            let sev = if data.severity() == "critical" { "critical" } else { "warning" };
+            let msg_clone = msg.clone();
+            let dev = data.device_path.clone();
+            tokio::spawn(async move {
+                if cluster_url.is_empty() { return; }
+                let url = format!("{}/api/events/ingest", cluster_url.trim_end_matches('/'));
+                let body = serde_json::json!({
+                    "severity": sev, "category": "disk", "message": msg_clone,
+                    "target_type": "disk", "target_id": dev, "hostname": hostname, "host_id": node_id,
+                });
+                let _ = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build().ok()
+                    .map(|c| c.post(&url).json(&body).send());
+            });
         }
     }
 

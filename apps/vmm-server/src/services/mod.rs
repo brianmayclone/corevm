@@ -9,3 +9,4 @@ pub mod vm;
 pub mod storage;
 pub mod audit;
 pub mod resource_groups;
+pub mod event_reporter;

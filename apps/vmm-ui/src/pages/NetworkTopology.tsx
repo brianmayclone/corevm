@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Cable, Network, Server, Monitor, HardDrive, Database, RefreshCw } from 'lucide-react'
+import { Cable, Network, Server, Monitor, HardDrive, Database, RefreshCw, Settings } from 'lucide-react'
 import api from '../api/client'
 import Card from '../components/Card'
+import Dialog from '../components/Dialog'
 import type { ViSwitch, ViSwitchUplink, ViSwitchPort, HostNicInfo } from '../api/types'
 
 interface VirtualNetwork {
@@ -28,6 +29,10 @@ export default function NetworkTopology() {
   const [networks, setNetworks] = useState<VirtualNetwork[]>([])
   const [sanNodes, setSanNodes] = useState<SanNodeInfo[]>([])
   const [loading, setLoading] = useState(true)
+
+  // IP config dialog
+  const [ipDialog, setIpDialog] = useState<{ hostId: string; hostname: string; nic: string; currentIp: string | null } | null>(null)
+  const [ipForm, setIpForm] = useState({ mode: 'dhcp', ip_address: '', prefix_len: 24, gateway: '' })
 
   const fetchAll = async () => {
     setLoading(true)
@@ -125,19 +130,31 @@ export default function NetworkTopology() {
                         }))
                         return (
                           <div key={nic.name}
-                            className={`border rounded px-2.5 py-1.5 text-[11px] flex items-center gap-2 ${
+                            className={`border rounded px-2.5 py-1.5 text-[11px] ${
                               isAssigned ? 'border-vmm-accent/40 bg-vmm-accent/5' : 'border-vmm-border opacity-50'
                             }`}>
-                            <HardDrive size={10} className={isAssigned ? 'text-vmm-accent' : 'text-vmm-text-muted'} />
-                            <span className={isAssigned ? 'text-vmm-text font-medium' : 'text-vmm-text-muted'}>{nic.name}</span>
-                            <span className="text-vmm-text-muted text-[9px]">
-                              {nic.speed_mbps ? (nic.speed_mbps >= 1000 ? `${nic.speed_mbps / 1000}G` : `${nic.speed_mbps}M`) : ''}
-                            </span>
-                            {trafficTypes.map(tt => (
-                              <span key={tt} className={`px-1 py-0 rounded text-[8px] font-medium ${
-                                tt === 'vm' ? 'bg-blue-500/15 text-blue-400' : 'bg-orange-500/15 text-orange-400'
-                              }`}>{tt.toUpperCase()}</span>
-                            ))}
+                            <div className="flex items-center gap-2">
+                              <HardDrive size={10} className={isAssigned ? 'text-vmm-accent' : 'text-vmm-text-muted'} />
+                              <span className={isAssigned ? 'text-vmm-text font-medium' : 'text-vmm-text-muted'}>{nic.name}</span>
+                              <span className="text-vmm-text-muted text-[9px]">
+                                {nic.speed_mbps ? (nic.speed_mbps >= 1000 ? `${nic.speed_mbps / 1000}G` : `${nic.speed_mbps}M`) : ''}
+                              </span>
+                              {trafficTypes.map(tt => (
+                                <span key={tt} className={`px-1 py-0 rounded text-[8px] font-medium ${
+                                  tt === 'vm' ? 'bg-blue-500/15 text-blue-400' : 'bg-orange-500/15 text-orange-400'
+                                }`}>{tt.toUpperCase()}</span>
+                              ))}
+                              <button onClick={(e) => {
+                                e.stopPropagation()
+                                setIpDialog({ hostId: host.host_id, hostname: host.hostname, nic: nic.name, currentIp: nic.ipv4 })
+                                setIpForm({ mode: nic.ipv4 ? 'static' : 'dhcp', ip_address: nic.ipv4?.split('/')[0] || '', prefix_len: 24, gateway: '' })
+                              }} className="ml-auto text-vmm-text-muted hover:text-vmm-accent" title="Configure IP">
+                                <Settings size={9} />
+                              </button>
+                            </div>
+                            {nic.ipv4 && (
+                              <div className="mt-0.5 text-[9px] font-mono text-vmm-accent/80 ml-4">{nic.ipv4}</div>
+                            )}
                           </div>
                         )
                       })}
@@ -292,6 +309,82 @@ export default function NetworkTopology() {
           PXE
         </div>
       </div>
+
+      {/* IP Configuration Dialog */}
+      <Dialog open={!!ipDialog} onClose={() => setIpDialog(null)}
+        title={`Configure IP — ${ipDialog?.nic} on ${ipDialog?.hostname}`}>
+        <div className="space-y-4">
+          {ipDialog?.currentIp && (
+            <div className="text-xs text-vmm-text-muted">
+              Current IP: <span className="font-mono text-vmm-text">{ipDialog.currentIp}</span>
+            </div>
+          )}
+
+          <div>
+            <label className="block text-xs text-vmm-text-muted mb-1">Mode</label>
+            <select value={ipForm.mode} onChange={e => setIpForm({ ...ipForm, mode: e.target.value })}
+              className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm">
+              <option value="dhcp">DHCP (automatic)</option>
+              <option value="static">Static IP</option>
+            </select>
+          </div>
+
+          {ipForm.mode === 'static' && (
+            <>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs text-vmm-text-muted mb-1">IP Address</label>
+                  <input type="text" value={ipForm.ip_address}
+                    onChange={e => setIpForm({ ...ipForm, ip_address: e.target.value })}
+                    placeholder="10.0.0.5"
+                    className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm" />
+                </div>
+                <div>
+                  <label className="block text-xs text-vmm-text-muted mb-1">Prefix Length</label>
+                  <select value={ipForm.prefix_len} onChange={e => setIpForm({ ...ipForm, prefix_len: parseInt(e.target.value) })}
+                    className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm">
+                    <option value={8}>/8 (255.0.0.0)</option>
+                    <option value={16}>/16 (255.255.0.0)</option>
+                    <option value={24}>/24 (255.255.255.0)</option>
+                    <option value={25}>/25 (255.255.255.128)</option>
+                    <option value={28}>/28 (255.255.255.240)</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs text-vmm-text-muted mb-1">Gateway (optional)</label>
+                <input type="text" value={ipForm.gateway}
+                  onChange={e => setIpForm({ ...ipForm, gateway: e.target.value })}
+                  placeholder="10.0.0.1"
+                  className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm" />
+              </div>
+            </>
+          )}
+
+          <div className="flex gap-2 justify-end pt-2">
+            <button onClick={() => setIpDialog(null)} className="px-4 py-2 text-sm text-vmm-text-muted">Cancel</button>
+            <button onClick={async () => {
+              if (!ipDialog) return
+              try {
+                await api.post('/api/viswitches/configure-ip', {
+                  host_id: ipDialog.hostId,
+                  interface: ipDialog.nic,
+                  mode: ipForm.mode,
+                  ip_address: ipForm.mode === 'static' ? ipForm.ip_address : undefined,
+                  prefix_len: ipForm.mode === 'static' ? ipForm.prefix_len : undefined,
+                  gateway: ipForm.mode === 'static' && ipForm.gateway ? ipForm.gateway : undefined,
+                })
+                setIpDialog(null)
+                fetchAll()
+              } catch (e: any) {
+                alert(e.response?.data?.error || 'Failed to configure IP')
+              }
+            }} className="px-5 py-2 bg-vmm-accent text-white rounded-lg text-sm font-medium">
+              Apply
+            </button>
+          </div>
+        </div>
+      </Dialog>
     </div>
   )
 }

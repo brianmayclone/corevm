@@ -317,8 +317,18 @@ export default function ViSwitchDetail() {
                           {u.uplink_type === 'physical' ? 'Physical' : 'Virtual'}
                         </span>
                       </td>
-                      <td className="px-4 py-2 font-mono text-vmm-text">
-                        {u.uplink_type === 'physical' ? u.physical_nic : (u.network_name || `Network #${u.network_id}`)}
+                      <td className="px-4 py-2">
+                        <div className="font-mono text-vmm-text">
+                          {u.uplink_type === 'physical' ? u.physical_nic : (u.network_name || `Network #${u.network_id}`)}
+                        </div>
+                        {u.uplink_type === 'physical' && (() => {
+                          const nic = hostNics.flatMap(h => h.nics).find(n => n.name === u.physical_nic)
+                          return nic?.ipv4 ? (
+                            <div className="text-[10px] font-mono text-vmm-accent/70 mt-0.5">{nic.ipv4}</div>
+                          ) : (
+                            <div className="text-[10px] text-vmm-text-muted mt-0.5">No IP</div>
+                          )
+                        })()}
                       </td>
                       <td className="px-4 py-2">
                         <div className="flex gap-1">

@@ -8,6 +8,7 @@ import MetricCard from '../components/MetricCard'
 import Card from '../components/Card'
 import SectionLabel from '../components/SectionLabel'
 import { formatBytes, formatRam } from '../utils/format'
+import EventFeed from '../components/EventFeed'
 
 export default function ClusterDashboard() {
   const navigate = useNavigate()
@@ -196,6 +197,9 @@ export default function ClusterDashboard() {
           </div>
         </div>
       </div>
+
+      {/* Recent cluster events */}
+      <EventFeed limit={20} title="Recent Cluster Events" />
     </div>
   )
 }

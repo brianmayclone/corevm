@@ -302,6 +302,106 @@ fn get_default_route_dev() -> Option<String> {
     parts.iter().position(|&p| p == "dev").and_then(|i| parts.get(i + 1).map(|s| s.to_string()))
 }
 
+// ── Host NIC IP Configuration ────────────────────────────────────────────
+
+/// Configure IP address on a host NIC. Supports static IP or DHCP.
+pub fn configure_nic_ip(req: &NicIpConfigRequest) -> Result<NicIpConfigResult, String> {
+    let iface = &req.interface;
+
+    // Verify interface exists
+    let path = format!("/sys/class/net/{}", iface);
+    if !std::path::Path::new(&path).exists() {
+        return Err(format!("Interface '{}' not found", iface));
+    }
+
+    match req.mode.as_str() {
+        "static" => {
+            let ip = req.ip_address.as_deref()
+                .ok_or("ip_address is required for static mode")?;
+            let prefix = req.prefix_len.unwrap_or(24);
+
+            // Flush existing addresses
+            let _ = run_ip(&["addr", "flush", "dev", iface]);
+
+            // Add new address
+            let cidr = format!("{}/{}", ip, prefix);
+            run_ip(&["addr", "add", &cidr, "dev", iface])?;
+
+            // Set gateway if provided
+            if let Some(ref gw) = req.gateway {
+                let _ = run_ip(&["route", "del", "default", "dev", iface]);
+                run_ip(&["route", "add", "default", "via", gw, "dev", iface])?;
+            }
+
+            // Bring interface up
+            run_ip(&["link", "set", iface, "up"])?;
+
+            eprintln!("[net] Set static IP {} on '{}'", cidr, iface);
+            Ok(NicIpConfigResult {
+                interface: iface.clone(),
+                mode: "static".into(),
+                ip_address: Some(cidr),
+                gateway: req.gateway.clone(),
+            })
+        }
+        "dhcp" => {
+            // Flush existing static addresses
+            let _ = run_ip(&["addr", "flush", "dev", iface]);
+            run_ip(&["link", "set", iface, "up"])?;
+
+            // Try dhclient or dhcpcd
+            let dhcp_result = std::process::Command::new("dhclient")
+                .args(&["-1", iface])
+                .output();
+
+            match dhcp_result {
+                Ok(out) if out.status.success() => {
+                    eprintln!("[net] DHCP enabled on '{}'", iface);
+                }
+                _ => {
+                    // Fallback to dhcpcd
+                    let _ = std::process::Command::new("dhcpcd")
+                        .args(&["-1", iface])
+                        .output();
+                    eprintln!("[net] DHCP (dhcpcd) enabled on '{}'", iface);
+                }
+            }
+
+            // Read back the obtained IP
+            let obtained_ip = get_ipv4_address(iface);
+            Ok(NicIpConfigResult {
+                interface: iface.clone(),
+                mode: "dhcp".into(),
+                ip_address: obtained_ip,
+                gateway: None,
+            })
+        }
+        _ => Err(format!("Unknown mode '{}' — use 'static' or 'dhcp'", req.mode)),
+    }
+}
+
+#[derive(serde::Deserialize, Clone)]
+pub struct NicIpConfigRequest {
+    /// Interface name (e.g. "eth0")
+    pub interface: String,
+    /// "static" or "dhcp"
+    pub mode: String,
+    /// IP address (required for static, e.g. "10.0.0.5")
+    pub ip_address: Option<String>,
+    /// Prefix length (default: 24)
+    pub prefix_len: Option<u8>,
+    /// Default gateway (optional, e.g. "10.0.0.1")
+    pub gateway: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct NicIpConfigResult {
+    pub interface: String,
+    pub mode: String,
+    pub ip_address: Option<String>,
+    pub gateway: Option<String>,
+}
+
 // ── viSwitch Management ──────────────────────────────────────────────────
 
 /// Set up a viSwitch: bridge + optional bonding device + uplinks.

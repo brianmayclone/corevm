@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { Server, Cpu, MemoryStick, HardDrive, Circle, Wrench, ArrowLeft, Trash2, Boxes, Check, X, Pencil, FileText } from 'lucide-react'
 import HostEditDialog from '../components/HostEditDialog'
 import HostLogs from '../components/HostLogs'
+import EventFeed from '../components/EventFeed'
 import { useClusterStore } from '../stores/clusterStore'
 import { useVmStore } from '../stores/vmStore'
 import api from '../api/client'
@@ -186,6 +187,9 @@ export default function HostDetail() {
           fetchHosts()
         }}
       />
+
+      {/* Recent events for this host */}
+      <EventFeed hostId={host.id} title="Host Events" limit={15} />
 
       {/* Edit Host Dialog */}
       <HostEditDialog

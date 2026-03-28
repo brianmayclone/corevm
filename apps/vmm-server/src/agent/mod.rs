@@ -48,6 +48,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/agent/network/viswitch/setup", post(handlers::setup_viswitch))
         .route("/agent/network/viswitch/teardown", post(handlers::teardown_viswitch))
         .route("/agent/network/interfaces", get(handlers::network_interfaces))
+        .route("/agent/network/configure-ip", post(handlers::configure_nic_ip))
         // Logs (cluster fetches service logs from hosts)
         .route("/agent/logs", get(handlers::logs))
         // Package management + command execution (for storage wizard)

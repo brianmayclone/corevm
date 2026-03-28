@@ -102,6 +102,7 @@ pub fn router() -> Router<Arc<ClusterState>> {
         // ── viSwitches ──────────────────────────────────
         .route("/api/viswitches", get(viswitch::list).post(viswitch::create))
         .route("/api/viswitches/host-nics", get(viswitch::host_nics))
+        .route("/api/viswitches/configure-ip", post(viswitch::configure_ip))
         .route("/api/viswitches/{id}", get(viswitch::get).put(viswitch::update).delete(viswitch::delete))
         .route("/api/viswitches/{id}/uplinks", post(viswitch::add_uplink))
         .route("/api/viswitches/{id}/ports", get(viswitch::list_ports))
@@ -117,6 +118,7 @@ pub fn router() -> Router<Arc<ClusterState>> {
 
         // ── Events ──────────────────────────────────────
         .route("/api/events", get(events::list))
+        .route("/api/events/ingest", post(events::ingest))
 
         // ── Tasks ───────────────────────────────────────
         .route("/api/tasks", get(tasks::list))

@@ -318,6 +318,7 @@ pub struct NetworkConfigResponse {
     pub san_netmask: String,
     pub san_gateway: String,
     pub san_mtu: u32,
+    pub san_teaming: String,
 }
 
 #[derive(Serialize)]
@@ -340,6 +341,7 @@ pub async fn get_network_config(
         san_netmask: state.config.network.san_netmask.clone(),
         san_gateway: state.config.network.san_gateway.clone(),
         san_mtu: state.config.network.san_mtu,
+        san_teaming: state.config.network.san_teaming.clone(),
     })
 }
 
@@ -358,9 +360,12 @@ pub async fn update_network_config(
 
     // Write to config file for persistence across restarts
     let san_interface = body.interfaces.join(",");
+    let san_ip = body.san_ip.as_deref().unwrap_or("");
+    let san_netmask = body.san_netmask.as_deref().unwrap_or("");
+    let san_gateway = body.san_gateway.as_deref().unwrap_or("");
     let config_updates = format!(
-        "\n[network]\nsan_interface = \"{}\"\nsan_teaming = \"{}\"\nsan_mtu = {}\n",
-        san_interface, body.teaming, body.mtu
+        "\n[network]\nsan_interface = \"{}\"\nsan_ip = \"{}\"\nsan_netmask = \"{}\"\nsan_gateway = \"{}\"\nsan_teaming = \"{}\"\nsan_mtu = {}\n",
+        san_interface, san_ip, san_netmask, san_gateway, body.teaming, body.mtu
     );
 
     // Try to update the config file
@@ -391,6 +396,12 @@ pub struct UpdateNetworkConfigRequest {
     /// Teaming policy: "none", "roundrobin", "failover".
     #[serde(default)]
     pub teaming: String,
+    /// Static IP for SAN (optional — if empty, keep existing/DHCP).
+    pub san_ip: Option<String>,
+    /// Subnet mask (e.g. "/24" or "255.255.255.0").
+    pub san_netmask: Option<String>,
+    /// Gateway for SAN network.
+    pub san_gateway: Option<String>,
     /// MTU for SAN traffic.
     #[serde(default)]
     pub mtu: u32,

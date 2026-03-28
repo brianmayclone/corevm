@@ -138,11 +138,19 @@ pub async fn start(auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_i
         vm.config.clone()
     };
     let bios_paths = state.config.vms.bios_search_paths.clone();
-    let running = tokio::task::spawn_blocking(move || {
+    let running = match tokio::task::spawn_blocking(move || {
         crate::vm::manager::start_vm(&config, &bios_paths)
-    }).await
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, format!("Spawn error: {}", e)))?
-        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    }).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            crate::services::event_reporter::vm_event(&state, "critical", &format!("VM {} failed to start: {}", vm_id, e), &vm_id);
+            return Err(AppError(StatusCode::INTERNAL_SERVER_ERROR, e));
+        }
+        Err(e) => {
+            crate::services::event_reporter::vm_event(&state, "critical", &format!("VM {} spawn error: {}", vm_id, e), &vm_id);
+            return Err(AppError(StatusCode::INTERNAL_SERVER_ERROR, format!("Spawn error: {}", e)));
+        }
+    };
 
     let control_for_watcher = running.control.clone();
 
@@ -157,6 +165,7 @@ pub async fn start(auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_i
     }
     { let db = state.db.lock().unwrap(); AuditService::log(&db, auth.id, "vm.started", "vm", &vm_id, None); }
     tracing::info!("VM {} started", vm_id);
+    crate::services::event_reporter::vm_event(&state, "info", &format!("VM {} started", vm_id), &vm_id);
 
     // Spawn a watcher task that detects when the VM thread exits
     // and updates the state back to Stopped.
@@ -171,7 +180,9 @@ pub async fn start(auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_i
             }
         }
         let reason = control_for_watcher.exit_reason();
-        tracing::info!("VM {} exited: {}", watcher_vm_id, if reason.is_empty() { "normal" } else { &reason });
+        let reason_str = if reason.is_empty() { "normal" } else { &reason };
+        tracing::info!("VM {} exited: {}", watcher_vm_id, reason_str);
+        crate::services::event_reporter::vm_event(&watcher_state, "info", &format!("VM {} stopped ({})", watcher_vm_id, reason_str), &watcher_vm_id);
 
         if let Some(mut vm) = watcher_state.vms.get_mut(&watcher_vm_id) {
             vm.state = VmState::Stopped;

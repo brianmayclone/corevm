@@ -642,7 +642,7 @@ export interface ViSwitchPort {
 export interface HostNicInfo {
   host_id: string
   hostname: string
-  nics: { name: string; mac: string; speed_mbps: number | null; state: string }[]
+  nics: { name: string; mac: string; ipv4: string | null; ipv6: string | null; speed_mbps: number | null; state: string; mtu: number }[]
 }
 
 // ── Network Discovery ───────────────────────────────────────────────────

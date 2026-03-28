@@ -146,6 +146,22 @@ impl NodeClient {
         resp.json().await.map_err(|e| format!("Invalid response: {}", e))
     }
 
+    /// POST /agent/network/configure-ip — Set static IP or DHCP on a NIC.
+    pub async fn configure_nic_ip(&self, req: &serde_json::Value) -> Result<serde_json::Value, String> {
+        let resp = self.http.post(format!("{}/agent/network/configure-ip", &self.base_url))
+            .header("X-Agent-Token", &self.agent_token)
+            .json(req)
+            .send().await
+            .map_err(|e| format!("Connection failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let err = resp.text().await.unwrap_or_default();
+            return Err(format!("Configure IP failed: {}", err));
+        }
+
+        resp.json().await.map_err(|e| format!("Invalid response: {}", e))
+    }
+
     /// GET /agent/network/interfaces — list network interfaces on this node.
     pub async fn get_network_interfaces(&self) -> Result<serde_json::Value, String> {
         let resp = self.http.get(format!("{}/agent/network/interfaces", &self.base_url))

@@ -462,6 +462,16 @@ pub async fn network_interfaces(
     Ok(Json(serde_json::to_value(ifaces).unwrap()))
 }
 
+/// POST /agent/network/configure-ip — Set static IP or enable DHCP on a NIC.
+pub async fn configure_nic_ip(
+    _agent: AgentAuth,
+    Json(req): Json<crate::api::network::NicIpConfigRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result = crate::api::network::configure_nic_ip(&req)
+        .map_err(|e| AppError(StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(serde_json::to_value(result).unwrap()))
+}
+
 // ── Direct Host-to-Host Migration ───────────────────────────────────────
 
 /// POST /agent/migration/send — Send VM disks directly to another host.
