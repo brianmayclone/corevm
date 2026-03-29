@@ -25,6 +25,12 @@ curl -sk https://localhost:7443/api/disks | jq .
 
 # Network performance
 curl -sk https://localhost:7443/api/benchmark/matrix | jq .
+
+# Disk SMART health
+curl -sk https://localhost:7443/api/disks/sdb/smart | jq .
+
+# Volume chunk map
+curl -sk https://localhost:7443/api/volumes/<vol-id>/chunk-map | jq .
 ```
 
 ### Log Analysis
@@ -115,6 +121,20 @@ bind = "10.10.10.1"
 
 When `bind` is a specific IP (not `0.0.0.0`), it's used as the advertised address in heartbeats, ensuring peers use the correct address.
 
+### Node Stuck in Sanitizing State
+
+**Symptoms:**
+- `quorum_status: "sanitizing"` in `/api/status`
+- Write requests return HTTP 503
+- Node just started
+
+**Cause:** The sanitize engine is verifying all local chunk replicas on startup. This is normal and expected.
+
+**Resolution:**
+- Wait for the sanitize engine to complete. Duration depends on the amount of local data.
+- Check logs for progress: `journalctl -u vmm-san | grep -i "sanitiz"`
+- If corrupt chunks are found, the sanitize engine will attempt to repair from peers automatically.
+
 ### File Read Returns 404
 
 **Symptoms:**
@@ -125,15 +145,16 @@ When `bind` is a specific IP (not `0.0.0.0`), it's used as the advertised addres
 
 | Cause | Solution |
 |-------|----------|
+| Metadata sync not yet propagated | Wait for metadata_sync cycle (10s), retry |
 | Push replication still in progress | Wait 1-2 seconds, retry |
 | Push replication failed | Check peer connectivity, logs for push errors |
 | No cross-registered backends | Verify backends table has entries for remote nodes |
 | Peer unreachable for transparent fetch | Check peer status, network |
 
 **How transparent peer-fetch works:**
-1. Local replica lookup → not found
-2. Query local DB for known remote replica → ask that peer
-3. Broadcast to all online peers → first to respond wins
+1. Check has_local_chunks() + file_exists()
+2. If missing chunks: fetch_chunks_from_peer() from known replicas
+3. Broadcast to all online peers if no known replica
 4. If all fail → 404
 
 **Diagnosis:**
@@ -234,6 +255,34 @@ curl -sk -X POST https://localhost:7443/api/disks/reset \
   -H 'Content-Type: application/json' \
   -d '{"device_path": "/dev/sdb"}'
 ```
+
+### SMART Warnings or Disk Health Issues
+
+**Symptoms:**
+- Disk shows "Warning" or "FAILED" health in the UI or TUI
+- Log: `SMART warning for disk /dev/sdX`
+- Events reported to cluster with `disk` category
+
+**Diagnosis:**
+```bash
+# Check SMART detail for a specific disk
+curl -sk https://localhost:7443/api/disks/sdb/smart | jq .
+
+# Check all disks
+curl -sk https://localhost:7443/api/disks | jq '.[] | {name, status, smart_summary}'
+```
+
+**Warning conditions and actions:**
+
+| Condition | Action |
+|-----------|--------|
+| Health FAILED | Replace disk immediately. Release via API to drain data first. |
+| Reallocated sectors > 0 | Monitor trend. Plan replacement if count increases. |
+| Pending sectors > 0 | Disk may be failing. Plan replacement. |
+| Temperature > 55C | Check cooling. Reduce workload or improve airflow. |
+| NVMe media errors > 0 | Monitor trend. Plan replacement if count increases. |
+
+**Note:** Virtual disks (virtio) report `supported=false` for SMART. This is expected and not a warning condition.
 
 ### Database Corruption
 

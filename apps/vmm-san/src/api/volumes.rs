@@ -120,18 +120,8 @@ pub async fn create(
         std::fs::create_dir_all(&fuse_path).ok();
     }
 
-    // Auto-create a local data backend for this volume
-    let data_path = format!("/vmm/san-data/{}", &body.name);
-    std::fs::create_dir_all(&data_path).ok();
-    let (total_bytes, free_bytes) = crate::api::backends::get_fs_stats(&data_path);
-    let backend_id = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-    db.execute(
-        "INSERT INTO backends (id, node_id, path, total_bytes, free_bytes, status, last_check)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'online', ?6)",
-        rusqlite::params![&backend_id, &state.node_id, &data_path, total_bytes, free_bytes, &now],
-    ).ok();
-    tracing::info!("Auto-created backend '{}' for volume '{}'", data_path, body.name);
+    // Backends are ONLY claimed disks (/vmm/san-disks/*).
+    // The root filesystem must NEVER be used as a storage backend.
 
     tracing::info!("Created volume '{}' (id={}, ftt={}, local_raid={}, chunk={}MB)",
         body.name, id, body.ftt, body.local_raid, body.chunk_size_bytes / (1024 * 1024));
@@ -402,18 +392,7 @@ pub async fn sync(
     let fuse_path = state.config.data.fuse_root.join(&body.name);
     std::fs::create_dir_all(&fuse_path).ok();
 
-    // Auto-create a local data backend for the synced volume
-    let data_path = format!("/vmm/san-data/{}", &body.name);
-    std::fs::create_dir_all(&data_path).ok();
-    let (total_bytes, free_bytes) = crate::api::backends::get_fs_stats(&data_path);
-    let backend_id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-    db.execute(
-        "INSERT INTO backends (id, node_id, path, total_bytes, free_bytes, status, last_check)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'online', ?6)",
-        rusqlite::params![&backend_id, &state.node_id, &data_path, total_bytes, free_bytes, &now],
-    ).ok();
-    tracing::info!("Auto-created backend '{}' for synced volume '{}'", data_path, body.name);
+    // Backends are ONLY claimed disks — no root-FS backend for synced volumes either.
 
     drop(db);
 

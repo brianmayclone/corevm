@@ -27,6 +27,7 @@ With 2 nodes and FTT=1, a witness (vmm-cluster) is strongly recommended to avoid
 
 - Linux kernel 5.x+ (block device management, FUSE support)
 - `lsblk`, `blkid`, `mkfs.ext4`, `mount`, `umount` commands
+- `smartmontools` (`smartctl`) for S.M.A.R.T. disk health monitoring
 - `libfuse3` (for FUSE filesystem mounts)
 - Rust toolchain (for building from source)
 
@@ -149,7 +150,8 @@ Start `vmm-san` on all nodes. On first startup, each node:
 2. Initializes the SQLite database with the full schema
 3. Generates a unique node ID (UUID) and persists it
 4. Auto-generates a peer secret if none is configured
-5. Starts all background engines
+5. Runs the sanitize engine (verifies all local chunk replicas; node stays in `Sanitizing` state until complete)
+6. Starts all background engines
 
 ```bash
 # Node 1

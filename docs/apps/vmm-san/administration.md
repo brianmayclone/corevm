@@ -119,6 +119,18 @@ curl -k -X POST https://node:7443/api/volumes \
 
 FTT determines how many **complete node failures** a volume can survive without data loss. FTT=1 means every chunk exists on at least 2 different nodes.
 
+### Capacity Calculation
+
+Only backends with `claimed_disk_id != ''` count toward capacity. The `/vmm/san-data/` backend on the root filesystem is excluded from capacity calculations.
+
+**Local RAID impact on usable capacity:**
+
+| RAID Policy | Usable Capacity |
+|-------------|----------------|
+| `mirror` | Smallest claimed disk (all disks mirror each other) |
+| `stripe` | Sum of all claimed disks |
+| `stripe_mirror` | Sum of all claimed disks / 2 |
+
 ### Updating a Volume
 
 ```bash
@@ -292,11 +304,13 @@ curl -k -X DELETE https://node:7443/api/volumes/<vol-id>/files/path/to/file.txt
 ```
 
 Deletion removes:
-1. Physical files on all local backends
-2. `integrity_log` entries
-3. `file_replicas` entries
-4. `write_log` entries
-5. `file_map` entry
+1. Chunk files on all local backends
+2. `chunk_replicas` entries
+3. `file_chunks` entries
+4. `integrity_log` entries
+5. `write_log` entries
+6. `file_map` entry
+7. Propagates deletion to all online peers via `DELETE /api/volumes/{id}/files/{path}`
 
 ## Quorum Management
 
@@ -310,10 +324,12 @@ curl -k https://node:7443/api/status | jq '.quorum_status'
 ### Understanding Quorum Transitions
 
 ```
-Solo ←→ Active ←→ Degraded → Fenced
-                              ↑
-                    (witness denied or unreachable)
+Sanitizing → Solo ←→ Active ←→ Degraded → Fenced
+                                            ↑
+                              (witness denied or unreachable)
 ```
+
+- **Sanitizing → (next state)**: On startup, node enters Sanitizing while verifying local chunk integrity. Writes are rejected. Once complete, transitions to the appropriate quorum state.
 
 - **Solo → Active**: First peer joins and comes online
 - **Active → Degraded**: One peer goes offline but majority maintained
@@ -384,6 +400,15 @@ Volumes are accessible as local filesystem mounts via FUSE:
 ```
 
 This allows VMs and applications to access CoreSAN volumes as regular directories without using the HTTP API.
+
+### FUSE Implementation Details
+
+- **File resolution**: Uses `has_local_chunks()` + `file_exists()` instead of flat-file scanning. No more `resolve_file()`.
+- **readdir**: Reads from `file_map` DB only. No disk scanning, which prevents internal `.coresan/` directories from appearing in listings.
+- **setattr**: Uses UPSERT for truncate/extend operations, fixing a race condition with `File::set_len`.
+- **read**: Automatically fetches chunks from peers if not available locally via `fetch_chunks_from_peer`.
+- **unlink**: Deletes chunk files and propagates deletion to all online peers.
+- **mkdir**: Creates virtual directories (file_map marker entry), not physical directories on disk.
 
 ## Maintenance Operations
 

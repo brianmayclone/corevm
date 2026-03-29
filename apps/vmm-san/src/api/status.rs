@@ -205,10 +205,13 @@ fn query_volume_summaries(db: &rusqlite::Connection) -> Vec<VolumeStatusSummary>
 }
 
 /// Calculate usable capacity based on RAID policy.
+/// Only counts backends backed by claimed disks — NOT the san-data backend on the root FS.
 fn query_usable_capacity(db: &rusqlite::Connection, local_raid: &str) -> (u64, u64) {
     let backends: Vec<(u64, u64)> = {
         let mut stmt = db.prepare(
-            "SELECT total_bytes, free_bytes FROM backends WHERE status = 'online'"
+            "SELECT b.total_bytes, b.free_bytes FROM backends b
+             WHERE b.status = 'online' AND b.claimed_disk_id != ''
+             ORDER BY b.total_bytes"
         ).unwrap();
         stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .unwrap().filter_map(|r| r.ok()).collect()
@@ -220,19 +223,17 @@ fn query_usable_capacity(db: &rusqlite::Connection, local_raid: &str) -> (u64, u
 
     match local_raid {
         "mirror" => {
-            // Mirror: usable capacity = smallest backend
+            // Mirror: usable = smallest claimed disk
             let min_total = backends.iter().map(|(t, _)| *t).min().unwrap_or(0);
             let min_free = backends.iter().map(|(_, f)| *f).min().unwrap_or(0);
             (min_total, min_free)
         }
         "stripe_mirror" => {
-            // Stripe-mirror: usable = total sum / 2
             let sum_total: u64 = backends.iter().map(|(t, _)| *t).sum();
             let sum_free: u64 = backends.iter().map(|(_, f)| *f).sum();
             (sum_total / 2, sum_free / 2)
         }
         _ => {
-            // Stripe or no RAID: usable = sum of all
             let sum_total: u64 = backends.iter().map(|(t, _)| *t).sum();
             let sum_free: u64 = backends.iter().map(|(_, f)| *f).sum();
             (sum_total, sum_free)

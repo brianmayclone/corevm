@@ -1,6 +1,6 @@
 # CoreSAN Documentation
 
-CoreSAN is a distributed, software-defined storage system that aggregates physical disks across multiple nodes into a shared, replicated storage pool. It provides file-level storage with configurable fault tolerance, automatic replication, self-healing, and transparent cross-node reads.
+CoreSAN is a distributed, software-defined storage system that aggregates physical disks across multiple nodes into a shared, replicated storage pool. It provides chunk-based file storage with configurable fault tolerance, automatic replication, self-healing, and transparent cross-node reads. Files are split into fixed-size chunks (default 64 MB) that are the unit of storage, replication, and repair.
 
 ## Documentation Index
 

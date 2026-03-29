@@ -512,7 +512,7 @@ Write (create or overwrite) a file.
 
 ### DELETE /api/volumes/{id}/files/{*path}
 
-Delete a file and all its replicas.
+Delete a file, all its chunks, and all replicas. Propagates deletion to all online peers.
 
 **Response:** `200 OK`
 ```json
@@ -625,6 +625,129 @@ Throughput test — echoes received data back (used internally).
 **Request body:** Raw bytes
 
 **Response:** `200 OK` — same bytes echoed back
+
+---
+
+## Chunk Operations (Peer-to-Peer)
+
+### GET /api/chunks/{volume_id}/{file_id}/{chunk_index}
+
+Serve a single chunk. Used for peer-to-peer chunk transfer.
+
+**Response:** `200 OK` — raw chunk bytes as `application/octet-stream`
+
+**Errors:**
+- `404` — Chunk not found locally
+
+### PUT /api/chunks/{volume_id}/{file_id}/{chunk_index}
+
+Receive a chunk from a peer.
+
+**Request body:** Raw chunk bytes
+
+**Headers:**
+
+| Header | Required | Description |
+|--------|----------|-------------|
+| `X-CoreSAN-Chunk-SHA256` | No | Expected SHA256 for verification after write |
+| `X-CoreSAN-Rel-Path` | No | File rel_path for file_id resolution across nodes |
+
+**Response:** `200 OK`
+```json
+{"success": true}
+```
+
+**Errors:**
+- `400` — SHA256 mismatch (verification failed)
+- `404` — Volume or file not found
+
+---
+
+## Metadata Sync
+
+### POST /api/file-meta/sync
+
+Receive file metadata from a peer (leader or file writer). Performs an idempotent UPSERT of file_map and file_chunks records.
+
+**Request:**
+```json
+{
+  "volume_id": "vol-abc123",
+  "rel_path": "data/report.pdf",
+  "size_bytes": 1048576,
+  "sha256": "e3b0c44298fc1c149...",
+  "chunk_count": 1,
+  "version": 3,
+  "chunks": [
+    {
+      "chunk_index": 0,
+      "offset_bytes": 0,
+      "size_bytes": 1048576,
+      "sha256": "abc123..."
+    }
+  ]
+}
+```
+
+**Response:** `200 OK`
+```json
+{"success": true}
+```
+
+---
+
+## Chunk Map & SMART
+
+### GET /api/volumes/{id}/chunk-map
+
+Full chunk allocation map for a volume. Used for UI visualization.
+
+**Response:** `200 OK`
+```json
+{
+  "volume_id": "vol-abc123",
+  "chunks": [
+    {
+      "file_id": 1,
+      "rel_path": "data/report.pdf",
+      "chunk_index": 0,
+      "size_bytes": 1048576,
+      "sha256": "abc123...",
+      "replicas": [
+        {"node_id": "node-1", "backend_id": "backend-xyz", "state": "synced"},
+        {"node_id": "node-2", "backend_id": "", "state": "synced"}
+      ]
+    }
+  ]
+}
+```
+
+### GET /api/disks/{device_name}/smart
+
+Full S.M.A.R.T. detail for a specific disk.
+
+**Response:** `200 OK`
+```json
+{
+  "device_path": "/dev/sdb",
+  "supported": true,
+  "health_passed": true,
+  "transport": "SATA",
+  "power_on_hours": 12345,
+  "temperature": 38,
+  "reallocated_sectors": 0,
+  "pending_sectors": 0,
+  "media_errors": 0,
+  "attributes": [
+    {"id": 5, "name": "Reallocated_Sector_Ct", "value": 100, "worst": 100, "threshold": 10, "raw": 0},
+    {"id": 9, "name": "Power_On_Hours", "value": 99, "worst": 99, "threshold": 0, "raw": 12345}
+  ]
+}
+```
+
+**Errors:**
+- `404` — Disk not found
+- `200` with `"supported": false` — Virtual disk (e.g., virtio) without SMART support
 
 ---
 

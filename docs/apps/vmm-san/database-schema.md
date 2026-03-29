@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS volumes (
 | `ftt` | Failures to tolerate (0 = no replication, 1 = 2 copies, 2 = 3 copies) |
 | `chunk_size_bytes` | Fixed chunk size for this volume (default 64 MB) |
 | `local_raid` | How chunks are placed across local backends |
+| `dedup_enabled` | (Planned) Whether deduplication is enabled for this volume |
 | `status` | Current volume state |
 
 ### backends
@@ -142,13 +143,17 @@ Tracks where each chunk is physically stored (which backend, which node).
 ```sql
 CREATE TABLE IF NOT EXISTS chunk_replicas (
     chunk_id   INTEGER NOT NULL REFERENCES file_chunks(id) ON DELETE CASCADE,
-    backend_id TEXT NOT NULL REFERENCES backends(id) ON DELETE CASCADE,
+    backend_id TEXT NOT NULL,
     node_id    TEXT NOT NULL,
     state      TEXT NOT NULL DEFAULT 'syncing',  -- 'syncing', 'synced', 'stale', 'error'
     synced_at  TEXT,
-    PRIMARY KEY (chunk_id, backend_id)
+    PRIMARY KEY (chunk_id, backend_id, node_id)
 );
 ```
+
+**Note:** The PRIMARY KEY is `(chunk_id, backend_id, node_id)` — not just `(chunk_id, backend_id)`. There is no foreign key on `backend_id` because remote replicas are tracked with an empty `backend_id` (the sender does not know which backend the remote node used). The `chunk_replicas` table is the authoritative source for replica tracking; `file_replicas` is legacy.
+
+**Planned:** A `content_sha256` column is planned for deduplication support.
 
 | State | Meaning |
 |-------|---------|
@@ -157,9 +162,9 @@ CREATE TABLE IF NOT EXISTS chunk_replicas (
 | `stale` | Newer version exists elsewhere |
 | `error` | Corruption detected or disk failure |
 
-### file_replicas
+### file_replicas (Legacy)
 
-File-level replica tracking (simpler than chunk-level, used for whole-file operations).
+File-level replica tracking. This table is legacy — `chunk_replicas` is the authoritative source for replica state. Retained for backward compatibility.
 
 ```sql
 CREATE TABLE IF NOT EXISTS file_replicas (
@@ -257,6 +262,35 @@ CREATE TABLE IF NOT EXISTS claimed_disks (
 | `error` | Disk disappeared or has I/O errors |
 | `released` | Disk has been gracefully released (drained) |
 
+### smart_data
+
+S.M.A.R.T. disk health data collected by the `smart_monitor` engine.
+
+```sql
+CREATE TABLE IF NOT EXISTS smart_data (
+    device_path         TEXT PRIMARY KEY,
+    health_passed       INTEGER NOT NULL DEFAULT 1,   -- 1 = passed, 0 = failed
+    transport           TEXT NOT NULL DEFAULT '',       -- 'SATA', 'SAS', 'NVMe'
+    power_on_hours      INTEGER NOT NULL DEFAULT 0,
+    temperature         INTEGER NOT NULL DEFAULT 0,
+    reallocated_sectors INTEGER NOT NULL DEFAULT 0,
+    pending_sectors     INTEGER NOT NULL DEFAULT 0,
+    media_errors        INTEGER NOT NULL DEFAULT 0,
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+```
+
+| Column | Description |
+|--------|-------------|
+| `device_path` | Primary key, e.g., `/dev/sdb` |
+| `health_passed` | Overall SMART health assessment |
+| `transport` | Disk transport type (SATA, SAS, NVMe) |
+| `power_on_hours` | Total hours the disk has been powered on |
+| `temperature` | Current temperature in Celsius |
+| `reallocated_sectors` | Count of reallocated sectors (bad sectors remapped) |
+| `pending_sectors` | Sectors pending reallocation |
+| `media_errors` | NVMe media/data integrity errors |
+
 ### node_settings
 
 Key-value store for persistent node configuration.
@@ -294,11 +328,12 @@ CREATE INDEX IF NOT EXISTS idx_chunk_replicas_node ON chunk_replicas(node_id);
 ```
 volumes ──1:N──► backends
 volumes ──1:N──► file_map
-file_map ──1:N──► file_chunks ──1:N──► chunk_replicas ──► backends
-file_map ──1:N──► file_replicas ──► backends
+file_map ──1:N──► file_chunks ──1:N──► chunk_replicas (authoritative)
+file_map ──1:N──► file_replicas ──► backends (legacy)
 file_map ──1:N──► write_log
 file_map ──1:N──► integrity_log
 claimed_disks ──1:1──► backends (via backend_id / claimed_disk_id)
+claimed_disks ──1:1──► smart_data (via device_path)
 ```
 
 ## Database Backup

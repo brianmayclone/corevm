@@ -58,6 +58,8 @@ vmm-cluster exposes CoreSAN operations under the `/api/san/` prefix. The proxy h
 | `/api/san/volumes/{id}/files/{*path}` | DELETE | Any host | No |
 | `/api/san/benchmark` | GET | Any host | No |
 | `/api/san/benchmark/run` | POST | Any host | Yes: "Benchmark triggered" |
+| `/api/san/volumes/{id}/chunk-map` | GET | Fan-out (all SAN hosts) | No |
+| `/api/san/disks/{host_id}/{device_name}/smart` | GET | Targeted (host_id) | No |
 | `/api/san/witness/{node_id}` | GET | Local (no proxy) | No |
 
 ### Fan-Out Aggregation
@@ -207,6 +209,35 @@ All mutating SAN operations logged by the cluster use the standard event system:
 
 Events are visible in the vmm-cluster event log and the UI's event viewer.
 
+## Event Ingress (`POST /api/events/ingest`)
+
+vmm-cluster provides a central event ingress endpoint for vmm-san and vmm-server to push events proactively:
+
+- **Endpoint:** `POST /api/events/ingest`
+- Accepts single or batch event submissions
+- Dispatches to `NotificationService` for processing and storage
+- Fire-and-forget from the sender's perspective (no acknowledgement required)
+
+**Event sources and categories:**
+
+| Source | Category | Events |
+|--------|----------|--------|
+| vmm-san | `disk` | SMART warnings, disk failures |
+| vmm-san | `san` | Quorum changes, peer status changes |
+| vmm-server | `server` | KVM availability changes |
+| vmm-server | `vm` | VM start, stop, fail events |
+
+### Chunk Map Aggregation
+
+`GET /api/san/volumes/{id}/chunk-map` fans out to ALL SAN hosts and aggregates:
+- Backend information from each host
+- Chunk allocation and replica placement
+- Used by the UI for the allocation visualization page
+
+### SMART Proxy
+
+`GET /api/san/disks/{host_id}/{device_name}/smart` proxies to a specific SAN host to retrieve full SMART detail for a disk.
+
 ## Database Integration
 
 The cluster stores SAN-related fields in the `hosts` table:
@@ -237,3 +268,79 @@ The StorageCoresan page (`apps/vmm-ui/src/pages/StorageCoresan.tsx`) switches be
 - Manual peer registration may be required
 
 The mode is determined automatically based on whether the UI is connected to a cluster instance.
+
+## UI Features
+
+### Allocation Details Page
+
+Path: `/storage/coresan/volume/:volumeId/chunks`
+
+Provides a defrag-style block grid visualization of chunk allocation:
+
+- **One block per logical chunk** in a consolidated grid view
+- **Color coding:**
+  - Green = protected (FTT met)
+  - Yellow = degraded (under-replicated)
+  - Red = lost (no available copies)
+  - Dark = free space
+- **Hover details:** File name, chunk index, size, SHA256, which nodes have the chunk
+- **Live refresh** every 3 seconds
+
+### SMART in Disk Table
+
+The disk listing table includes additional columns from SMART monitoring:
+
+| Column | Values |
+|--------|--------|
+| Health | OK, Warning, FAILED, No SMART |
+| Temperature | Degrees Celsius |
+| Power-On Hours | Total runtime hours |
+
+A `SmartDetailDialog` shows full SMART attributes with color-coded thresholds when clicking on a disk.
+
+### EventFeed Component
+
+A reusable component for displaying events, filterable by:
+- Category (disk, san, server, vm)
+- Host
+- Target
+
+### Storage Overview
+
+CoreSAN capacity is integrated into the aggregate storage statistics with a separate bar color (purple) to distinguish from other storage types.
+
+### Storage Shared
+
+CoreSAN volumes are listed alongside NFS and Ceph pools in the shared storage view.
+
+## Appliance TUI
+
+The appliance TUI (text user interface) displays a CoreSAN status panel when claimed disks exist:
+
+### StatusBar Panel
+
+- **Position:** Right side of the status bar, with magenta border
+- **Visibility:** Auto-appears when SAN is activated (claimed disks exist)
+- **Refresh:** Every 5 seconds
+
+### Panel Contents
+
+| Line | Content |
+|------|---------|
+| 1 | Quorum status (color-coded) + leader badge |
+| 2 | Number of peers |
+| 3 | Number of volumes |
+| 4 | Number of claimed disks + storage capacity with usage % |
+| 5 | Disk health summary |
+
+### Disk Health Display
+
+| Condition | Display |
+|-----------|---------|
+| Unhealthy disks | "X disk(s) unhealthy!" (red) |
+| Disks without SMART | "X disk(s) no SMART" (gray) |
+| All healthy | "all healthy" (green) |
+
+### Implementation
+
+The TUI fetches data via raw TCP HTTP/1.0 to `localhost:7443` (no curl dependency). This ensures the status panel works even in minimal appliance environments.

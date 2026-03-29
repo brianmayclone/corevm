@@ -128,10 +128,21 @@ impl StorageService {
         if disk_path.exists() {
             return Err("Disk image already exists".into());
         }
-        let file = std::fs::File::create(&disk_path)
-            .map_err(|e| format!("Create failed: {}", e))?;
-        file.set_len(size_bytes)
-            .map_err(|e| format!("Allocate failed: {}", e))?;
+        // Pre-allocate full size with real writes (sparse files don't work on FUSE/CoreSAN)
+        {
+            let mut file = std::fs::File::create(&disk_path)
+                .map_err(|e| format!("Create failed: {}", e))?;
+            let chunk = vec![0u8; 1024 * 1024]; // 1 MB
+            let mut remaining = size_bytes;
+            use std::io::Write;
+            while remaining > 0 {
+                let to_write = std::cmp::min(remaining, chunk.len() as u64) as usize;
+                file.write_all(&chunk[..to_write])
+                    .map_err(|e| format!("Allocate failed: {}", e))?;
+                remaining -= to_write as u64;
+            }
+            file.sync_all().map_err(|e| format!("Sync failed: {}", e))?;
+        }
 
         let path_str = disk_path.to_string_lossy().to_string();
         db.execute(
@@ -286,8 +297,22 @@ impl StorageService {
         let disk_path = vm_dir.join(&filename);
 
         let size_bytes = size_gb * 1024 * 1024 * 1024;
-        let file = std::fs::File::create(&disk_path).map_err(|e| format!("Create failed: {}", e))?;
-        file.set_len(size_bytes).map_err(|e| format!("Allocate failed: {}", e))?;
+        // Check if the pool path is on a CoreSAN FUSE mount
+        let is_san = pool_path.starts_with("/vmm/san/");
+        if is_san {
+            // On CoreSAN: use the allocate-disk API endpoint for thin provisioning.
+            // Don't write physical zeros — the SAN handles sparse chunks natively.
+            let file = std::fs::File::create(&disk_path)
+                .map_err(|e| format!("Create failed: {}", e))?;
+            file.set_len(size_bytes)
+                .map_err(|e| format!("Set size failed: {}", e))?;
+        } else {
+            // On local storage: create a sparse file via ftruncate (standard behavior)
+            let file = std::fs::File::create(&disk_path)
+                .map_err(|e| format!("Create failed: {}", e))?;
+            file.set_len(size_bytes)
+                .map_err(|e| format!("Allocate failed: {}", e))?;
+        }
 
         let path_str = disk_path.to_string_lossy().to_string();
         let disk_name = format!("{}/{}", safe_name, filename);

@@ -119,6 +119,10 @@ impl SanClient {
         self.post("/api/disks/reset", body).await
     }
 
+    pub async fn allocate_disk(&self, volume_id: &str, body: &Value) -> Result<Value, String> {
+        self.post(&format!("/api/volumes/{}/allocate-disk", volume_id), body).await
+    }
+
     pub async fn disk_smart(&self, device_name: &str) -> Result<Value, String> {
         self.get(&format!("/api/disks/{}/smart", device_name)).await
     }

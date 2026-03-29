@@ -91,31 +91,20 @@ export default function CreateDiskDialog({ open, onClose, vmName, vmId, onCreate
         })
         onCreated(data.path)
       } else {
-        // Create disk on CoreSAN volume via FUSE path
+        // Create disk on CoreSAN volume — server-side allocation (not from browser)
         const sanBase = clusterId ? '/api/san' : `${window.location.protocol}//${window.location.hostname}:7443/api`
         const dirPath = `${safeName}`
-        // Create directory first
+        const diskPath = `${dirPath}/disk.raw`
+
+        // Use the allocate-disk endpoint which creates the file server-side with full size
+        const allocUrl = `${sanBase}/volumes/${selected.volume.id}/allocate-disk`
         if (clusterId) {
-          await api.post(`${sanBase}/volumes/${selected.volume.id}/mkdir`, { path: dirPath })
+          await api.post(allocUrl, { path: diskPath, size_gb: sizeGb })
         } else {
-          await fetch(`${sanBase}/volumes/${selected.volume.id}/mkdir`, {
+          await fetch(allocUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ path: dirPath }),
-          })
-        }
-        // Create sparse raw disk image (just write a minimal header — the VM will expand it)
-        const diskPath = `${dirPath}/disk.raw`
-        const sparseHeader = new Uint8Array(512) // minimal empty disk
-        if (clusterId) {
-          await api.put(`${sanBase}/volumes/${selected.volume.id}/files/${encodeURIComponent(diskPath)}`, sparseHeader, {
-            headers: { 'Content-Type': 'application/octet-stream' },
-          })
-        } else {
-          await fetch(`${sanBase}/volumes/${selected.volume.id}/files/${encodeURIComponent(diskPath)}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/octet-stream' },
-            body: sparseHeader,
+            body: JSON.stringify({ path: diskPath, size_gb: sizeGb }),
           })
         }
         onCreated(`/vmm/san/${selected.volume.name}/${diskPath}`)

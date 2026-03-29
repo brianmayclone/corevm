@@ -473,12 +473,19 @@ pub fn write_chunk_data(
         changed.push((range.chunk_index, chunk_sha));
     }
 
-    // Update file size
-    db.execute(
+    // Update file size — use MAX to never shrink (writes only grow the logical size)
+    let old_size: u64 = db.query_row(
+        "SELECT size_bytes FROM file_map WHERE id = ?1",
+        rusqlite::params![file_id], |row| row.get(0),
+    ).unwrap_or(0);
+    if new_size > old_size {
+        tracing::info!("write_chunk_data: file {} size {} -> {} (grew)", file_id, old_size, new_size);
+    }
+    log_err!(db.execute(
         "UPDATE file_map SET size_bytes = MAX(size_bytes, ?1), updated_at = datetime('now')
          WHERE id = ?2",
         rusqlite::params![new_size as i64, file_id],
-    ).ok();
+    ), "write_chunk_data: UPDATE file size");
 
     Ok(changed)
 }

@@ -435,6 +435,17 @@ pub async fn disk_smart_detail(
     client.disk_smart(&device_name).await.map(Json).map_err(san_err)
 }
 
+/// POST /api/san/volumes/{id}/allocate-disk — create a pre-allocated disk image on the SAN.
+pub async fn allocate_disk(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, AppError> {
+    let (client, _) = any_san_client(&state)?;
+    client.allocate_disk(&id, &body).await.map(Json).map_err(san_err)
+}
+
 /// GET /api/san/volumes/{id}/chunk-map — fan-out to ALL SAN hosts, aggregate chunk maps.
 pub async fn chunk_map(
     State(state): State<Arc<ClusterState>>,

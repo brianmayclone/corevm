@@ -26,6 +26,9 @@ curl -k https://node:7443/api/status
 | Disk capacity | `/api/volumes/{id}/backends` → `free_bytes` | < 10% |
 | Packet loss | `/api/benchmark/matrix` → `packet_loss_pct` | > 0% |
 | Bandwidth | `/api/benchmark/matrix` → `bandwidth_mbps` | below expected |
+| Disk SMART health | `/api/disks` → `smart_summary` | warning or critical |
+| Disk temperature | `/api/disks/{name}/smart` → `temperature` | > 55C |
+| Reallocated sectors | `/api/disks/{name}/smart` → `reallocated_sectors` | > 0 |
 
 ### Monitoring Script Example
 
@@ -57,6 +60,13 @@ fi
 DEG_FILES=$(echo "$STATUS" | jq '[.volumes[].degraded_files] | add')
 if [ "$DEG_FILES" -gt 0 ]; then
   echo "WARNING: $DEG_FILES degraded file(s) — under-replicated"
+fi
+
+# Check disk SMART health
+DISKS=$(curl -sk "$NODE/api/disks")
+UNHEALTHY=$(echo "$DISKS" | jq '[.[] | select(.smart_summary.severity != "ok" and .smart_summary.severity != null)] | length')
+if [ "$UNHEALTHY" -gt 0 ]; then
+  echo "WARNING: $UNHEALTHY disk(s) with SMART warnings"
 fi
 ```
 
@@ -168,6 +178,36 @@ There is no explicit "run integrity check now" endpoint. To trigger a check:
 - Restart the service (integrity check runs on first interval)
 - Or reduce `integrity.interval_secs` temporarily
 
+## S.M.A.R.T. Disk Health Monitoring
+
+### SMART Monitor Engine (300-second interval)
+
+The `smart_monitor` engine runs every 5 minutes and collects S.M.A.R.T. data from all disks:
+
+**Data collection:**
+- Reads via `smartctl -a -j` (JSON output mode)
+- Supports SATA/SAS disks (attribute IDs 5, 9, 177, 194, 197, 198) and NVMe (health log)
+- Virtual disks (virtio) return `supported=false`
+- Results stored in the `smart_data` table
+
+**API access:**
+- `SmartSummary` is embedded in the `/api/disks` response for each disk
+- Full `SmartDetail` available via `GET /api/disks/{device_name}/smart`
+
+**Warning conditions:**
+
+| Condition | Severity |
+|-----------|----------|
+| Health assessment FAILED | critical |
+| Reallocated sectors > 0 | warning |
+| Pending sectors > 0 | warning |
+| Temperature > 55C | warning |
+| NVMe media errors > 0 | warning |
+
+**Severity levels:** `ok`, `warning`, `critical`
+
+**Event reporting:** When warning or critical conditions are detected, the `smart_monitor` reports events to the cluster via the `event_reporter` engine (fire-and-forget HTTP POST to `/api/events/ingest`). Events use the `disk` category.
+
 ## Disk Health Monitoring
 
 ### Backend Refresh (30-second interval)
@@ -216,6 +256,10 @@ Scans `/sys/block/` to detect disk changes:
 | `Backend {id} is offline` | Disk unreachable | Check disk, mount, hardware |
 | `Write lease conflict` | Another node holds file lock | Normal with concurrent access |
 | `Push replication failed` | Could not send data to peer | Stale replicator will retry |
+| `Node SANITIZING` | Startup integrity check in progress | Wait for completion |
+| `Sanitize complete` | Startup integrity check finished | Normal operation begins |
+| `SMART warning for disk` | Disk health issue detected | Check disk, plan replacement |
+| `SMART health FAILED` | Critical disk health failure | Replace disk urgently |
 
 ### Configuring Logging
 

@@ -433,6 +433,7 @@ impl Filesystem for CoreSanFS {
 
         // Handle truncate/extend (size change via ftruncate) — update file_map size
         if let Some(new_size) = size {
+            tracing::info!("FUSE setattr: '{}' size={} -> {}", entry.rel_path, 0, new_size);
             if !entry.is_dir {
                 let db = self.state.db.lock().unwrap();
                 let now = chrono::Utc::now().to_rfc3339();
@@ -538,7 +539,7 @@ impl Filesystem for CoreSanFS {
             return;
         }
 
-        tracing::debug!("FUSE write: '{}' offset={} len={}", entry.rel_path, offset, data.len());
+        tracing::info!("FUSE write: '{}' offset={} len={}", entry.rel_path, offset, data.len());
 
         let (chunk_size, ftt, local_raid) = self.volume_config();
 

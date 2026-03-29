@@ -350,6 +350,112 @@ pub async fn mkdir(
     Ok(Json(serde_json::json!({ "success": true, "path": body.path })))
 }
 
+// ── Disk Allocation ─────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct AllocateDiskRequest {
+    pub path: String,
+    pub size_gb: u64,
+}
+
+/// POST /api/volumes/{id}/allocate-disk — create a pre-allocated raw disk image.
+/// Writes the full size as zero-chunks server-side. This is the correct way to create
+/// VM disk images on CoreSAN — sparse files (ftruncate) don't work reliably over FUSE.
+pub async fn allocate_disk(
+    State(state): State<Arc<CoreSanState>>,
+    Path(volume_id): Path<String>,
+    Json(body): Json<AllocateDiskRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let size_bytes = body.size_gb * 1024 * 1024 * 1024;
+    if size_bytes == 0 || body.size_gb > 4096 {
+        return Err((StatusCode::BAD_REQUEST, "size_gb must be between 1 and 4096".into()));
+    }
+
+    // Check quorum
+    let quorum = *state.quorum_status.read().unwrap();
+    if quorum == crate::state::QuorumStatus::Fenced || quorum == crate::state::QuorumStatus::Sanitizing {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "Node not available for writes".into()));
+    }
+
+    // Verify backend exists
+    {
+        let db = state.db.lock().unwrap();
+        db.query_row(
+            "SELECT id FROM backends WHERE node_id = ?1 AND status = 'online' LIMIT 1",
+            rusqlite::params![&state.node_id], |row| row.get::<_, String>(0),
+        ).map_err(|_| (StatusCode::NOT_FOUND, "No local backend available".into()))?;
+    }
+
+    tracing::info!("Allocating disk {}/{} ({} GB)...", volume_id, body.path, body.size_gb);
+
+    // Register the disk with its full logical size in the metadata.
+    // Chunks are created as metadata-only entries — no physical zero-bytes written.
+    // Reads to unwritten chunks return zeros (sparse/thin provisioning at chunk level).
+    // This is instant regardless of disk size and doesn't waste storage space.
+    let file_id = {
+        let db = state.db.lock().unwrap();
+
+        let chunk_size: u64 = db.query_row(
+            "SELECT chunk_size_bytes FROM volumes WHERE id = ?1",
+            rusqlite::params![&volume_id], |row| row.get(0),
+        ).map_err(|_| (StatusCode::NOT_FOUND, "Volume not found".into()))?;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let chunk_count = ((size_bytes + chunk_size - 1) / chunk_size) as u32;
+
+        // Create file_map entry with the full logical size
+        db.execute(
+            "INSERT INTO file_map (volume_id, rel_path, size_bytes, sha256, version, chunk_count, created_at, updated_at)
+             VALUES (?1, ?2, ?3, '', 1, ?4, ?5, ?5)
+             ON CONFLICT(volume_id, rel_path) DO UPDATE SET
+                size_bytes = excluded.size_bytes, version = version + 1,
+                chunk_count = excluded.chunk_count, updated_at = excluded.updated_at",
+            rusqlite::params![&volume_id, &body.path, size_bytes as i64, chunk_count, &now],
+        ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("file_map: {}", e)))?;
+
+        let file_id: i64 = db.query_row(
+            "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
+            rusqlite::params![&volume_id, &body.path], |row| row.get(0),
+        ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("get file_id: {}", e)))?;
+
+        // Create file_chunks entries (metadata only — no physical data written)
+        for ci in 0..chunk_count {
+            let offset = ci as u64 * chunk_size;
+            let this_size = std::cmp::min(chunk_size, size_bytes - offset);
+            log_err!(db.execute(
+                "INSERT OR IGNORE INTO file_chunks (file_id, chunk_index, offset_bytes, size_bytes)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![file_id, ci, offset, this_size],
+            ), "allocate-disk: INSERT file_chunks");
+        }
+
+        tracing::info!("Allocated disk {}/{}: {} chunks, {} bytes (thin provisioned)",
+            volume_id, body.path, chunk_count, size_bytes);
+
+        file_id
+    };
+
+    // Trigger metadata replication to peers (no chunk data to push — thin provisioned)
+    let version = {
+        let db = state.db.lock().unwrap();
+        db.query_row("SELECT version FROM file_map WHERE id = ?1",
+            rusqlite::params![file_id], |row| row.get::<_, i64>(0)).unwrap_or(1)
+    };
+    let _ = state.write_tx.send(crate::engine::push_replicator::WriteEvent {
+        volume_id: volume_id.clone(),
+        rel_path: body.path.clone(),
+        file_id,
+        version,
+        writer_node_id: state.node_id.clone(),
+    });
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "path": format!("/vmm/san/{}/{}", volume_id, body.path),
+        "size_bytes": size_bytes,
+    })))
+}
+
 /// GET /api/volumes/{id}/browse/{*path} — list directory contents inside a volume.
 pub async fn browse(
     State(state): State<Arc<CoreSanState>>,

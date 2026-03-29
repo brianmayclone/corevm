@@ -125,15 +125,14 @@ Fenced nodes cannot acquire or renew leases. The `acquire_lease` function checks
 
 ## Push Replication
 
-When a file is written, push replication distributes it to peers immediately.
+When a file is written, push replication distributes individual chunks to peers immediately.
 
 ### Write Event Pipeline
 
 ```
 Write Handler
   │ Creates WriteEvent {
-  │   volume_id, rel_path, version,
-  │   data: Arc<Vec<u8>>,
+  │   volume_id, file_id,
   │   writer_node_id
   │ }
   ▼
@@ -141,17 +140,28 @@ mpsc channel (unbounded)
   │
   ▼
 Push Replicator (background task)
-  │ 1. Skip if node is fenced
+  │ 1. Skip if node is fenced or sanitizing
   │ 2. Query backends table for peer node_ids
   │ 3. For each peer with backends for this volume:
-  │    └─ PeerClient::push_file(addr, volume_id, rel_path, data)
-  │       → PUT /api/volumes/{id}/files/{path}
+  │    └─ For each chunk of the file:
+  │       → PUT /api/chunks/{volume_id}/{file_id}/{chunk_index}
+  │       → On success: record chunk_replicas entry for remote node in LOCAL DB
+  │         (with empty backend_id — remote backend is unknown to sender)
   ▼
-Peer Node receives file
-  │ 1. Stores to local backend
-  │ 2. Updates file_map, file_replicas
-  │ 3. Marks local replica as 'synced'
+Peer Node receives chunk
+  │ 1. Stores chunk to local backend via write_chunk_data()
+  │ 2. Updates chunk_replicas
+  │ 3. Marks local chunk replica as 'synced'
 ```
+
+### Metadata Sync
+
+The `metadata_sync` engine (10-second interval) ensures all nodes know about all files:
+
+- **Leader**: Pushes `file_map` + `file_chunks` records to all peers via `POST /api/file-meta/sync`
+- **Non-leaders**: Sync metadata for files they own
+- **Watermark**: Only syncs changes since last successful sync, minimizing traffic
+- **Solves**: "Host B can't see files written by Host A" — metadata is propagated regardless of chunk replication status
 
 ### Cross-Registration
 
@@ -178,16 +188,20 @@ If push replication fails (peer temporarily unreachable), the stale replica pers
 
 ```
 Every 5 seconds:
-  1. Query file_replicas WHERE state = 'stale'
-  2. For each stale replica:
+  1. Query chunk_replicas WHERE state = 'stale'
+  2. For each stale chunk replica:
      a. If replica is LOCAL:
-        → Pull latest version from a peer with 'synced' copy
+        → Pull latest chunk from a peer with 'synced' copy
+          via GET /api/chunks/{vol}/{file}/{index}
         → Write to local backend
         → Mark as 'synced'
      b. If replica is REMOTE:
-        → Push local 'synced' copy to the peer
+        → Push local 'synced' chunk to the peer
+          via PUT /api/chunks/{vol}/{file}/{index}
         → Peer marks as 'synced'
 ```
+
+Stale-replica sync now works on the `chunk_replicas` table (not `file_replicas`), pulling and pushing individual chunks via the `/api/chunks/` endpoints.
 
 ## Repair Engine
 
@@ -208,11 +222,13 @@ Leader runs every 60 seconds:
      WHERE synced_count < (FTT + 1)
      ORDER BY deficit DESC, size ASC (prioritize most under-replicated, smallest first)
 
-  2. For each under-replicated chunk:
+  2. For each under-replicated chunk (rate-limited to 30 chunks/cycle):
      a. Find source node with 'synced' copy
-     b. Try local target: pull from peer, store locally
-     c. Else find remote peer without chunk: push from local
-     d. Update chunk_replicas, mark new copy as 'synced'
+     b. Verify source SHA256 before pushing
+     c. Try local target: pull from peer, store locally
+     d. Else find remote peer without chunk: push from local
+     e. Verify received SHA256 after pulling
+     f. Update chunk_replicas, mark new copy as 'synced'
 
   3. Update protection_status for all files:
      → 'protected' if all chunks have FTT+1 node-distinct copies
@@ -273,6 +289,19 @@ The integrity engine (hourly by default) verifies data hasn't been corrupted:
 3. On success:
    - Log to `integrity_log` with `passed=1`
 
+## Sanitize Engine (Startup)
+
+The sanitize engine runs once at startup before the node accepts writes:
+
+1. Node enters `QuorumStatus::Sanitizing` state (writes rejected)
+2. Iterates all local `chunk_replicas`
+3. For each chunk: reads from disk, computes SHA256, compares with stored hash
+4. **Corrupt/missing chunks**: Attempts repair from peers via `/api/chunks/` endpoints
+5. **Orphaned .tmp files**: Cleaned up automatically
+6. Once complete, node transitions to normal quorum state and begins accepting writes
+
+The sanitize engine ensures data integrity after unclean shutdowns, power failures, or disk errors.
+
 ## Rebalancer
 
 The rebalancer (30-second interval) handles data movement for backend changes:
@@ -287,14 +316,22 @@ The rebalancer (30-second interval) handles data movement for backend changes:
 
 ```
 Every 30 seconds:
-  1. Find chunk_replicas on draining/offline/degraded backends
-  2. For each chunk:
-     a. Copy to a healthy target backend on the same node
-     b. Update chunk_replicas (new backend_id)
-     c. Delete old replica entry
-     d. Remove old file from disk
-  3. When draining backend has 0 remaining chunks:
-     → Mark backend as 'offline' (fully drained)
+  Phase 1 — Repair missing local mirror copies:
+    1. Find chunks that should have local mirror copies but don't
+    2. Copy chunk to missing mirror backend
+    3. Verify SHA256 after copy
+    4. All operations use transactions for atomicity
+
+  Phase 2 — Evacuate draining/failed backends:
+    1. Find chunk_replicas on draining/offline/degraded backends
+    2. For each chunk:
+       a. Copy to a healthy target backend on the same node
+       b. Verify SHA256 after copy
+       c. Update chunk_replicas (new backend_id) within transaction
+       d. Delete old replica entry
+       e. Remove old chunk file from disk
+    3. When draining backend has 0 remaining chunks:
+       → Mark backend as 'offline' (fully drained)
 ```
 
 ## Transparent Peer-Fetch

@@ -47,7 +47,7 @@ CoreSAN runs multiple asynchronous background tasks, each on its own interval:
 | Engine | Interval | Purpose |
 |--------|----------|---------|
 | **Peer Monitor** | 5s | Heartbeat all peers, compute quorum, elect leader |
-| **Push Replicator** | Event-driven | Distribute writes to peers immediately |
+| **Push Replicator** | Event-driven | Distribute writes to peers immediately (chunk-level) |
 | **Stale Replicator** | 5s | Pull/push stale replicas to restore consistency |
 | **Repair Engine** | 60s | Restore FTT on under-replicated chunks (leader-only) |
 | **Integrity Checker** | 3600s | SHA256-verify all local chunk replicas |
@@ -59,6 +59,10 @@ CoreSAN runs multiple asynchronous background tasks, each on its own interval:
 | **DB Mirror** | 60s | Backup SQLite to disk backends |
 | **FUSE Mount** | Startup | Mount FUSE filesystems for volumes |
 | **Write Log Cleanup** | 300s | Purge write_log entries older than 1 hour |
+| **Metadata Sync** | 10s | Leader pushes file_map + file_chunks to all peers; non-leaders sync files they own. Only syncs changes since last watermark. |
+| **Sanitize** | Startup only | Verifies all local chunk replicas (SHA256), repairs from peers if corrupt/missing. Cleans orphaned .tmp files. Node stays in Sanitizing state until done. |
+| **SMART Monitor** | 300s | Reads S.M.A.R.T. data from all disks via `smartctl -a -j`. Stores in smart_data table. Logs warnings for failing disks. Reports critical events to cluster. |
+| **Event Reporter** | Fire-and-forget | HTTP POST to cluster's `/api/events/ingest`. Used by smart_monitor and peer_monitor for proactive error reporting. |
 
 ### 3. State Management
 
@@ -80,7 +84,8 @@ All shared state is held in `CoreSanState` (wrapped in `Arc`):
 Each node maintains its own SQLite database in WAL mode. The database stores:
 - Volume definitions (synced across nodes via peer communication)
 - Backend registrations (local + cross-registered remote backends)
-- File metadata (`file_map`) and replica tracking (`file_replicas`, `chunk_replicas`)
+- File metadata (`file_map`) and replica tracking (`chunk_replicas` is authoritative; `file_replicas` is legacy)
+- S.M.A.R.T. disk health data (`smart_data`)
 - Peer records, benchmark results, integrity logs, write logs, claimed disks
 
 There is **no distributed database** — each node's DB is independent. Consistency is maintained through:
@@ -96,23 +101,27 @@ There is **no distributed database** — each node's DB is independent. Consiste
 Client PUT /api/volumes/{id}/files/path
   │
   ▼
-1. Check quorum (reject if Fenced)
+1. Check quorum (reject if Fenced or Sanitizing)
 2. Check volume sync_mode
-3. Select best local backend (most free space)
-4. Acquire write lease (30s exclusive lock)
-5. Write to temp file → fsync → atomic rename
-6. Compute SHA256
-7. Update file_map (version++, ownership_epoch/tick)
-8. Mark local replica as 'synced'
-9. Mark all other nodes' replicas as 'stale'
-10. Append to write_log
-11. Send WriteEvent to push_replicator channel
+3. Acquire write lease (30s exclusive lock)
+4. Split file data into chunks (chunk_size_bytes, default 64 MB)
+5. For each chunk:
+   a. place_chunk() selects backend(s) per local RAID policy
+   b. write_chunk_data() writes to <backend>/.coresan/<volume_id>/<file_id>/chunk_<index:06>
+   c. Compute SHA256 per chunk
+   d. Record in file_chunks table
+   e. Record in chunk_replicas table (local, state='synced')
+6. Update file_map (version++, ownership_epoch/tick)
+7. Mark all other nodes' chunk replicas as 'stale'
+8. Append to write_log
+9. Send WriteEvent (with file_id) to push_replicator channel
   │
   ▼  (async, non-blocking)
 Push Replicator:
   - Find peers with backends for this volume
-  - PUT file data to each peer concurrently
-  - Peer stores file and marks replica 'synced'
+  - Send individual chunks to each peer via PUT /api/chunks/{vol}/{file}/{index}
+  - After successful push, record chunk_replicas entry for remote node in LOCAL DB
+  - Peer stores chunk and marks replica 'synced'
 ```
 
 ### Read Path
@@ -121,34 +130,41 @@ Push Replicator:
 Client GET /api/volumes/{id}/files/path
   │
   ▼
-1. Try local replica (fast path)
-   → Found? Return file data immediately.
+1. Check has_local_chunks() + file_exists() (fast path)
+   → All chunks local? Reassemble via read_chunk_data() and return.
   │
-  ▼  (no local replica)
+  ▼  (missing chunks)
 2. Check if request is from a peer (X-CoreSAN-Secret header)
    → Peer request? Return 404 (prevent recursion)
   │
-  ▼  (client request, no local data)
-3. Query local DB for known remote replica
-   → Found? Pull from that specific peer.
+  ▼  (client request, missing chunks)
+3. fetch_chunks_from_peer() — pull individual missing chunks
+   → Query local DB for known remote chunk replicas
+   → Pull via GET /api/chunks/{vol}/{file}/{index}
   │
   ▼  (no known replica in local DB)
 4. Broadcast to all online peers
-   → Ask each peer until one returns the file.
+   → Ask each peer until chunks are found.
   │
   ▼  (nobody has it)
 5. Return 404 Not Found
 ```
 
-### Chunk-Level Storage
+### Chunk-Based Storage Architecture
 
-Files are divided into fixed-size chunks (default 64 MB). Each chunk is placed on backends according to the volume's local RAID policy:
+All file data is stored as fixed-size chunks. The old file-level storage (writing whole files to `<backend>/<rel_path>`) has been replaced entirely. Both the API and FUSE paths use `write_chunk_data()` and `read_chunk_data()`.
+
+**Chunk storage path:** `<backend>/.coresan/<volume_id>/<file_id>/chunk_<index:06>`
+
+Each chunk is placed on backends according to the volume's local RAID policy via `place_chunk()`:
 
 | RAID Mode | Description | Chunks per Write |
 |-----------|-------------|-----------------|
 | `stripe` | Round-robin across backends | 1 copy |
 | `mirror` | Copy to all local backends | N copies |
 | `stripe_mirror` | Copy to 2 backends | 2 copies |
+
+The chunk size is configurable per volume via `chunk_size_bytes` (default 64 MB).
 
 Cross-node replication is governed by FTT:
 - **FTT 0**: Data exists on 1 node only (no protection)
@@ -165,6 +181,7 @@ Cross-node replication is governed by FTT:
 | **Degraded** | Majority reachable, or witness grants permission | Yes | Yes |
 | **Fenced** | No majority and no witness approval | Yes | **No** |
 | **Solo** | No peers configured | Yes | Yes |
+| **Sanitizing** | Startup integrity check in progress | Yes | **No** |
 
 ### Quorum Calculation
 
@@ -215,3 +232,29 @@ When a node fetches a file from a peer (transparent peer-fetch), the request inc
 ### Cluster Integration Auth
 
 When accessed through vmm-cluster, the proxy layer handles bearer token authentication. The cluster-to-SAN communication uses the SAN client without additional auth (trusted internal network).
+
+## Service Layer
+
+CoreSAN uses a structured service layer for all database and business logic operations.
+
+### Database Helpers (`db/helpers.rs`)
+
+- `DbResult<T>` / `DbError` — unified error types for all DB operations
+- `DbContext` trait (`.ctx()`) — adds context to error chains
+- `db_transaction()` — safe transaction wrapper with automatic rollback on error
+- `db_exec()` — execute with error context
+- `log_err!` macro — replaces all `.ok()` calls on DB operations. Errors are logged, never silently swallowed.
+
+### Service Modules
+
+| Service | Responsibility |
+|---------|---------------|
+| **ChunkService** | 20+ methods for all `chunk_replicas` / `file_chunks` operations. Key methods: `receive_chunk()`, `track_remote_replica()`, `move_replica()`, `find_under_replicated()`, `find_stale_replicas()` |
+| **FileService** | `sync_metadata()`, `delete()` (transactional with cascade), `acquire_lease()` |
+| **PeerService** | Peer CRUD, heartbeat handling, lease release on peer failure |
+| **VolumeService** | Volume CRUD, sync, status management |
+| **DiskService** | Disk discovery, claim, release, reset, SMART data access |
+| **BackendService** | Backend CRUD, capacity refresh, drain management |
+| **BenchmarkService** | Benchmark execution, result storage, matrix computation |
+
+All services use the `log_err!` macro to ensure no database errors are silently swallowed.
