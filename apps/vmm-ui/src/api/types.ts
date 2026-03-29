@@ -439,6 +439,8 @@ export interface CoreSanStatus {
   peer_count: number
   available_disks: number
   claimed_disks: number
+  storage_total_bytes: number
+  storage_free_bytes: number
   quorum_status: string
   is_leader: boolean
   benchmark_summary: CoreSanBenchmarkSummary | null

@@ -33,11 +33,17 @@ export default function CreateVolumeDialog({
   newVolName, setNewVolName, newVolSizeGb, setNewVolSizeGb, newVolFtt, setNewVolFtt, newVolRaid, setNewVolRaid,
   newVolSelectedHosts, setNewVolSelectedHosts, newVolError, volumes,
 }: Props) {
-  // Use first volume's total/free as baseline (all volumes share the same disk pool per node)
-  const diskTotal = volumes.length > 0 ? volumes[0].total_bytes : 0
-  const diskFree = volumes.length > 0 ? volumes[0].free_bytes : 0
+  // Get raw disk capacity from SAN status (available even before any volumes exist)
+  const rawTotal = status?.storage_total_bytes || 0
+  const rawFree = status?.storage_free_bytes || 0
+
+  // RAID-corrected capacity based on selected RAID mode and claimed disk count
+  const raidFactor = newVolRaid === 'mirror' ? (claimedDisks || 1) :
+                     newVolRaid === 'stripe_mirror' ? 2 : 1
+  const diskTotal = Math.floor(rawTotal / raidFactor)
+  const diskFree = Math.floor(rawFree / raidFactor)
+
   const totalAllocated = volumes.reduce((sum, v) => sum + (v.max_size_bytes || 0), 0)
-  // Available = smaller of: physical free space, or (total - already allocated)
   const freeAfterAlloc = diskTotal > 0 ? Math.max(0, Math.min(diskFree, diskTotal - totalAllocated)) : 0
   const maxSizeGb = Math.floor(freeAfterAlloc / (1024 * 1024 * 1024))
 

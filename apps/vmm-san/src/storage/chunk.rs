@@ -498,13 +498,18 @@ pub fn compute_protection_status(db: &Connection, file_id: i64, ftt: u32) -> &'s
 
     let required_copies = ftt + 1;
 
-    // Find chunks with fewer than required distinct node replicas
+    // Find chunks with fewer than required distinct node replicas.
+    // Exclude thin-provisioned chunks (zero synced replicas = never written, intentionally empty).
     let degraded_count: u64 = db.query_row(
         "SELECT COUNT(*) FROM file_chunks fc
          WHERE fc.file_id = ?1 AND (
              SELECT COUNT(DISTINCT cr.node_id) FROM chunk_replicas cr
              WHERE cr.chunk_id = fc.id AND cr.state = 'synced'
-         ) < ?2",
+         ) < ?2
+         AND EXISTS (
+             SELECT 1 FROM chunk_replicas cr2
+             WHERE cr2.chunk_id = fc.id AND cr2.state = 'synced'
+         )",
         rusqlite::params![file_id, required_copies],
         |row| row.get(0),
     ).unwrap_or(0);

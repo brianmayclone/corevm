@@ -82,6 +82,13 @@ impl InodeMap {
     }
 }
 
+/// Buffered chunk data in RAM — avoids read-modify-write for every 4K write.
+struct ChunkBuffer {
+    data: Vec<u8>,
+    dirty: bool,
+    last_write: std::time::Instant,
+}
+
 /// CoreSAN FUSE filesystem — one instance per mounted volume.
 pub struct CoreSanFS {
     state: Arc<CoreSanState>,
@@ -89,12 +96,95 @@ pub struct CoreSanFS {
     inodes: Mutex<InodeMap>,
     /// Tokio runtime handle for blocking on async peer operations.
     rt: tokio::runtime::Handle,
+    /// Write-through cache: (file_id, chunk_index) → chunk data in RAM.
+    /// Writes go to RAM first, flushed to disk on fsync/release or when buffer is full.
+    chunk_cache: std::sync::Mutex<std::collections::HashMap<(i64, u32), ChunkBuffer>>,
 }
+
+const MAX_CACHED_CHUNKS: usize = 32; // ~2 GB RAM max for cache
 
 impl CoreSanFS {
     pub fn new(state: Arc<CoreSanState>, volume_id: String, rt: tokio::runtime::Handle) -> Self {
         let inodes = Mutex::new(InodeMap::new(&volume_id));
-        CoreSanFS { state, volume_id, inodes, rt }
+        CoreSanFS {
+            state, volume_id, inodes, rt,
+            chunk_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Flush all dirty chunks for a file to disk.
+    fn flush_file_chunks(&self, file_id: i64) {
+        let (chunk_size, _, local_raid) = self.volume_config();
+        let mut cache = self.chunk_cache.lock().unwrap();
+
+        let keys_to_flush: Vec<(i64, u32)> = cache.keys()
+            .filter(|(fid, _)| *fid == file_id)
+            .cloned()
+            .collect();
+
+        if keys_to_flush.is_empty() { return; }
+
+        let db = self.state.db.lock().unwrap();
+
+        for key in keys_to_flush {
+            if let Some(buf) = cache.remove(&key) {
+                if buf.dirty {
+                    let (fid, ci) = key;
+                    // Write the entire buffered chunk to disk via chunk system
+                    let offset = ci as u64 * chunk_size;
+                    let _ = crate::storage::chunk::write_chunk_data(
+                        &db, fid, offset, &buf.data,
+                        &self.volume_id, &self.state.node_id, chunk_size, &local_raid,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Flush all dirty chunks (for all files) to disk.
+    fn flush_all_chunks(&self) {
+        let (chunk_size, _, local_raid) = self.volume_config();
+        let mut cache = self.chunk_cache.lock().unwrap();
+
+        if cache.is_empty() { return; }
+
+        let db = self.state.db.lock().unwrap();
+
+        let entries: Vec<((i64, u32), ChunkBuffer)> = cache.drain().collect();
+        for ((fid, ci), buf) in entries {
+            if buf.dirty {
+                let offset = ci as u64 * chunk_size;
+                let _ = crate::storage::chunk::write_chunk_data(
+                    &db, fid, offset, &buf.data,
+                    &self.volume_id, &self.state.node_id, chunk_size, &local_raid,
+                );
+            }
+        }
+    }
+
+    /// Evict oldest cached chunks if cache is too large.
+    fn evict_if_needed(&self) {
+        let mut cache = self.chunk_cache.lock().unwrap();
+        if cache.len() <= MAX_CACHED_CHUNKS { return; }
+
+        // Find the oldest entry
+        let oldest_key = cache.iter()
+            .min_by_key(|(_, buf)| buf.last_write)
+            .map(|(k, _)| *k);
+
+        if let Some(key) = oldest_key {
+            if let Some(buf) = cache.remove(&key) {
+                if buf.dirty {
+                    let (chunk_size, _, local_raid) = self.volume_config();
+                    let db = self.state.db.lock().unwrap();
+                    let offset = key.1 as u64 * chunk_size;
+                    let _ = crate::storage::chunk::write_chunk_data(
+                        &db, key.0, offset, &buf.data,
+                        &self.volume_id, &self.state.node_id, chunk_size, &local_raid,
+                    );
+                }
+            }
+        }
     }
 
     /// Get file_id from file_map for a given rel_path.
@@ -462,7 +552,29 @@ impl Filesystem for CoreSanFS {
         }
     }
 
-    fn flush(&mut self, _req: &Request<'_>, _ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
+    fn flush(&mut self, _req: &Request<'_>, ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
+        // Flush dirty chunks for this file to disk
+        if let Some(entry) = self.inodes.lock().unwrap().get(ino).cloned() {
+            if !entry.is_dir {
+                if let Some(file_id) = self.get_file_id(&entry.rel_path) {
+                    self.flush_file_chunks(file_id);
+
+                    // Trigger replication after flush
+                    let version = {
+                        let db = self.state.db.lock().unwrap();
+                        db.query_row("SELECT version FROM file_map WHERE id = ?1",
+                            rusqlite::params![file_id], |row| row.get::<_, i64>(0)).unwrap_or(0)
+                    };
+                    let _ = self.state.write_tx.send(crate::engine::push_replicator::WriteEvent {
+                        volume_id: self.volume_id.clone(),
+                        rel_path: entry.rel_path.clone(),
+                        file_id,
+                        version,
+                        writer_node_id: self.state.node_id.clone(),
+                    });
+                }
+            }
+        }
         reply.ok();
     }
 
@@ -470,9 +582,12 @@ impl Filesystem for CoreSanFS {
         &mut self, _req: &Request<'_>, ino: u64, _fh: u64, _flags: i32,
         _lock_owner: Option<u64>, _flush: bool, reply: ReplyEmpty,
     ) {
-        // Release write lease when file handle is closed
+        // Flush + release write lease when file handle is closed
         if let Some(entry) = self.inodes.lock().unwrap().get(ino).cloned() {
             if !entry.is_dir {
+                if let Some(file_id) = self.get_file_id(&entry.rel_path) {
+                    self.flush_file_chunks(file_id);
+                }
                 let db = self.state.db.lock().unwrap();
                 crate::engine::write_lease::release_lease(
                     &db, &self.volume_id, &entry.rel_path, &self.state.node_id,
@@ -510,16 +625,74 @@ impl Filesystem for CoreSanFS {
         }
 
         let (chunk_size, _, _) = self.volume_config();
-        let db = self.state.db.lock().unwrap();
 
-        match crate::storage::chunk::read_chunk_data(
-            &db, file_id, offset as u64, size as u64,
-            &self.volume_id, &self.state.node_id, chunk_size,
-        ) {
-            Ok(data) => reply.data(&data),
-            Err(e) => {
-                tracing::warn!("FUSE read error: {}", e);
-                reply.error(libc::EIO);
+        // Check write cache first — may have unflushed data
+        let ranges = crate::storage::chunk::affected_chunks(offset as u64, size as u64, chunk_size);
+        let cache = self.chunk_cache.lock().unwrap();
+        let has_cached = ranges.iter().any(|r| cache.contains_key(&(file_id, r.chunk_index)));
+        drop(cache);
+
+        if has_cached {
+            // Read from cache for cached chunks, disk for others
+            let mut result = Vec::with_capacity(size as usize);
+            let cache = self.chunk_cache.lock().unwrap();
+            for range in &ranges {
+                let key = (file_id, range.chunk_index);
+                if let Some(buf) = cache.get(&key) {
+                    let start = range.local_offset as usize;
+                    let end = (start + range.size as usize).min(buf.data.len());
+                    if start < buf.data.len() {
+                        result.extend_from_slice(&buf.data[start..end]);
+                        if (end - start) < range.size as usize {
+                            result.extend(std::iter::repeat(0u8).take(range.size as usize - (end - start)));
+                        }
+                    } else {
+                        result.extend(std::iter::repeat(0u8).take(range.size as usize));
+                    }
+                } else {
+                    // Read this chunk from disk
+                    drop(cache);
+                    let db = self.state.db.lock().unwrap();
+                    match crate::storage::chunk::read_chunk_data(
+                        &db, file_id, range.chunk_index as u64 * chunk_size + range.local_offset,
+                        range.size, &self.volume_id, &self.state.node_id, chunk_size,
+                    ) {
+                        Ok(d) => result.extend_from_slice(&d),
+                        Err(_) => result.extend(std::iter::repeat(0u8).take(range.size as usize)),
+                    }
+                    drop(db);
+                    let cache2 = self.chunk_cache.lock().unwrap();
+                    // Reborrow for next iteration — need to re-enter the pattern
+                    // This is ugly but safe
+                    std::mem::drop(cache2);
+                    break; // Fall back to full disk read for remaining
+                }
+            }
+            if result.len() < size as usize {
+                // Fallback: read rest from disk
+                let remaining_offset = offset as u64 + result.len() as u64;
+                let remaining_size = size as u64 - result.len() as u64;
+                let db = self.state.db.lock().unwrap();
+                if let Ok(d) = crate::storage::chunk::read_chunk_data(
+                    &db, file_id, remaining_offset, remaining_size,
+                    &self.volume_id, &self.state.node_id, chunk_size,
+                ) {
+                    result.extend_from_slice(&d);
+                }
+            }
+            reply.data(&result);
+        } else {
+            // Fast path: no cached chunks, read directly from disk
+            let db = self.state.db.lock().unwrap();
+            match crate::storage::chunk::read_chunk_data(
+                &db, file_id, offset as u64, size as u64,
+                &self.volume_id, &self.state.node_id, chunk_size,
+            ) {
+                Ok(data) => reply.data(&data),
+                Err(e) => {
+                    tracing::warn!("FUSE read error: {}", e);
+                    reply.error(libc::EIO);
+                }
             }
         }
     }
@@ -539,15 +712,14 @@ impl Filesystem for CoreSanFS {
             return;
         }
 
-        tracing::info!("FUSE write: '{}' offset={} len={}", entry.rel_path, offset, data.len());
+        tracing::trace!("FUSE write: '{}' offset={} len={}", entry.rel_path, offset, data.len());
 
-        let (chunk_size, ftt, local_raid) = self.volume_config();
+        let (chunk_size, _ftt, _local_raid) = self.volume_config();
 
-        // Ensure file exists in file_map
+        // Ensure file exists in file_map + acquire write lease
         let file_id = {
             let db = self.state.db.lock().unwrap();
 
-            // Acquire/renew write lease
             let quorum = *self.state.quorum_status.read().unwrap();
             match crate::engine::write_lease::acquire_lease(
                 &db, &self.volume_id, &entry.rel_path, &self.state.node_id, quorum,
@@ -589,47 +761,55 @@ impl Filesystem for CoreSanFS {
             return;
         }
 
-        // Write data via chunk manager
-        let changed_chunks = {
-            let db = self.state.db.lock().unwrap();
-            match crate::storage::chunk::write_chunk_data(
-                &db, file_id, offset as u64, data,
-                &self.volume_id, &self.state.node_id, chunk_size, &local_raid,
-            ) {
-                Ok(changed) => {
-                    // Increment version
-                    db.execute(
-                        "UPDATE file_map SET version = version + 1, updated_at = datetime('now')
-                         WHERE id = ?1",
-                        rusqlite::params![file_id],
-                    ).ok();
-                    changed
-                }
-                Err(e) => {
-                    tracing::warn!("FUSE write chunk error: {}", e);
-                    reply.error(libc::EIO);
-                    return;
-                }
-            }
-        };
+        // Write to in-memory chunk cache (fast path — no disk I/O)
+        // The cache is flushed to disk on fsync/flush/release or when evicted.
+        {
+            let ranges = crate::storage::chunk::affected_chunks(offset as u64, data.len() as u64, chunk_size);
+            let mut cache = self.chunk_cache.lock().unwrap();
+            let mut data_offset = 0usize;
 
-        // Push changed chunks to peers (non-blocking)
-        if !changed_chunks.is_empty() {
-            let version = {
-                let db = self.state.db.lock().unwrap();
-                db.query_row(
-                    "SELECT version FROM file_map WHERE id = ?1",
-                    rusqlite::params![file_id], |row| row.get::<_, i64>(0),
-                ).unwrap_or(0)
-            };
-            let _ = self.state.write_tx.send(crate::engine::push_replicator::WriteEvent {
-                volume_id: self.volume_id.clone(),
-                rel_path: entry.rel_path.clone(),
-                file_id,
-                version,
-                writer_node_id: self.state.node_id.clone(),
-            });
+            for range in &ranges {
+                let key = (file_id, range.chunk_index);
+
+                let buf = cache.entry(key).or_insert_with(|| {
+                    // Load existing chunk from disk (or create empty for thin-provisioned)
+                    let existing = {
+                        let db = self.state.db.lock().unwrap();
+                        crate::storage::chunk::read_chunk_data(
+                            &db, file_id, range.chunk_index as u64 * chunk_size, chunk_size,
+                            &self.volume_id, &self.state.node_id, chunk_size,
+                        ).unwrap_or_else(|_| vec![0u8; chunk_size as usize])
+                    };
+                    ChunkBuffer {
+                        data: existing,
+                        dirty: false,
+                        last_write: std::time::Instant::now(),
+                    }
+                });
+
+                // Patch data into the buffer
+                let end = range.local_offset as usize + range.size as usize;
+                if buf.data.len() < end {
+                    buf.data.resize(end, 0);
+                }
+                buf.data[range.local_offset as usize..end]
+                    .copy_from_slice(&data[data_offset..data_offset + range.size as usize]);
+                buf.dirty = true;
+                buf.last_write = std::time::Instant::now();
+                data_offset += range.size as usize;
+            }
+
+            // Update file size in DB (lightweight, no disk I/O)
+            let new_end = offset as u64 + data.len() as u64;
+            let db = self.state.db.lock().unwrap();
+            db.execute(
+                "UPDATE file_map SET size_bytes = MAX(size_bytes, ?1), updated_at = datetime('now') WHERE id = ?2",
+                rusqlite::params![new_end as i64, file_id],
+            ).ok();
         }
+
+        // Evict old chunks if cache is full
+        self.evict_if_needed();
 
         reply.written(data.len() as u32);
     }

@@ -18,6 +18,10 @@ pub struct StatusResponse {
     pub peer_count: u32,
     pub available_disks: u32,
     pub claimed_disks: u32,
+    /// Total raw capacity of all claimed disks (sum, not RAID-corrected)
+    pub storage_total_bytes: u64,
+    /// Free space on all claimed disks (sum, not RAID-corrected)
+    pub storage_free_bytes: u64,
     pub benchmark_summary: Option<BenchmarkSummary>,
     pub quorum_status: String,
     pub is_leader: bool,
@@ -77,6 +81,16 @@ pub async fn status(
         crate::storage::disk::DiskStatus::Claimed { .. }
     )).count() as u32;
 
+    // Total capacity of all claimed disks (raw, not RAID-corrected)
+    let storage_total_bytes: u64 = db.query_row(
+        "SELECT COALESCE(SUM(total_bytes), 0) FROM backends WHERE status = 'online' AND claimed_disk_id != ''",
+        [], |row| row.get(0),
+    ).unwrap_or(0);
+    let storage_free_bytes: u64 = db.query_row(
+        "SELECT COALESCE(SUM(free_bytes), 0) FROM backends WHERE status = 'online' AND claimed_disk_id != ''",
+        [], |row| row.get(0),
+    ).unwrap_or(0);
+
     let local_addr = format!("http://{}:{}",
         crate::engine::discovery::get_local_ip_cached(), state.config.server.port);
 
@@ -93,6 +107,8 @@ pub async fn status(
         peer_count,
         available_disks,
         claimed_disks,
+        storage_total_bytes,
+        storage_free_bytes,
         benchmark_summary,
         quorum_status,
         is_leader,
@@ -148,6 +164,14 @@ pub async fn dashboard(
         claimed_disks: disks2.iter().filter(|d| matches!(d.status,
             crate::storage::disk::DiskStatus::Claimed { .. }
         )).count() as u32,
+        storage_total_bytes: db.query_row(
+            "SELECT COALESCE(SUM(total_bytes), 0) FROM backends WHERE status = 'online' AND claimed_disk_id != ''",
+            [], |row| row.get(0),
+        ).unwrap_or(0),
+        storage_free_bytes: db.query_row(
+            "SELECT COALESCE(SUM(free_bytes), 0) FROM backends WHERE status = 'online' AND claimed_disk_id != ''",
+            [], |row| row.get(0),
+        ).unwrap_or(0),
         benchmark_summary,
         quorum_status: quorum_status2,
         is_leader: is_leader2,
