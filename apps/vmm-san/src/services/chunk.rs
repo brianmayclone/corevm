@@ -163,6 +163,7 @@ impl ChunkService {
     }
 
     /// Find under-replicated chunks (fewer synced nodes than FTT+1).
+    /// Excludes thin-provisioned chunks (chunks that have never been written — no replicas at all).
     pub fn find_under_replicated(db: &Connection, limit: u32) -> Vec<(i64, i64, u32, String, u32, u32)> {
         let mut stmt = db.prepare(
             "SELECT fc.id, fc.file_id, fc.chunk_index, fm.volume_id, v.ftt,
@@ -172,6 +173,7 @@ impl ChunkService {
              JOIN file_map fm ON fm.id = fc.file_id
              JOIN volumes v ON v.id = fm.volume_id
              WHERE synced_nodes < (v.ftt + 1)
+               AND synced_nodes > 0
              LIMIT ?1"
         ).unwrap();
         stmt.query_map(rusqlite::params![limit], |row| {

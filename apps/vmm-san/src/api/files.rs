@@ -377,13 +377,52 @@ pub async fn allocate_disk(
         return Err((StatusCode::SERVICE_UNAVAILABLE, "Node not available for writes".into()));
     }
 
-    // Verify backend exists
+    // Verify backend exists and check capacity
     {
         let db = state.db.lock().unwrap();
         db.query_row(
-            "SELECT id FROM backends WHERE node_id = ?1 AND status = 'online' LIMIT 1",
+            "SELECT id FROM backends WHERE node_id = ?1 AND status = 'online' AND claimed_disk_id != '' LIMIT 1",
             rusqlite::params![&state.node_id], |row| row.get::<_, String>(0),
-        ).map_err(|_| (StatusCode::NOT_FOUND, "No local backend available".into()))?;
+        ).map_err(|_| (StatusCode::NOT_FOUND, "No claimed disks available".into()))?;
+
+        // Check if volume has a max_size_bytes limit
+        let (vol_max, vol_used): (u64, u64) = db.query_row(
+            "SELECT v.max_size_bytes, COALESCE(SUM(fm.size_bytes), 0)
+             FROM volumes v LEFT JOIN file_map fm ON fm.volume_id = v.id
+             WHERE v.id = ?1 GROUP BY v.id",
+            rusqlite::params![&volume_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap_or((0, 0));
+
+        if vol_max > 0 && vol_used + size_bytes > vol_max {
+            return Err((StatusCode::BAD_REQUEST,
+                format!("Volume size limit exceeded. Max: {} bytes, used: {} bytes, requested: {} bytes",
+                    vol_max, vol_used, size_bytes)));
+        }
+
+        // Check physical disk capacity
+        let local_raid: String = db.query_row(
+            "SELECT local_raid FROM volumes WHERE id = ?1",
+            rusqlite::params![&volume_id], |row| row.get(0),
+        ).unwrap_or_else(|_| "stripe".into());
+
+        let free: u64 = {
+            let backends: Vec<(u64, u64)> = db.prepare(
+                "SELECT total_bytes, free_bytes FROM backends WHERE node_id = ?1 AND status = 'online' AND claimed_disk_id != ''"
+            ).unwrap().query_map(rusqlite::params![&state.node_id], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap().filter_map(|r| r.ok()).collect();
+            match local_raid.as_str() {
+                "mirror" => backends.iter().map(|(_, f)| *f).min().unwrap_or(0),
+                "stripe_mirror" => backends.iter().map(|(_, f)| *f).sum::<u64>() / 2,
+                _ => backends.iter().map(|(_, f)| *f).sum(),
+            }
+        };
+
+        if size_bytes > free {
+            return Err((StatusCode::BAD_REQUEST,
+                format!("Not enough disk space. Requested: {} GB, available: {} GB ({} RAID)",
+                    body.size_gb, free / 1024 / 1024 / 1024, local_raid)));
+        }
     }
 
     tracing::info!("Allocating disk {}/{} ({} GB)...", volume_id, body.path, body.size_gb);

@@ -19,7 +19,7 @@ exclude = [
 resolver = "2"
 
 [workspace.package]
-version = "0.2.44"
+version = "0.2.45"
 
 [workspace.lints.rust]
 unused_variables = "allow"

@@ -60,17 +60,30 @@ pub async fn create(
             "local_raid must be 'stripe', 'mirror', or 'stripe_mirror'".into()));
     }
 
-    // Validate that at least one disk is claimed (backends exist)
+    // Validate claimed disks and RAID requirements
     {
         let db = state.db.lock().unwrap();
-        let backend_count: i64 = db.query_row(
-            "SELECT COUNT(*) FROM backends WHERE node_id = ?1 AND status = 'online'",
+        let claimed_count: i64 = db.query_row(
+            "SELECT COUNT(*) FROM backends WHERE node_id = ?1 AND status = 'online' AND claimed_disk_id != ''",
             rusqlite::params![&state.node_id], |row| row.get(0),
         ).unwrap_or(0);
 
-        if backend_count == 0 {
+        if claimed_count == 0 {
             return Err((StatusCode::BAD_REQUEST,
                 "No disks claimed. Claim at least one disk before creating a volume.".into()));
+        }
+
+        // RAID-specific disk count requirements
+        let min_disks: i64 = match body.local_raid.as_str() {
+            "mirror" => 2,
+            "stripe_mirror" => 4,
+            _ => 1, // stripe needs at least 1
+        };
+
+        if claimed_count < min_disks {
+            return Err((StatusCode::BAD_REQUEST,
+                format!("{} RAID requires at least {} claimed disks, but only {} available.",
+                    body.local_raid, min_disks, claimed_count)));
         }
     }
 
@@ -95,17 +108,14 @@ pub async fn create(
     let id = Uuid::new_v4().to_string();
     let db = state.db.lock().unwrap();
 
-    // Check available capacity on local backends
-    let available_bytes: u64 = db.query_row(
-        "SELECT COALESCE(SUM(free_bytes), 0) FROM backends WHERE node_id = ?1 AND status = 'online'",
-        rusqlite::params![&state.node_id], |row| row.get(0),
-    ).unwrap_or(0);
+    // Check available capacity on local claimed disks (RAID-corrected)
+    let (usable_total, usable_free) = usable_capacity_for_raid(&db, &state.node_id, &body.local_raid);
 
-    // Each node needs to store at least max_size_bytes (before replication overhead)
-    if available_bytes < body.max_size_bytes {
+    if usable_free < body.max_size_bytes {
         return Err((StatusCode::BAD_REQUEST,
-            format!("Not enough local storage. Volume needs {} but only {} available.",
-                format_size(body.max_size_bytes), format_size(available_bytes))));
+            format!("Not enough storage. Volume needs {} but only {} usable ({} RAID, {} claimed disks).",
+                format_size(body.max_size_bytes), format_size(usable_free),
+                body.local_raid, format_size(usable_total))));
     }
 
     db.execute(
@@ -127,6 +137,36 @@ pub async fn create(
         body.name, id, body.ftt, body.local_raid, body.chunk_size_bytes / (1024 * 1024));
 
     drop(db);
+
+    // Mount FUSE for the new volume
+    {
+        let rt = tokio::runtime::Handle::current();
+        let state_clone = Arc::clone(&state);
+        let vol_id = id.clone();
+        let vol_name = body.name.clone();
+
+        let allow_other = std::fs::read_to_string("/etc/fuse.conf")
+            .map(|c| c.lines().any(|l| l.trim() == "user_allow_other" && !l.starts_with('#')))
+            .unwrap_or(false) || unsafe { libc::getuid() } == 0;
+
+        let mount_path = fuse_path.clone();
+        std::thread::spawn(move || {
+            let fs_name = format!("coresan:{}", vol_name);
+            let mut options = vec![fuser::MountOption::FSName(fs_name)];
+            if allow_other {
+                options.push(fuser::MountOption::AllowOther);
+                options.push(fuser::MountOption::AutoUnmount);
+            }
+            match fuser::mount2(
+                crate::engine::fuse_mount::CoreSanFS::new(state_clone, vol_id, rt),
+                &mount_path, &options,
+            ) {
+                Ok(_) => tracing::info!("FUSE unmounted: {}", mount_path.display()),
+                Err(e) => tracing::error!("FUSE mount failed for {}: {}", mount_path.display(), e),
+            }
+        });
+        tracing::info!("FUSE mounted: /vmm/san/{}", body.name);
+    }
 
     // Sync volume to all peers so they mount it too
     let vol_json = serde_json::json!({
@@ -170,17 +210,8 @@ pub async fn list(
 ) -> Json<Vec<VolumeResponse>> {
     let db = state.db.lock().unwrap();
 
-    // Pool-wide capacity (shared across all volumes on this node)
-    let total_bytes: u64 = db.query_row(
-        "SELECT COALESCE(SUM(total_bytes), 0) FROM backends WHERE status = 'online'",
-        [], |row| row.get(0),
-    ).unwrap_or(0);
-    let free_bytes: u64 = db.query_row(
-        "SELECT COALESCE(SUM(free_bytes), 0) FROM backends WHERE status = 'online'",
-        [], |row| row.get(0),
-    ).unwrap_or(0);
     let backend_count: u32 = db.query_row(
-        "SELECT COUNT(*) FROM backends WHERE status = 'online'",
+        "SELECT COUNT(*) FROM backends WHERE status = 'online' AND claimed_disk_id != ''",
         [], |row| row.get(0),
     ).unwrap_or(0);
 
@@ -190,11 +221,14 @@ pub async fn list(
     ).unwrap();
 
     let volumes = stmt.query_map([], |row| {
+        let local_raid: String = row.get(3)?;
+        // Calculate RAID-corrected capacity from claimed disks only
+        let (total_bytes, free_bytes) = usable_capacity_for_raid_static(&db, &local_raid);
         Ok(VolumeResponse {
             id: row.get(0)?,
             name: row.get(1)?,
             ftt: row.get(2)?,
-            local_raid: row.get(3)?,
+            local_raid,
             chunk_size_bytes: row.get(4)?,
             status: row.get(5)?,
             created_at: row.get(6)?,
@@ -440,5 +474,61 @@ fn format_size(bytes: u64) -> String {
         format!("{:.1} GB", bytes as f64 / GB as f64)
     } else {
         format!("{:.0} MB", bytes as f64 / MB as f64)
+    }
+}
+
+/// Calculate usable capacity based on RAID policy, only from claimed disks.
+/// Used by volume create (validation), volume list (display), and allocate-disk (pre-check).
+fn usable_capacity_for_raid(db: &rusqlite::Connection, node_id: &str, local_raid: &str) -> (u64, u64) {
+    let backends: Vec<(u64, u64)> = {
+        let mut stmt = db.prepare(
+            "SELECT total_bytes, free_bytes FROM backends
+             WHERE node_id = ?1 AND status = 'online' AND claimed_disk_id != ''
+             ORDER BY total_bytes"
+        ).unwrap();
+        stmt.query_map(rusqlite::params![node_id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap().filter_map(|r| r.ok()).collect()
+    };
+    compute_raid_capacity(&backends, local_raid)
+}
+
+/// Same as above but without node_id filter — for use inside query_map closures
+/// where the connection is already borrowed.
+fn usable_capacity_for_raid_static(db: &rusqlite::Connection, local_raid: &str) -> (u64, u64) {
+    let backends: Vec<(u64, u64)> = {
+        let mut stmt = db.prepare(
+            "SELECT total_bytes, free_bytes FROM backends
+             WHERE status = 'online' AND claimed_disk_id != ''
+             ORDER BY total_bytes"
+        ).unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap().filter_map(|r| r.ok()).collect()
+    };
+    compute_raid_capacity(&backends, local_raid)
+}
+
+fn compute_raid_capacity(backends: &[(u64, u64)], local_raid: &str) -> (u64, u64) {
+    if backends.is_empty() {
+        return (0, 0);
+    }
+    match local_raid {
+        "mirror" => {
+            // Mirror: usable = smallest disk (data mirrored to all)
+            let min_total = backends.iter().map(|(t, _)| *t).min().unwrap_or(0);
+            let min_free = backends.iter().map(|(_, f)| *f).min().unwrap_or(0);
+            (min_total, min_free)
+        }
+        "stripe_mirror" => {
+            // Stripe-mirror: usable = sum / 2
+            let sum_total: u64 = backends.iter().map(|(t, _)| *t).sum();
+            let sum_free: u64 = backends.iter().map(|(_, f)| *f).sum();
+            (sum_total / 2, sum_free / 2)
+        }
+        _ => {
+            // Stripe: usable = sum of all
+            let sum_total: u64 = backends.iter().map(|(t, _)| *t).sum();
+            let sum_free: u64 = backends.iter().map(|(_, f)| *f).sum();
+            (sum_total, sum_free)
+        }
     }
 }

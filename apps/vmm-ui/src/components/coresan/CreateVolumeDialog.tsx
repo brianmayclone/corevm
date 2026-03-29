@@ -33,10 +33,19 @@ export default function CreateVolumeDialog({
   newVolName, setNewVolName, newVolSizeGb, setNewVolSizeGb, newVolFtt, setNewVolFtt, newVolRaid, setNewVolRaid,
   newVolSelectedHosts, setNewVolSelectedHosts, newVolError, volumes,
 }: Props) {
-  const totalCapacity = volumes.reduce((sum, v) => sum + v.total_bytes, 0)
-  const totalUsed = volumes.reduce((sum, v) => sum + (v.total_bytes - v.free_bytes), 0)
+  // Use first volume's total/free as baseline (all volumes share the same disk pool per node)
+  const diskTotal = volumes.length > 0 ? volumes[0].total_bytes : 0
+  const diskFree = volumes.length > 0 ? volumes[0].free_bytes : 0
   const totalAllocated = volumes.reduce((sum, v) => sum + (v.max_size_bytes || 0), 0)
-  const freeAfterAlloc = totalCapacity > 0 ? Math.max(0, totalCapacity - totalAllocated) : 0
+  // Available = smaller of: physical free space, or (total - already allocated)
+  const freeAfterAlloc = diskTotal > 0 ? Math.max(0, Math.min(diskFree, diskTotal - totalAllocated)) : 0
+  const maxSizeGb = Math.floor(freeAfterAlloc / (1024 * 1024 * 1024))
+
+  // RAID disk requirements
+  const minDisks: Record<string, number> = { stripe: 1, mirror: 2, stripe_mirror: 4 }
+  const claimedDisks = status?.claimed_disks || 0
+  const raidMinDisks = minDisks[newVolRaid] || 1
+  const raidDiskOk = claimedDisks >= raidMinDisks
   return (
     <Dialog open={open} title="Create Volume" onClose={onClose} width="max-w-xl">
       <div className="space-y-4">
@@ -48,15 +57,34 @@ export default function CreateVolumeDialog({
         <FormField label="Volume Name">
           <TextInput value={newVolName} onChange={(e) => setNewVolName(e.target.value)} placeholder="e.g. pool-a" />
         </FormField>
-        <FormField label="Maximum Size (GB)">
-          <input type="number" min={1} value={newVolSizeGb}
-            onChange={(e) => setNewVolSizeGb(Math.max(1, Number(e.target.value)))}
+        <FormField label={`Maximum Size (GB) — up to ${maxSizeGb} GB available`}>
+          <input type="number" min={1} max={maxSizeGb || 999999} value={newVolSizeGb}
+            onChange={(e) => setNewVolSizeGb(Math.max(1, Math.min(maxSizeGb || 999999, Number(e.target.value))))}
             className="w-full px-3 py-2 rounded-lg bg-vmm-input border border-vmm-border text-vmm-text text-sm
               focus:outline-none focus:ring-1 focus:ring-vmm-accent focus:border-vmm-accent" />
-          <p className="text-[10px] text-vmm-text-muted mt-1">
-            Available: {formatBytes(freeAfterAlloc)} of {formatBytes(totalCapacity)} total
-            {totalAllocated > 0 && ` (${formatBytes(totalAllocated)} allocated to existing volumes)`}
-          </p>
+          {/* Capacity bar */}
+          {diskTotal > 0 && (
+            <div className="mt-2">
+              <div className="flex justify-between text-[10px] text-vmm-text-muted mb-1">
+                <span>Disk pool: {formatBytes(diskTotal)} total, {formatBytes(diskFree)} free</span>
+                {totalAllocated > 0 && <span>{formatBytes(totalAllocated)} allocated</span>}
+              </div>
+              <div className="w-full h-2 bg-vmm-border rounded-full overflow-hidden flex">
+                <div className="bg-vmm-accent h-full" style={{ width: `${Math.round(((diskTotal - diskFree) / diskTotal) * 100)}%` }} />
+                <div className="bg-vmm-warning/50 h-full" style={{ width: `${Math.round((newVolSizeGb * 1024 * 1024 * 1024 / diskTotal) * 100)}%` }} />
+              </div>
+              <div className="flex gap-4 mt-1 text-[9px] text-vmm-text-muted">
+                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-vmm-accent" /> Used</span>
+                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-vmm-warning/50" /> This volume</span>
+                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-vmm-border" /> Free</span>
+              </div>
+            </div>
+          )}
+          {newVolSizeGb > maxSizeGb && maxSizeGb > 0 && (
+            <p className="text-[10px] text-vmm-danger mt-1 font-medium">
+              Exceeds available space! Maximum is {maxSizeGb} GB.
+            </p>
+          )}
         </FormField>
         <FormField label="Failures To Tolerate (FTT)">
           <Select value={String(newVolFtt)} onChange={(e) => setNewVolFtt(Number(e.target.value))} options={[
@@ -67,10 +95,16 @@ export default function CreateVolumeDialog({
         </FormField>
         <FormField label="Local RAID (per host)">
           <Select value={newVolRaid} onChange={(e) => setNewVolRaid(e.target.value)} options={[
-            { value: 'stripe', label: 'Stripe (RAID-0) — chunks distributed across local disks' },
-            { value: 'mirror', label: 'Mirror (RAID-1) — every chunk on every local disk' },
-            { value: 'stripe_mirror', label: 'Stripe+Mirror (RAID-10) — striped with local mirror' },
+            { value: 'stripe', label: `Stripe (RAID-0) — 1+ disk${claimedDisks >= 1 ? '' : ' (need to claim disks!)'}` },
+            { value: 'mirror', label: `Mirror (RAID-1) — 2+ disks${claimedDisks >= 2 ? '' : ' (need ' + (2 - claimedDisks) + ' more!)'}` },
+            { value: 'stripe_mirror', label: `Stripe+Mirror (RAID-10) — 4+ disks${claimedDisks >= 4 ? '' : ' (need ' + (4 - claimedDisks) + ' more!)'}` },
           ]} />
+          {!raidDiskOk && (
+            <div className="flex items-center gap-2 mt-1.5 p-2 rounded-lg bg-vmm-danger/10 border border-vmm-danger/30 text-[11px] text-vmm-danger">
+              <AlertTriangle size={14} />
+              {newVolRaid} requires {raidMinDisks} claimed disks, but only {claimedDisks} available. Claim more disks first.
+            </div>
+          )}
         </FormField>
 
         {/* Host Selection */}
@@ -118,14 +152,20 @@ export default function CreateVolumeDialog({
         </div>
 
         <p className="text-[10px] text-vmm-text-muted">
-          Storage will be automatically provisioned at <code className="text-vmm-accent">/vmm/san-data/{newVolName || '<name>'}</code> on each host.
+          FUSE mount at <code className="text-vmm-accent">/vmm/san/{newVolName || '<name>'}</code> on each host.
+          Data distributed across claimed disks with {newVolRaid} RAID.
         </p>
 
         <div className="flex justify-end gap-2 pt-2">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button variant="primary" onClick={onSubmit}
-            disabled={!newVolName.trim() || (newVolFtt > 0 && (1 + newVolSelectedHosts.length) < (newVolFtt + 1))}>
-            Create Volume
+            disabled={
+              !newVolName.trim() ||
+              !raidDiskOk ||
+              (maxSizeGb > 0 && newVolSizeGb > maxSizeGb) ||
+              (newVolFtt > 0 && (1 + newVolSelectedHosts.length) < (newVolFtt + 1))
+            }>
+            Create Volume ({newVolSizeGb} GB, {newVolRaid}, FTT={newVolFtt})
           </Button>
         </div>
       </div>
