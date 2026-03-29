@@ -431,16 +431,19 @@ impl Filesystem for CoreSanFS {
             None => { reply.error(libc::ENOENT); return; }
         };
 
-        // Handle truncate (size change) — update file_map size
+        // Handle truncate/extend (size change via ftruncate) — update file_map size
         if let Some(new_size) = size {
             if !entry.is_dir {
                 let db = self.state.db.lock().unwrap();
-                db.execute(
-                    "UPDATE file_map SET size_bytes = ?1, updated_at = datetime('now')
-                     WHERE volume_id = ?2 AND rel_path = ?3",
-                    rusqlite::params![new_size as i64, &self.volume_id, &entry.rel_path],
-                ).ok();
-                // TODO: truncate/extend chunks if size changed significantly
+                let now = chrono::Utc::now().to_rfc3339();
+                // Use UPSERT — the file_map row may not exist yet if create() hasn't committed
+                log_err!(db.execute(
+                    "INSERT INTO file_map (volume_id, rel_path, size_bytes, version, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, 0, ?4, ?4)
+                     ON CONFLICT(volume_id, rel_path) DO UPDATE SET
+                        size_bytes = ?3, updated_at = ?4",
+                    rusqlite::params![&self.volume_id, &entry.rel_path, new_size as i64, &now],
+                ), "FUSE setattr: update size");
             }
         }
 

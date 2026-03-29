@@ -166,8 +166,6 @@ pub async fn dashboard(
 fn query_volume_summaries(db: &rusqlite::Connection) -> Vec<VolumeStatusSummary> {
     let mut stmt = db.prepare(
         "SELECT v.id, v.name, v.ftt, v.local_raid, v.chunk_size_bytes, v.status,
-                (SELECT COALESCE(SUM(total_bytes), 0) FROM backends WHERE status = 'online') AS total_bytes,
-                (SELECT COALESCE(SUM(free_bytes), 0) FROM backends WHERE status = 'online') AS free_bytes,
                 (SELECT COUNT(*) FROM backends WHERE status = 'online') AS backend_count
          FROM volumes v"
     ).unwrap();
@@ -176,8 +174,13 @@ fn query_volume_summaries(db: &rusqlite::Connection) -> Vec<VolumeStatusSummary>
         let vol_id: String = row.get(0)?;
         let ftt: u32 = row.get(2)?;
         Ok((vol_id, row.get(1)?, ftt, row.get::<_, String>(3)?, row.get::<_, u64>(4)?,
-            row.get::<_, String>(5)?, row.get::<_, u64>(6)?, row.get::<_, u64>(7)?, row.get::<_, u32>(8)?))
-    }).unwrap().filter_map(|r| r.ok()).map(|(vol_id, name, ftt, local_raid, chunk_size, status, total, free, bcount)| {
+            row.get::<_, String>(5)?, row.get::<_, u32>(6)?))
+    }).unwrap().filter_map(|r| r.ok()).map(|(vol_id, name, ftt, local_raid, chunk_size, status, bcount)| {
+        // Calculate usable capacity based on RAID policy
+        // mirror: usable = smallest backend (data mirrored to all)
+        // stripe: usable = sum of all backends (data striped across)
+        // stripe_mirror: usable = sum / 2 (striped across pairs)
+        let (total, free) = query_usable_capacity(db, &local_raid);
         let (total_chunks, synced_chunks, stale_chunks) = query_chunk_counts(db, &vol_id);
         let (protected_files, degraded_files) = query_protection_counts(db, &vol_id, ftt);
         VolumeStatusSummary {
@@ -199,6 +202,42 @@ fn query_volume_summaries(db: &rusqlite::Connection) -> Vec<VolumeStatusSummary>
     }).collect();
 
     volumes
+}
+
+/// Calculate usable capacity based on RAID policy.
+fn query_usable_capacity(db: &rusqlite::Connection, local_raid: &str) -> (u64, u64) {
+    let backends: Vec<(u64, u64)> = {
+        let mut stmt = db.prepare(
+            "SELECT total_bytes, free_bytes FROM backends WHERE status = 'online'"
+        ).unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap().filter_map(|r| r.ok()).collect()
+    };
+
+    if backends.is_empty() {
+        return (0, 0);
+    }
+
+    match local_raid {
+        "mirror" => {
+            // Mirror: usable capacity = smallest backend
+            let min_total = backends.iter().map(|(t, _)| *t).min().unwrap_or(0);
+            let min_free = backends.iter().map(|(_, f)| *f).min().unwrap_or(0);
+            (min_total, min_free)
+        }
+        "stripe_mirror" => {
+            // Stripe-mirror: usable = total sum / 2
+            let sum_total: u64 = backends.iter().map(|(t, _)| *t).sum();
+            let sum_free: u64 = backends.iter().map(|(_, f)| *f).sum();
+            (sum_total / 2, sum_free / 2)
+        }
+        _ => {
+            // Stripe or no RAID: usable = sum of all
+            let sum_total: u64 = backends.iter().map(|(t, _)| *t).sum();
+            let sum_free: u64 = backends.iter().map(|(_, f)| *f).sum();
+            (sum_total, sum_free)
+        }
+    }
 }
 
 fn query_file_sync_counts(db: &rusqlite::Connection, volume_id: &str) -> (u64, u64) {
