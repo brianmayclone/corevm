@@ -53,7 +53,19 @@ export default function StorageCoresan() {
   const [createVolumeOpen, setCreateVolumeOpen] = useState(false)
   const [addHostOpen, setAddHostOpen] = useState(false)
   const [deleteVolume, setDeleteVolume] = useState<CoreSanVolume | null>(null)
+  const [forceDeleteVolume, setForceDeleteVolume] = useState(false)
   const [deleteBackend, setDeleteBackend] = useState<CoreSanBackend | null>(null)
+
+  // Repair
+  const [repairRunning, setRepairRunning] = useState(false)
+  const [repairResult, setRepairResult] = useState<any>(null)
+
+  // Volume health
+  const [volumeHealth, setVolumeHealth] = useState<any>(null)
+  const [healthLoading, setHealthLoading] = useState(false)
+
+  // Remove host from volume
+  const [removeHostNode, setRemoveHostNode] = useState<string>('')
 
   // SMART detail dialog
   const [smartDisk, setSmartDisk] = useState<DiscoveredDisk | null>(null)
@@ -178,9 +190,51 @@ export default function StorageCoresan() {
 
   const handleDeleteVolume = async () => {
     if (!deleteVolume) return
-    await sanFetch(sanApi(`/api/volumes/${deleteVolume.id}`), { method: 'DELETE' })
+    const url = forceDeleteVolume
+      ? sanApi(`/api/volumes/${deleteVolume.id}?force=true`)
+      : sanApi(`/api/volumes/${deleteVolume.id}`)
+    await sanFetch(url, { method: 'DELETE' })
     setDeleteVolume(null)
+    setForceDeleteVolume(false)
     if (selectedVolume === deleteVolume.id) setSelectedVolume('')
+    refresh()
+  }
+
+  const handleRepair = async () => {
+    if (!selectedVolume) return
+    setRepairRunning(true)
+    setRepairResult(null)
+    try {
+      const resp = await sanFetch(sanApi(`/api/volumes/${selectedVolume}/repair`), { method: 'POST' })
+      if (resp.ok) {
+        const data = await resp.json()
+        setRepairResult(data)
+      }
+    } catch { /* ignore */ }
+    setRepairRunning(false)
+    refresh()
+  }
+
+  const loadVolumeHealth = async (volId: string) => {
+    setHealthLoading(true)
+    try {
+      const resp = await sanFetch(sanApi(`/api/volumes/${volId}/health`))
+      if (resp.ok) setVolumeHealth(await resp.json())
+    } catch { /* ignore */ }
+    setHealthLoading(false)
+  }
+
+  const handleRemoveHost = async (nodeId: string) => {
+    if (!selectedVolume) return
+    const resp = await sanFetch(sanApi(`/api/volumes/${selectedVolume}/remove-host`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ node_id: nodeId }),
+    })
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}))
+      alert(data.error || 'Failed to remove host')
+    }
     refresh()
   }
 
@@ -706,6 +760,13 @@ export default function StorageCoresan() {
                 <div className="flex items-center justify-between mb-4">
                   <SectionLabel>{`Volume: ${sel.name}`}</SectionLabel>
                   <div className="flex items-center gap-2">
+                    <Button variant="outline" onClick={() => { loadVolumeHealth(sel.id) }}>
+                      <Activity size={13} /> Health
+                    </Button>
+                    <Button variant="outline" onClick={handleRepair} disabled={repairRunning}>
+                      <RefreshCw size={13} className={repairRunning ? 'animate-spin' : ''} />
+                      {repairRunning ? 'Repairing...' : 'Repair'}
+                    </Button>
                     <Button variant="outline" onClick={() => navigate(`/storage/coresan/volume/${sel.id}/chunks`)}>
                       <Grid3x3 size={13} /> Allocation Details
                     </Button>
@@ -731,6 +792,78 @@ export default function StorageCoresan() {
                   <SpecRow label="Backends" value={`${sel.backend_count}`} icon={<HardDrive size={14} />} />
                 </div>
               </Card>
+
+              {/* Repair Result */}
+              {repairResult && (
+                <Card>
+                  <SectionLabel>Repair Result</SectionLabel>
+                  <div className="mt-2 text-sm space-y-1">
+                    <div className="text-vmm-success">Repaired: {repairResult.repaired} chunks</div>
+                    {repairResult.remaining > 0 && (
+                      <div className="text-vmm-warning">Remaining: {repairResult.remaining} under-replicated</div>
+                    )}
+                    {repairResult.errors?.length > 0 && (
+                      <div className="text-vmm-danger">Errors: {repairResult.errors.length}</div>
+                    )}
+                  </div>
+                </Card>
+              )}
+
+              {/* Volume Health */}
+              {volumeHealth && (
+                <Card>
+                  <div className="flex items-center justify-between mb-3">
+                    <SectionLabel>Volume Health</SectionLabel>
+                    <button onClick={() => setVolumeHealth(null)} className="text-xs text-vmm-text-muted hover:text-vmm-text cursor-pointer">Close</button>
+                  </div>
+                  {healthLoading ? (
+                    <div className="text-sm text-vmm-text-muted">Analyzing...</div>
+                  ) : (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-3">
+                        <Badge label={volumeHealth.status} color={
+                          volumeHealth.status === 'healthy' ? 'bg-vmm-success/20 text-vmm-success' :
+                          volumeHealth.status === 'degraded' ? 'bg-vmm-warning/20 text-vmm-warning' :
+                          'bg-vmm-danger/20 text-vmm-danger'
+                        } />
+                      </div>
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                        <div><span className="text-vmm-text-muted">Files:</span> {volumeHealth.summary?.total_files || 0}</div>
+                        <div className="text-vmm-success">Protected: {volumeHealth.summary?.protected_files || 0}</div>
+                        <div className="text-vmm-warning">Degraded: {volumeHealth.summary?.degraded_files || 0}</div>
+                        <div className="text-vmm-danger">Lost chunks: {volumeHealth.summary?.error_chunks || 0}</div>
+                      </div>
+                      {volumeHealth.affected_files?.length > 0 && (
+                        <div>
+                          <div className="text-xs font-semibold text-vmm-text-muted uppercase tracking-wider mb-2">Affected Files</div>
+                          <div className="space-y-1 max-h-40 overflow-y-auto">
+                            {volumeHealth.affected_files.map((f: any, i: number) => (
+                              <div key={i} className="flex items-center justify-between text-sm p-2 rounded bg-vmm-bg">
+                                <span className="truncate">{f.rel_path}</span>
+                                <Badge label={f.protection_status} color={
+                                  f.protection_status === 'degraded' ? 'bg-vmm-warning/20 text-vmm-warning' : 'bg-vmm-danger/20 text-vmm-danger'
+                                } />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {volumeHealth.integrity_failures?.length > 0 && (
+                        <div>
+                          <div className="text-xs font-semibold text-vmm-danger uppercase tracking-wider mb-2">Integrity Failures</div>
+                          <div className="space-y-1 max-h-32 overflow-y-auto text-xs">
+                            {volumeHealth.integrity_failures.map((f: any, i: number) => (
+                              <div key={i} className="p-2 rounded bg-vmm-danger/5 text-vmm-danger">
+                                {f.rel_path} — chunk {f.chunk_index} — {f.checked_at}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </Card>
+              )}
 
               {/* Backends grouped by node — collapsible */}
               <Card>
@@ -889,11 +1022,27 @@ export default function StorageCoresan() {
       <ConfirmDialog
         open={!!deleteVolume}
         title="Delete Volume"
-        message={deleteVolume ? `Are you sure you want to delete volume "${deleteVolume.name}"? This cannot be undone. The volume must be empty.` : ''}
-        confirmLabel="Delete"
+        message={deleteVolume ? (
+          <div className="space-y-3">
+            <p>Are you sure you want to delete volume "{deleteVolume.name}"?</p>
+            <label className="flex items-center gap-2 text-sm cursor-pointer">
+              <input
+                type="checkbox"
+                checked={forceDeleteVolume}
+                onChange={e => setForceDeleteVolume(e.target.checked)}
+                className="rounded"
+              />
+              <span className="text-vmm-danger font-medium">Force delete — remove all files and chunks</span>
+            </label>
+            {!forceDeleteVolume && (
+              <p className="text-xs text-vmm-text-muted">Without force delete, the volume must be empty.</p>
+            )}
+          </div>
+        ) as any : ''}
+        confirmLabel={forceDeleteVolume ? 'Force Delete' : 'Delete'}
         danger
         onConfirm={handleDeleteVolume}
-        onCancel={() => setDeleteVolume(null)}
+        onCancel={() => { setDeleteVolume(null); setForceDeleteVolume(false) }}
       />
 
       <ConfirmDialog

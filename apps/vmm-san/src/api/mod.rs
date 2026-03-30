@@ -33,6 +33,9 @@ pub fn router() -> Router<Arc<CoreSanState>> {
         .route("/api/volumes", get(volumes::list).post(volumes::create))
         .route("/api/volumes/sync", post(volumes::sync))
         .route("/api/volumes/{id}", get(volumes::get).put(volumes::update).delete(volumes::delete))
+        .route("/api/volumes/{id}/health", get(volumes::health))
+        .route("/api/volumes/{id}/repair", post(volumes::trigger_repair))
+        .route("/api/volumes/{id}/remove-host", post(volumes::remove_host_from_volume))
 
         // ── Backends (mountpoints per volume) ─────────────
         .route("/api/volumes/{id}/backends", get(backends::list).post(backends::add))

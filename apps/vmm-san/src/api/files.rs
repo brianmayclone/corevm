@@ -668,15 +668,27 @@ pub async fn chunk_map(
     let chunks: Vec<ChunkMapEntry> = {
         let mut stmt = db.prepare(
             "SELECT fc.chunk_index, fc.file_id, fm.rel_path, fc.size_bytes,
-                    COALESCE(fc.sha256, ''), cr.state,
-                    cr.backend_id, COALESCE(b.path, 'remote'), cr.node_id,
-                    COALESCE(p.hostname, cr.node_id)
+                    COALESCE(fc.sha256, ''),
+                    -- pick best state per (chunk, node): synced > syncing > stale > error
+                    CASE MIN(CASE cr.state
+                        WHEN 'synced'  THEN 1
+                        WHEN 'syncing' THEN 2
+                        WHEN 'stale'   THEN 3
+                        ELSE 4 END)
+                      WHEN 1 THEN 'synced'
+                      WHEN 2 THEN 'syncing'
+                      WHEN 3 THEN 'stale'
+                      ELSE 'error' END AS best_state,
+                    MIN(cr.backend_id), COALESCE(MIN(b.path), 'remote'),
+                    cr.node_id,
+                    COALESCE(MIN(p.hostname), cr.node_id)
              FROM chunk_replicas cr
              JOIN file_chunks fc ON fc.id = cr.chunk_id
              JOIN file_map fm ON fm.id = fc.file_id
              LEFT JOIN backends b ON b.id = cr.backend_id
              LEFT JOIN peers p ON p.node_id = cr.node_id
              WHERE fm.volume_id = ?1
+             GROUP BY cr.chunk_id, cr.node_id
              ORDER BY fc.file_id, fc.chunk_index, cr.node_id"
         ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
         let rows = stmt.query_map(rusqlite::params![&volume_id], |row| {
