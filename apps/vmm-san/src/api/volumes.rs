@@ -466,6 +466,11 @@ pub async fn sync(
         }
     });
 
+    // Start disk server for this synced volume (direct VM I/O via UDS)
+    crate::engine::disk_server::spawn_volume_listener(
+        Arc::clone(&state), body.id.clone(), body.name.clone(),
+    );
+
     tracing::info!("Synced volume '{}' from peer (id={}, ftt={}, raid={})",
         body.name, body.id, body.ftt, body.local_raid);
 
