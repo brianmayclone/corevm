@@ -176,7 +176,29 @@ pub fn start_vm(config: &VmConfig, bios_paths: &[std::path::PathBuf]) -> Result<
 
     // Attach ISO (port 1 = CDROM)
     if !config.iso_image.is_empty() {
-        setup::attach_image_to_ahci(handle, &config.iso_image, 1, true)?;
+        if config.iso_image.starts_with("/vmm/san/") {
+            // SAN ISO — open a read-only UDS connection for reliable I/O (bypasses FUSE)
+            let parts: Vec<&str> = config.iso_image.strip_prefix("/vmm/san/").unwrap().splitn(2, '/').collect();
+            let iso_via_uds = if parts.len() == 2 {
+                let volume_name = parts[0];
+                let rel_path = parts[1];
+                resolve_san_volume_id(volume_name).and_then(|vid| {
+                    libcorevm::san_disk::SanDiskConnection::open(&vid, rel_path).ok()
+                })
+            } else { None };
+
+            if let Some(conn) = iso_via_uds {
+                let size = conn.disk_size;
+                tracing::info!("SAN ISO attached: {} ({}B) via UDS on port 1", config.iso_image, size);
+                setup::attach_san_cdrom_to_ahci(handle, 1, size, Box::new(conn))?;
+            } else {
+                // Fallback to FUSE fd
+                tracing::warn!("SAN ISO {} — UDS failed, falling back to FUSE fd", config.iso_image);
+                setup::attach_image_to_ahci(handle, &config.iso_image, 1, true)?;
+            }
+        } else {
+            setup::attach_image_to_ahci(handle, &config.iso_image, 1, true)?;
+        }
         if is_windows {
             let _ = setup::attach_cdrom_to_ide(handle, &config.iso_image);
         }

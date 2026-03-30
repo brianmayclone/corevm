@@ -574,7 +574,17 @@ pub fn attach_san_disk_to_ahci(
     // Access the AHCI controller through the VM handle.
     // This uses the same pattern as corevm_ahci_attach_disk in ffi.rs.
     crate::ffi::ahci_attach_san_backend(handle, port as usize, size, backend)
+}
 
+/// Attach a SAN-backed CDROM (ATAPI) to an AHCI port.
+#[cfg(unix)]
+pub fn attach_san_cdrom_to_ahci(
+    handle: u64,
+    port: u32,
+    size: u64,
+    backend: Box<dyn crate::devices::ahci::DiskIoBackend>,
+) -> Result<(), String> {
+    crate::ffi::ahci_attach_san_cdrom(handle, port as usize, size, backend)
 }
 
 #[cfg(unix)]

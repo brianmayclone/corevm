@@ -746,17 +746,31 @@ impl Ahci {
     /// Attach a SAN disk backend to a port. The backend handles all I/O.
     #[cfg(feature = "std")]
     pub fn attach_san_backend(&mut self, port: usize, size: u64, backend: alloc::boxed::Box<dyn DiskIoBackend>) {
+        self.attach_san_backend_typed(port, size, backend, AhciDriveKind::AtaDisk);
+    }
+
+    /// Attach a SAN CDROM backend to a port. The backend handles all I/O.
+    #[cfg(feature = "std")]
+    pub fn attach_san_cdrom(&mut self, port: usize, size: u64, backend: alloc::boxed::Box<dyn DiskIoBackend>) {
+        self.attach_san_backend_typed(port, size, backend, AhciDriveKind::AtapiCdrom);
+    }
+
+    #[cfg(feature = "std")]
+    fn attach_san_backend_typed(&mut self, port: usize, size: u64, backend: alloc::boxed::Box<dyn DiskIoBackend>, kind: AhciDriveKind) {
         if port >= self.ports.len() { return; }
         let p = &mut self.ports[port];
         p.drive.disk_fd = -1;
         p.drive.total_bytes = size;
         p.drive.present = true;
-        p.drive.kind = AhciDriveKind::AtaDisk;
+        p.drive.kind = kind;
         p.drive.io_backend = Some(backend);
-        p.sig = 0x0000_0101;
+        p.sig = match kind {
+            AhciDriveKind::AtaDisk => 0x0000_0101,
+            AhciDriveKind::AtapiCdrom => 0xEB14_0101,
+        };
         self.pi |= 1 << port;
-        eprintln!("[ahci] attach_san_backend: port={} size={} io_backend={} fd={} present={}",
-            port, size, p.drive.io_backend.is_some(), p.drive.disk_fd, p.drive.present);
+        eprintln!("[ahci] attach_san_backend: port={} kind={:?} size={} io_backend={} fd={} present={}",
+            port, kind, size, p.drive.io_backend.is_some(), p.drive.disk_fd, p.drive.present);
     }
 
     /// Drain pending I/O requests. Caller executes them outside AHCI_LOCK.
@@ -1402,7 +1416,7 @@ fn process_atapi(port: &mut AhciPort, dma: &GuestDma, acmd: &[u8], prdt_base: u6
             let cnt = (u16::from_be_bytes([acmd[7], acmd[8]]) as u32).min(256);
             let ss = port.drive.sector_size();
             let total = cnt as usize * ss;
-            if port.drive.disk_fd >= 0 {
+            if port.drive.has_deferred_io() {
                 return Some(DeferredIo {
                     fd: port.drive.disk_fd, disk_offset: lba * ss as u64,
                     buf: vec![0u8; total], is_write: false, is_flush: false,
@@ -1541,7 +1555,7 @@ fn process_atapi(port: &mut AhciPort, dma: &GuestDma, acmd: &[u8], prdt_base: u6
             let cnt = u32::from_be_bytes([acmd[6], acmd[7], acmd[8], acmd[9]]).min(256);
             let ss = port.drive.sector_size();
             let total = cnt as usize * ss;
-            if port.drive.disk_fd >= 0 {
+            if port.drive.has_deferred_io() {
                 return Some(DeferredIo {
                     fd: port.drive.disk_fd, disk_offset: lba * ss as u64,
                     buf: vec![0u8; total], is_write: false, is_flush: false,

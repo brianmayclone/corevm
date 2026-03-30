@@ -2557,6 +2557,18 @@ pub fn ahci_attach_san_backend(
     Ok(())
 }
 
+/// Attach a SAN CDROM backend to an AHCI port (read-only, ATAPI).
+#[cfg(feature = "std")]
+pub fn ahci_attach_san_cdrom(
+    handle: u64, port: usize, size: u64,
+    backend: alloc::boxed::Box<dyn crate::devices::ahci::DiskIoBackend>,
+) -> Result<(), String> {
+    let vm = get_vm(handle).ok_or("Invalid VM handle")?;
+    let ahci = vm.ahci().ok_or("AHCI not initialized")?;
+    ahci.attach_san_cdrom(port, size, backend);
+    Ok(())
+}
+
 /// Send input bytes to the serial port (COM1).
 #[no_mangle]
 pub extern "C" fn corevm_serial_send_input(handle: u64, data: *const u8, len: u32) -> i32 {
