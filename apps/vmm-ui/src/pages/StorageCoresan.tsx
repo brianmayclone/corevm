@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Boxes, Plus, Trash2, RefreshCw, Shield, Zap, WifiOff, HardDrive, Activity, Server, AlertTriangle, Disc, FolderOpen, Grid3x3 } from 'lucide-react'
+import { Boxes, Plus, Trash2, RefreshCw, Shield, Zap, WifiOff, HardDrive, Activity, Server, AlertTriangle, Disc, FolderOpen, Grid3x3, Pencil, X } from 'lucide-react'
 import type { CoreSanVolume, CoreSanBackend, CoreSanPeer, CoreSanStatus, CoreSanBenchmarkMatrix, DiscoveredDisk } from '../api/types'
 import { useClusterStore } from '../stores/clusterStore'
 import Card from '../components/Card'
@@ -69,6 +69,13 @@ export default function StorageCoresan() {
 
   // SMART detail dialog
   const [smartDisk, setSmartDisk] = useState<DiscoveredDisk | null>(null)
+
+  // Edit volume dialog
+  const [editVolumeOpen, setEditVolumeOpen] = useState(false)
+  const [editFtt, setEditFtt] = useState(0)
+  const [editRaid, setEditRaid] = useState('stripe')
+  const [editError, setEditError] = useState('')
+  const [editSaving, setEditSaving] = useState(false)
 
   // Tab navigation
   const [activeTab, setActiveTab] = useState<'volumes' | 'disks' | 'performance'>('volumes')
@@ -236,6 +243,38 @@ export default function StorageCoresan() {
       alert(data.error || 'Failed to remove host')
     }
     refresh()
+  }
+
+  const openEditVolume = () => {
+    if (!sel) return
+    setEditFtt(sel.ftt)
+    setEditRaid(sel.local_raid)
+    setEditError('')
+    setEditVolumeOpen(true)
+  }
+
+  const handleEditVolume = async () => {
+    if (!sel) return
+    setEditSaving(true)
+    setEditError('')
+    try {
+      const resp = await sanFetch(sanApi(`/api/volumes/${sel.id}`), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ftt: editFtt, local_raid: editRaid }),
+      })
+      if (!resp.ok) {
+        const data = await resp.text()
+        setEditError(data || 'Failed to update volume')
+        setEditSaving(false)
+        return
+      }
+      setEditVolumeOpen(false)
+      refresh()
+    } catch (e: any) {
+      setEditError(e.message || 'Failed to update volume')
+    }
+    setEditSaving(false)
   }
 
   const handleDeleteBackend = async () => {
@@ -758,15 +797,22 @@ export default function StorageCoresan() {
             <>
               <Card>
                 <div className="flex items-center justify-between mb-4">
-                  <SectionLabel>{`Volume: ${sel.name}`}</SectionLabel>
+                  <div className="flex items-center gap-2">
+                    <SectionLabel>{`Volume: ${sel.name}`}</SectionLabel>
+                    <button onClick={openEditVolume} className="p-1 rounded hover:bg-vmm-accent/10 text-vmm-text-muted hover:text-vmm-accent transition-colors cursor-pointer" title="Edit Volume">
+                      <Pencil size={13} />
+                    </button>
+                  </div>
                   <div className="flex items-center gap-2">
                     <Button variant="outline" onClick={() => { loadVolumeHealth(sel.id) }}>
                       <Activity size={13} /> Health
                     </Button>
-                    <Button variant="outline" onClick={handleRepair} disabled={repairRunning}>
-                      <RefreshCw size={13} className={repairRunning ? 'animate-spin' : ''} />
-                      {repairRunning ? 'Repairing...' : 'Repair'}
-                    </Button>
+                    {sel.status === 'degraded' && (
+                      <Button variant="outline" onClick={handleRepair} disabled={repairRunning}>
+                        <RefreshCw size={13} className={repairRunning ? 'animate-spin' : ''} />
+                        {repairRunning ? 'Repairing...' : 'Repair'}
+                      </Button>
+                    )}
                     <Button variant="outline" onClick={() => navigate(`/storage/coresan/volume/${sel.id}/chunks`)}>
                       <Grid3x3 size={13} /> Allocation Details
                     </Button>
@@ -899,6 +945,14 @@ export default function StorageCoresan() {
                                 <Server size={12} className={isLocal || peer?.status === 'online' ? 'text-vmm-success' : 'text-vmm-danger'} />
                                 <span className="text-xs font-semibold text-vmm-text-muted uppercase tracking-wider">{nodeName}</span>
                                 {isLocal && <span className="text-[9px] text-vmm-text-muted">(local)</span>}
+                                {Object.keys(backendsByNode).length >= 2 && (
+                                  <button
+                                    onClick={() => { if (confirm(`Remove host "${nodeName}" from this volume? Its backends will be drained.`)) handleRemoveHost(nodeId) }}
+                                    className="p-0.5 rounded hover:bg-vmm-danger/10 text-vmm-text-muted hover:text-vmm-danger transition-colors cursor-pointer ml-auto"
+                                    title="Remove Host">
+                                    <X size={12} />
+                                  </button>
+                                )}
                               </div>
                               {nodeBackends.map(b => {
                                 const bUsed = b.total_bytes - b.free_bytes
@@ -914,6 +968,12 @@ export default function StorageCoresan() {
                                       <ProgressBar value={bPct} detail={`${formatBytes(bUsed)} / ${formatBytes(b.total_bytes)}`}
                                         color={bPct > 80 ? 'bg-vmm-danger' : 'bg-vmm-accent'} />
                                     </div>
+                                    <button
+                                      onClick={() => setDeleteBackend(b)}
+                                      className="p-1.5 rounded hover:bg-vmm-danger/10 text-vmm-text-muted hover:text-vmm-danger transition-colors cursor-pointer shrink-0"
+                                      title="Remove Backend">
+                                      <Trash2 size={12} />
+                                    </button>
                                   </div>
                                 )
                               })}
@@ -1099,6 +1159,53 @@ export default function StorageCoresan() {
         hostName={smartDisk?._host_name}
         sanAddress={smartDisk?._san_address}
       />
+
+      {/* Edit Volume Dialog */}
+      {editVolumeOpen && sel && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setEditVolumeOpen(false)}>
+          <div className="bg-vmm-card border border-vmm-border rounded-xl shadow-xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-base font-bold text-vmm-text">Edit Volume: {sel.name}</h3>
+              <button onClick={() => setEditVolumeOpen(false)} className="p-1 rounded hover:bg-vmm-bg text-vmm-text-muted cursor-pointer">
+                <X size={16} />
+              </button>
+            </div>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-vmm-text-muted mb-1">Failure Tolerance (FTT)</label>
+                <select
+                  value={editFtt}
+                  onChange={e => setEditFtt(Number(e.target.value))}
+                  className="w-full px-3 py-2 text-sm rounded-lg bg-vmm-bg border border-vmm-border text-vmm-text focus:outline-none focus:ring-1 focus:ring-vmm-accent">
+                  <option value={0}>FTT=0 — No redundancy</option>
+                  <option value={1}>FTT=1 — Tolerate 1 failure</option>
+                  <option value={2}>FTT=2 — Tolerate 2 failures</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-vmm-text-muted mb-1">RAID Mode</label>
+                <select
+                  value={editRaid}
+                  onChange={e => setEditRaid(e.target.value)}
+                  className="w-full px-3 py-2 text-sm rounded-lg bg-vmm-bg border border-vmm-border text-vmm-text focus:outline-none focus:ring-1 focus:ring-vmm-accent">
+                  <option value="stripe">Stripe — Distribute across disks</option>
+                  <option value="mirror">Mirror — Mirror across disks</option>
+                  <option value="stripe_mirror">Stripe+Mirror — Striped mirrors</option>
+                </select>
+              </div>
+              {editError && (
+                <div className="text-sm text-vmm-danger bg-vmm-danger/10 border border-vmm-danger/30 rounded-lg px-3 py-2">{editError}</div>
+              )}
+              <div className="flex justify-end gap-2 pt-2">
+                <Button variant="ghost" onClick={() => setEditVolumeOpen(false)}>Cancel</Button>
+                <Button variant="primary" onClick={handleEditVolume} disabled={editSaving}>
+                  {editSaving ? 'Saving...' : 'Save Changes'}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

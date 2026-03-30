@@ -167,12 +167,13 @@ pub async fn start(auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_i
     tracing::info!("VM {} started", vm_id);
     crate::services::event_reporter::vm_event(&state, "info", &format!("VM {} started", vm_id), &vm_id);
 
-    // Spawn a watcher task that detects when the VM thread exits
-    // and updates the state back to Stopped.
+    // Spawn a watcher task that detects when the VM thread exits,
+    // waits for the VM thread to finish cleanup (flush caches + corevm_destroy),
+    // and then updates the state back to Stopped.
     let watcher_state = state.clone();
     let watcher_vm_id = vm_id.clone();
     tokio::spawn(async move {
-        // Poll the control handle until the VM exits
+        // Poll the control handle until the VM signals exit
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             if control_for_watcher.is_exited() {
@@ -184,6 +185,26 @@ pub async fn start(auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_i
         tracing::info!("VM {} exited: {}", watcher_vm_id, reason_str);
         crate::services::event_reporter::vm_event(&watcher_state, "info", &format!("VM {} stopped ({})", watcher_vm_id, reason_str), &watcher_vm_id);
 
+        // Extract the VM thread JoinHandle so we can wait for the thread to
+        // finish its cleanup (corevm_ahci_flush_caches + corevm_destroy).
+        let vm_thread = watcher_state.vms.get_mut(&watcher_vm_id)
+            .and_then(|mut vm| vm.vm_thread.take());
+
+        if let Some(thread) = vm_thread {
+            // Join the VM thread on a blocking task to avoid blocking the async runtime.
+            // The thread should be finishing up (flush + destroy) since exited is set.
+            let join_result = tokio::task::spawn_blocking(move || {
+                thread.join()
+            }).await;
+            match &join_result {
+                Ok(Ok(())) => tracing::info!("VM {} thread joined, resources freed", watcher_vm_id),
+                Ok(Err(_)) => tracing::warn!("VM {} thread panicked during cleanup", watcher_vm_id),
+                Err(e) => tracing::warn!("VM {} thread join task failed: {}", watcher_vm_id, e),
+            }
+        }
+
+        // Now that the thread has terminated and corevm_destroy has been called,
+        // clear all handles from the VM instance.
         if let Some(mut vm) = watcher_state.vms.get_mut(&watcher_vm_id) {
             vm.state = VmState::Stopped;
             vm.vm_handle = None;
@@ -218,15 +239,49 @@ pub async fn stop(auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_id
 pub async fn force_stop(auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
     require_operator(&auth)?;
     if !state.vms.contains_key(&vm_id) { return Err(AppError(StatusCode::NOT_FOUND, "VM not found".into())); }
-    if let Some(mut vm) = state.vms.get_mut(&vm_id) {
-        if let Some(ref control) = vm.control {
-            control.set_exit_reason("Force stopped".into());
-            control.set_exited();
-        }
-        vm.state = VmState::Stopped;
-        vm.vm_handle = None; vm.control = None; vm.framebuffer = None;
-        vm.serial_tx = None; vm.vm_thread = None;
+
+    // Extract the control handle and thread before mutating state.
+    let (control, vm_thread) = {
+        let mut vm = match state.vms.get_mut(&vm_id) {
+            Some(vm) => vm,
+            None => return Err(AppError(StatusCode::NOT_FOUND, "VM not found".into())),
+        };
+        let control = vm.control.clone();
+        let thread = vm.vm_thread.take();
+        vm.state = VmState::Stopping;
+        (control, thread)
+    };
+
+    // Signal the VM to stop: request_stop() sets the stop flag AND cancels all
+    // vCPUs (kicks them out of KVM_RUN), so the BSP loop will break and the
+    // VM thread will proceed to flush caches and call corevm_destroy().
+    if let Some(ref ctrl) = control {
+        ctrl.set_exit_reason("Force stopped".into());
+        ctrl.request_stop();
     }
+
+    // Wait for the VM thread to finish cleanup (flush + destroy) on a blocking
+    // task so we don't block the async runtime. This ensures corevm_destroy()
+    // is called and all CPU/RAM resources are actually freed.
+    if let Some(thread) = vm_thread {
+        let vm_id_for_join = vm_id.clone();
+        match tokio::task::spawn_blocking(move || thread.join()).await {
+            Ok(Ok(())) => tracing::info!("VM {} thread joined after force-stop, resources freed", vm_id_for_join),
+            Ok(Err(_)) => tracing::warn!("VM {} thread panicked during force-stop cleanup", vm_id_for_join),
+            Err(e) => tracing::warn!("VM {} thread join task failed: {}", vm_id_for_join, e),
+        }
+    }
+
+    // Now that the thread has terminated, clear all handles.
+    if let Some(mut vm) = state.vms.get_mut(&vm_id) {
+        vm.state = VmState::Stopped;
+        vm.vm_handle = None;
+        vm.control = None;
+        vm.framebuffer = None;
+        vm.serial_tx = None;
+        vm.vm_thread = None;
+    }
+
     { let db = state.db.lock().unwrap(); AuditService::log(&db, auth.id, "vm.force_stopped", "vm", &vm_id, None); }
     tracing::info!("VM {} force-stopped", vm_id);
     Ok(Json(serde_json::json!({"ok": true, "state": "stopped"})))

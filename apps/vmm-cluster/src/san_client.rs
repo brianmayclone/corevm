@@ -37,6 +37,20 @@ impl SanClient {
         }
     }
 
+    // ── Generic raw methods ─────────────────────────────────────
+
+    pub async fn raw_get(&self, path: &str) -> Result<Value, String> {
+        self.get(path).await
+    }
+
+    pub async fn raw_post(&self, path: &str, body: &Value) -> Result<Value, String> {
+        self.post(path, body).await
+    }
+
+    pub async fn raw_post_json(&self, path: &str, body: &Value) -> Result<Value, String> {
+        self.post(path, body).await
+    }
+
     // ── Status ────────────────────────────────────────────────────
 
     pub async fn get_status(&self) -> Result<Value, String> {

@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Power, RefreshCw, Square, Cpu, MemoryStick, HardDrive, Camera, Clock, FileText, Minimize2, Keyboard } from 'lucide-react'
+import { Power, RefreshCw, Square, Cpu, MemoryStick, HardDrive, Camera, Clock, FileText, Minimize2, Keyboard, Trash2, ArrowRightLeft } from 'lucide-react'
 import { useMobileLandscape } from '../hooks/useMobileLandscape'
 import api from '../api/client'
 import type { VmDetail as VmDetailType, AuditEntry } from '../api/types'
@@ -19,6 +19,7 @@ import OsIcon from '../components/OsIcon'
 import { guestOsLabel, formatRam, formatBytes } from '../utils/format'
 import { getActionLabel, getActionSeverity } from '../utils/auditLabels'
 import { useVmStore } from '../stores/vmStore'
+import { useClusterStore } from '../stores/clusterStore'
 
 const tabs = [
   { id: 'general', label: 'General' },
@@ -34,9 +35,19 @@ export default function VmDetail() {
   const [vm, setVm] = useState<VmDetailType | null>(null)
   const [activeTab, setActiveTab] = useState('general')
   const [activities, setActivities] = useState<AuditEntry[]>([])
-  const { startVm, stopVm, forceStopVm } = useVmStore()
+  const { startVm, stopVm, forceStopVm, deleteVm } = useVmStore()
+  const { backendMode, hosts, fetchHosts, migrateVm } = useClusterStore()
+  const isCluster = backendMode === 'cluster'
   const isMobileLandscape = useMobileLandscape()
   const [landscapeExitOverride, setLandscapeExitOverride] = useState(false)
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState(false)
+  const [showMigrateDialog, setShowMigrateDialog] = useState(false)
+  const [migrateTargetId, setMigrateTargetId] = useState<string>('')
+  const [migrating, setMigrating] = useState(false)
+  const [migrateError, setMigrateError] = useState<string | null>(null)
+  const [migrateSuccess, setMigrateSuccess] = useState(false)
   const showLandscapeConsole = isMobileLandscape && !landscapeExitOverride
 
   // Reset exit override when going back to portrait
@@ -70,6 +81,41 @@ export default function VmDetail() {
   const handleStart = async () => { await startVm(vm.id); setVm({ ...vm, state: 'running' }) }
   const handleStop = async () => { await stopVm(vm.id); setVm({ ...vm, state: 'stopping' }) }
   const handleForceStop = async () => { await forceStopVm(vm.id); setVm({ ...vm, state: 'stopped' }) }
+
+  const handleDelete = async () => {
+    setDeleting(true)
+    setDeleteError(null)
+    try {
+      await deleteVm(vm.id)
+      navigate('/machines')
+    } catch (err: any) {
+      setDeleteError(err?.response?.data?.error || err?.message || 'Failed to delete VM')
+      setDeleting(false)
+    }
+  }
+
+  const handleOpenMigrate = async () => {
+    setMigrateError(null)
+    setMigrateSuccess(false)
+    setMigrateTargetId('')
+    setShowMigrateDialog(true)
+    try { await fetchHosts() } catch { /* ignore */ }
+  }
+
+  const handleMigrate = async () => {
+    if (!migrateTargetId) return
+    setMigrating(true)
+    setMigrateError(null)
+    try {
+      await migrateVm(vm.id, migrateTargetId)
+      setMigrateSuccess(true)
+      setTimeout(() => { setShowMigrateDialog(false); setMigrateSuccess(false) }, 2000)
+    } catch (err: any) {
+      setMigrateError(err?.response?.data?.error || err?.message || 'Migration failed')
+    } finally {
+      setMigrating(false)
+    }
+  }
 
   // Compute total disk size and usage from real data
   const totalDiskBytes = (vm.disks || []).reduce((sum: number, d: any) => sum + (d.size_bytes || 0), 0)
@@ -164,6 +210,16 @@ export default function VmDetail() {
           <Button variant="danger" size="icon" onClick={handleForceStop} title="Force Stop" disabled={isStopped}>
             <Square size={12} />
           </Button>
+          {isCluster && (
+            <Button variant="outline" size="sm" icon={<ArrowRightLeft size={14} />} onClick={handleOpenMigrate}>
+              Migrate
+            </Button>
+          )}
+          {isStopped && (
+            <Button variant="danger" size="sm" icon={<Trash2 size={14} />} onClick={() => setShowDeleteConfirm(true)}>
+              Delete
+            </Button>
+          )}
         </div>
       </div>
 
@@ -333,6 +389,71 @@ export default function VmDetail() {
             </div>
           )}
         </Card>
+      )}
+
+      {/* ── Delete Confirmation Dialog ─────────────────────────────── */}
+      {showDeleteConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="bg-vmm-surface border border-vmm-border rounded-xl p-6 w-full max-w-sm mx-4 space-y-4">
+            <h3 className="text-lg font-semibold text-vmm-text">Delete Virtual Machine</h3>
+            <p className="text-sm text-vmm-text-muted">
+              Are you sure you want to permanently delete <span className="font-semibold text-vmm-text">{vm.name}</span>? This action cannot be undone and all associated disks will be removed.
+            </p>
+            {deleteError && (
+              <div className="text-sm text-vmm-danger bg-vmm-danger/10 rounded-lg px-3 py-2">{deleteError}</div>
+            )}
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="outline" size="sm" onClick={() => { setShowDeleteConfirm(false); setDeleteError(null) }} disabled={deleting}>
+                Cancel
+              </Button>
+              <Button variant="danger" size="sm" icon={<Trash2 size={14} />} onClick={handleDelete} disabled={deleting}>
+                {deleting ? 'Deleting...' : 'Delete VM'}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Migrate Dialog ─────────────────────────────────────────── */}
+      {showMigrateDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="bg-vmm-surface border border-vmm-border rounded-xl p-6 w-full max-w-md mx-4 space-y-4">
+            <h3 className="text-lg font-semibold text-vmm-text">Migrate VM</h3>
+            <p className="text-sm text-vmm-text-muted">
+              Select a target host to migrate <span className="font-semibold text-vmm-text">{vm.name}</span> to.
+              {isRunning && ' The VM will be stopped before migration and restarted on the target host.'}
+            </p>
+            <div>
+              <label className="block text-xs font-medium text-vmm-text-muted mb-1.5">Target Host</label>
+              <select
+                value={migrateTargetId}
+                onChange={(e) => setMigrateTargetId(e.target.value)}
+                className="w-full bg-vmm-bg border border-vmm-border rounded-lg px-3 py-2 text-sm text-vmm-text focus:outline-none focus:border-vmm-accent"
+              >
+                <option value="">Select a host...</option>
+                {hosts.filter(h => h.status === 'online' && !h.maintenance_mode).map(h => (
+                  <option key={h.id} value={h.id}>
+                    {h.hostname} ({h.address}) - {h.free_ram_mb} MB free
+                  </option>
+                ))}
+              </select>
+            </div>
+            {migrateError && (
+              <div className="text-sm text-vmm-danger bg-vmm-danger/10 rounded-lg px-3 py-2">{migrateError}</div>
+            )}
+            {migrateSuccess && (
+              <div className="text-sm text-vmm-success bg-vmm-success/10 rounded-lg px-3 py-2">Migration initiated successfully.</div>
+            )}
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="outline" size="sm" onClick={() => setShowMigrateDialog(false)} disabled={migrating}>
+                Cancel
+              </Button>
+              <Button variant="primary" size="sm" icon={<ArrowRightLeft size={14} />} onClick={handleMigrate} disabled={migrating || !migrateTargetId}>
+                {migrating ? 'Migrating...' : 'Migrate'}
+              </Button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

@@ -354,6 +354,7 @@ pub(crate) fn bsp_loop(
         }
         // Check stop flag.
         if control.stop.load(Ordering::Relaxed) {
+            control.exited.store(true, Ordering::Relaxed);
             break;
         }
 

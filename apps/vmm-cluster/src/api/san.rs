@@ -640,3 +640,37 @@ pub async fn health(
     let snapshot = state.san_health.read().unwrap();
     Ok(Json(snapshot.clone()))
 }
+
+/// GET /api/san/volumes/{id}/health — forward to any SAN host.
+pub async fn volume_health(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let (client, _) = any_san_client(&state)?;
+    let resp = client.raw_get(&format!("/api/volumes/{}/health", id)).await.map_err(san_err)?;
+    Ok(Json(resp))
+}
+
+/// POST /api/san/volumes/{id}/repair — forward to any SAN host.
+pub async fn volume_repair(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let (client, _) = any_san_client(&state)?;
+    let resp = client.raw_post(&format!("/api/volumes/{}/repair", id), &serde_json::json!({})).await.map_err(san_err)?;
+    Ok(Json(resp))
+}
+
+/// POST /api/san/volumes/{id}/remove-host — forward to any SAN host.
+pub async fn volume_remove_host(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, AppError> {
+    let (client, _) = any_san_client(&state)?;
+    let resp = client.raw_post_json(&format!("/api/volumes/{}/remove-host", id), &body).await.map_err(san_err)?;
+    Ok(Json(resp))
+}

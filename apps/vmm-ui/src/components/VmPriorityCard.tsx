@@ -1,4 +1,4 @@
-import { Monitor, Power } from 'lucide-react'
+import { Monitor, Power, Trash2 } from 'lucide-react'
 import ProgressBar from './ProgressBar'
 import OsIcon from './OsIcon'
 import StatusBadge from './StatusBadge'
@@ -14,9 +14,10 @@ interface Props {
   onClick?: () => void
   onConsole?: () => void
   onPower?: () => void
+  onDelete?: () => void
 }
 
-export default function VmPriorityCard({ name, guestOs, state, tag, cpuPercent, ramPercent, onClick, onConsole, onPower }: Props) {
+export default function VmPriorityCard({ name, guestOs, state, tag, cpuPercent, ramPercent, onClick, onConsole, onPower, onDelete }: Props) {
   return (
     <div
       onClick={onClick}
@@ -43,6 +44,11 @@ export default function VmPriorityCard({ name, guestOs, state, tag, cpuPercent, 
           {onPower && (
             <button onClick={onPower} className="p-1.5 hover:bg-vmm-surface-hover rounded text-vmm-text-muted hover:text-vmm-text transition-colors cursor-pointer">
               <Power size={13} />
+            </button>
+          )}
+          {onDelete && state === 'stopped' && (
+            <button onClick={onDelete} className="p-1.5 hover:bg-vmm-danger/20 rounded text-vmm-text-muted hover:text-vmm-danger transition-colors cursor-pointer" title="Delete VM">
+              <Trash2 size={13} />
             </button>
           )}
         </div>
