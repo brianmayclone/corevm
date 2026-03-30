@@ -117,11 +117,15 @@ impl CoreSanFS {
     fn write_chunk_to_disk(&self, file_id: i64, chunk_index: u32, data: &[u8]) {
         let (chunk_size, _, local_raid) = self.volume_config();
         let offset = chunk_index as u64 * chunk_size;
+        tracing::info!("FLUSH chunk to disk: file_id={} idx={} size={}", file_id, chunk_index, data.len());
         let db = self.state.db.lock().unwrap();
-        let _ = crate::storage::chunk::write_chunk_data(
+        match crate::storage::chunk::write_chunk_data(
             &db, file_id, offset, data,
             &self.volume_id, &self.state.node_id, chunk_size, &local_raid,
-        );
+        ) {
+            Ok(_) => tracing::info!("FLUSH OK: file_id={} idx={}", file_id, chunk_index),
+            Err(e) => tracing::error!("FLUSH FAILED: file_id={} idx={}: {}", file_id, chunk_index, e),
+        }
     }
 
     /// Flush all dirty chunks for a file to disk.
@@ -184,6 +188,11 @@ impl CoreSanFS {
 
         let dirty: Vec<(i64, u32, Vec<u8>)> = {
             let mut cache = self.chunk_cache.lock().unwrap();
+            let total = cache.len();
+            let dirty_count = cache.values().filter(|b| b.dirty).count();
+            if dirty_count > 0 {
+                tracing::info!("flush_stale_chunks: cache has {} entries, {} dirty", total, dirty_count);
+            }
             let stale_keys: Vec<(i64, u32)> = cache.iter()
                 .filter(|(_, buf)| buf.dirty && (
                     now.duration_since(buf.last_write) > idle_threshold ||
@@ -197,10 +206,11 @@ impl CoreSanFS {
                 })
             }).collect()
         };
-        // Write outside cache lock
+        if !dirty.is_empty() {
+            tracing::info!("flush_stale_chunks: flushing {} dirty chunks", dirty.len());
+        }
         for (fid, ci, data) in &dirty {
             self.write_chunk_to_disk(*fid, *ci, data);
-            tracing::debug!("Flushed stale chunk file_id={} idx={}", fid, ci);
         }
     }
 
