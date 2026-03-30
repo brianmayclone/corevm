@@ -74,6 +74,10 @@ pub fn place_chunk(
     };
 
     if backends.is_empty() {
+        tracing::error!(
+            "place_chunk: NO online backends for node_id='{}' — chunk placement impossible!",
+            node_id
+        );
         return Vec::new();
     }
 
@@ -323,8 +327,14 @@ pub fn write_chunk_data(
         };
 
         if chunk_backends.is_empty() {
-            data_offset += range.size as usize;
-            continue;
+            tracing::error!(
+                "write_chunk_data: NO backends for file_id={} chunk_index={} node_id={} volume_id={} — DATA LOSS!",
+                file_id, range.chunk_index, node_id, volume_id
+            );
+            return Err(format!(
+                "No backends available for chunk {} of file {} on node {}",
+                range.chunk_index, file_id, node_id
+            ));
         }
 
         let chunk_data_slice = &data[data_offset..data_offset + range.size as usize];

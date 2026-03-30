@@ -58,15 +58,24 @@ impl DeferredIo {
         if let Some(backend_ptr) = self.io_backend {
             let backend = unsafe { &*backend_ptr };
             if self.is_flush {
-                let _ = backend.flush();
+                if let Err(e) = backend.flush() {
+                    eprintln!("[ahci] SAN FLUSH ERROR: {}", e);
+                }
             } else if self.is_write {
-                let _ = backend.write_at(&self.buf, self.disk_offset);
+                if let Err(e) = backend.write_at(&self.buf, self.disk_offset) {
+                    eprintln!("[ahci] SAN WRITE ERROR port={} offset=0x{:X} len={}: {}",
+                        self.port_idx, self.disk_offset, self.buf.len(), e);
+                }
             } else {
                 match backend.read_at(&mut self.buf, self.disk_offset) {
                     Ok(done) => {
                         if done < self.buf.len() { self.buf[done..].fill(0); }
                     }
-                    Err(_) => { self.buf.fill(0); }
+                    Err(e) => {
+                        eprintln!("[ahci] SAN READ ERROR port={} offset=0x{:X} len={}: {}",
+                            self.port_idx, self.disk_offset, self.buf.len(), e);
+                        self.buf.fill(0);
+                    }
                 }
             }
             return;
@@ -746,6 +755,8 @@ impl Ahci {
         p.drive.io_backend = Some(backend);
         p.sig = 0x0000_0101;
         self.pi |= 1 << port;
+        eprintln!("[ahci] attach_san_backend: port={} size={} io_backend={} fd={} present={}",
+            port, size, p.drive.io_backend.is_some(), p.drive.disk_fd, p.drive.present);
     }
 
     /// Drain pending I/O requests. Caller executes them outside AHCI_LOCK.
@@ -949,6 +960,11 @@ impl Ahci {
                     let ss = port.drive.sector_size();
                     let total = count as usize * ss;
                     if port.drive.has_deferred_io() {
+                        #[cfg(feature = "std")]
+                        if self.diag_deferred_cmds < 5 {
+                            let has_backend = port.drive.io_backend.is_some();
+                            eprintln!("[ahci] READ DMA port={} fd={} io_backend={} lba={} count={}", port_idx, port.drive.disk_fd, has_backend, lba, count);
+                        }
                         // Mark slot as in-flight (CI stays set so guest sees "busy")
                         port.deferred_ci |= 1 << slot;
                         self.diag_deferred_cmds += 1;
@@ -976,6 +992,11 @@ impl Ahci {
                     let mut buf = vec![0u8; total];
                     if prdtl > 0 { dma.read_prdt(prdt_base, prdtl, &mut buf); }
                     if port.drive.has_deferred_io() {
+                        #[cfg(feature = "std")]
+                        if self.diag_deferred_cmds < 5 {
+                            let has_backend = port.drive.io_backend.is_some();
+                            eprintln!("[ahci] WRITE DMA port={} fd={} io_backend={} lba={} count={}", port_idx, port.drive.disk_fd, has_backend, lba, count);
+                        }
                         port.deferred_ci |= 1 << slot;
                         self.diag_deferred_cmds += 1;
                         self.pending_io.push(DeferredIo {

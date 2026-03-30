@@ -254,6 +254,11 @@ async fn handle_connection(
                 let chunk_idx = (offset / sess.chunk_size) as u32;
                 let local_offset = (offset % sess.chunk_size) as usize;
 
+                tracing::trace!(
+                    "Disk server WRITE: offset={} size={} chunk_idx={} local_offset={} file_id={}",
+                    offset, data.len(), chunk_idx, local_offset, sess.file_id
+                );
+
                 // Write to cache
                 let buf = sess.cache.entry(chunk_idx).or_insert_with(|| {
                     // Check if chunk exists on disk
@@ -308,6 +313,7 @@ async fn handle_connection(
 
             SanCommand::Flush => {
                 if let Some(sess) = session.as_mut() {
+                    tracing::info!("Disk server FLUSH: file_id={} cache_size={}", sess.file_id, sess.cache.len());
                     flush_all(&state, sess);
                     // Also update file_map size
                     let max_size: u64 = sess.cache.iter()
@@ -378,6 +384,7 @@ fn flush_stale(state: &CoreSanState, sess: &mut DiskSession) {
     let idle = std::time::Duration::from_secs(5);
     let max_dirty = std::time::Duration::from_secs(10);
 
+    let dirty_count = sess.cache.values().filter(|b| b.dirty).count();
     let stale: Vec<u32> = sess.cache.iter()
         .filter(|(_, b)| b.dirty && (
             now.duration_since(b.last_write) > idle ||
@@ -385,6 +392,13 @@ fn flush_stale(state: &CoreSanState, sess: &mut DiskSession) {
         ))
         .map(|(k, _)| *k)
         .collect();
+
+    if !stale.is_empty() || dirty_count > 0 {
+        tracing::debug!(
+            "flush_stale: {} dirty chunks in cache, {} stale (idle>5s or dirty>10s)",
+            dirty_count, stale.len()
+        );
+    }
 
     for idx in stale {
         if let Some(buf) = sess.cache.remove(&idx) {
@@ -447,12 +461,18 @@ fn evict_oldest(state: &CoreSanState, sess: &mut DiskSession) {
 /// Write a chunk to disk via the chunk system.
 fn write_chunk(state: &CoreSanState, sess: &DiskSession, chunk_index: u32, data: &[u8]) {
     let offset = chunk_index as u64 * sess.chunk_size;
+    tracing::info!(
+        "Disk server: persisting chunk idx={} file_id={} offset={} data_len={} volume={} node={} raid={}",
+        chunk_index, sess.file_id, offset, data.len(), sess.volume_id, state.node_id, sess.local_raid
+    );
     let db = state.db.lock().unwrap();
     match crate::storage::chunk::write_chunk_data(
         &db, sess.file_id, offset, data,
         &sess.volume_id, &state.node_id, sess.chunk_size, &sess.local_raid,
     ) {
-        Ok(_) => {}
-        Err(e) => tracing::error!("Disk server: write_chunk_data failed: {}", e),
+        Ok(changed) => {
+            tracing::info!("Disk server: chunk idx={} persisted OK, {} chunks changed", chunk_index, changed.len());
+        }
+        Err(e) => tracing::error!("Disk server: write_chunk_data FAILED: {}", e),
     }
 }
