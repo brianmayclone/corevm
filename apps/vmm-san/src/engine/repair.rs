@@ -12,57 +12,65 @@ use crate::storage::chunk;
 
 /// Spawn the repair engine as a background task.
 pub fn spawn(state: Arc<CoreSanState>) {
-    let repair_interval = state.config.integrity.repair_interval_secs;
     tokio::spawn(async move {
-        let mut tick = interval(Duration::from_secs(repair_interval));
+        // Short initial delay to let peers connect
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let mut tick = interval(Duration::from_secs(10));
         let client = PeerClient::new(&state.config.peer.secret);
 
         loop {
             tick.tick().await;
-            if !state.is_leader.load(std::sync::atomic::Ordering::Relaxed) {
-                tracing::trace!("Not leader, skipping repair cycle");
-                continue;
-            }
             run_chunk_repair(&state, &client).await;
             update_protection_status(&state);
         }
     });
 }
 
-/// Find chunks that have fewer synced replicas across nodes than required by FTT.
-/// Rate limit: max chunks repaired per cycle to avoid thundering herd
-const MAX_REPAIRS_PER_CYCLE: u32 = 30;
+/// Batch size for querying under-replicated chunks.
+const QUERY_BATCH_SIZE: u32 = 500;
 
 async fn run_chunk_repair(state: &CoreSanState, client: &PeerClient) {
     use crate::services::chunk::ChunkService;
 
-    let under_replicated = {
-        let db = state.db.lock().unwrap();
-        ChunkService::find_under_replicated(&db, MAX_REPAIRS_PER_CYCLE)
-    };
+    let mut total_repaired = 0u32;
 
-    if under_replicated.is_empty() {
-        return;
-    }
+    loop {
+        let under_replicated = {
+            let db = state.db.lock().unwrap();
+            ChunkService::find_under_replicated(&db, QUERY_BATCH_SIZE)
+        };
 
-    tracing::info!("Repair: {} under-replicated chunks found (max {} per cycle)",
-        under_replicated.len(), MAX_REPAIRS_PER_CYCLE);
-
-    let mut repaired = 0u32;
-    for (chunk_id, file_id, chunk_index, volume_id, ftt, synced_nodes) in under_replicated {
-        if repaired >= MAX_REPAIRS_PER_CYCLE {
+        if under_replicated.is_empty() {
             break;
         }
-        let needed = (ftt + 1).saturating_sub(synced_nodes);
-        for _ in 0..needed {
-            if repair_single_chunk(state, client, chunk_id, file_id, chunk_index, &volume_id).await {
-                repaired += 1;
+
+        if total_repaired == 0 {
+            tracing::info!("Repair: {} under-replicated chunks found", under_replicated.len());
+        }
+
+        let mut batch_repaired = 0u32;
+        for (chunk_id, file_id, chunk_index, volume_id, ftt, synced_nodes) in under_replicated {
+            let needed = (ftt + 1).saturating_sub(synced_nodes);
+            for _ in 0..needed {
+                if repair_single_chunk(state, client, chunk_id, file_id, chunk_index, &volume_id).await {
+                    batch_repaired += 1;
+                }
             }
         }
+
+        total_repaired += batch_repaired;
+
+        if batch_repaired == 0 {
+            // No progress — peer likely offline, wait and retry next cycle
+            tracing::warn!("Repair: no progress (peer offline?), will retry next cycle");
+            break;
+        }
+
+        tracing::info!("Repair: {} chunks repaired so far", total_repaired);
     }
 
-    if repaired > 0 {
-        tracing::info!("Repair: {} chunks repaired this cycle", repaired);
+    if total_repaired > 0 {
+        tracing::info!("Repair: cycle complete, {} chunks repaired total", total_repaired);
     }
 }
 

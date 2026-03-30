@@ -18,6 +18,7 @@ use fuser::{
 
 use crate::peer::client::PeerClient;
 use crate::state::CoreSanState;
+use crate::storage::chunk::{deterministic_file_id, deterministic_chunk_id};
 
 const TTL: Duration = Duration::from_secs(0);
 const BLOCK_SIZE: u32 = 4096;
@@ -336,16 +337,14 @@ impl CoreSanFS {
                         // Ensure file_chunks entry exists
                         let offset = ci as u64 * chunk_size;
                         let size = chunk_size.min(file_size.saturating_sub(offset));
+                        let chunk_id = deterministic_chunk_id(fid, ci);
                         db.execute(
-                            "INSERT OR IGNORE INTO file_chunks (file_id, chunk_index, offset_bytes, size_bytes)
-                             VALUES (?1, ?2, ?3, ?4)",
-                            rusqlite::params![fid, ci, offset, size],
+                            "INSERT OR IGNORE INTO file_chunks (id, file_id, chunk_index, offset_bytes, size_bytes)
+                             VALUES (?1, ?2, ?3, ?4, ?5)",
+                            rusqlite::params![chunk_id, fid, ci, offset, size],
                         ).ok();
 
-                        if let Ok(chunk_id) = db.query_row(
-                            "SELECT id FROM file_chunks WHERE file_id = ?1 AND chunk_index = ?2",
-                            rusqlite::params![fid, ci], |row| row.get::<_, i64>(0),
-                        ) {
+                        {
                             let now = chrono::Utc::now().to_rfc3339();
                             db.execute(
                                 "INSERT OR REPLACE INTO chunk_replicas (chunk_id, backend_id, node_id, state, synced_at)
@@ -555,12 +554,13 @@ impl Filesystem for CoreSanFS {
                 let db = self.state.db.lock().unwrap();
                 let now = chrono::Utc::now().to_rfc3339();
                 // Use UPSERT — the file_map row may not exist yet if create() hasn't committed
+                let file_id = deterministic_file_id(&self.volume_id, &entry.rel_path);
                 log_err!(db.execute(
-                    "INSERT INTO file_map (volume_id, rel_path, size_bytes, version, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, 0, ?4, ?4)
+                    "INSERT INTO file_map (id, volume_id, rel_path, size_bytes, version, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5)
                      ON CONFLICT(volume_id, rel_path) DO UPDATE SET
-                        size_bytes = ?3, updated_at = ?4",
-                    rusqlite::params![&self.volume_id, &entry.rel_path, new_size as i64, &now],
+                        size_bytes = ?4, updated_at = ?5",
+                    rusqlite::params![file_id, &self.volume_id, &entry.rel_path, new_size as i64, &now],
                 ), "FUSE setattr: update size");
             }
         }
@@ -760,26 +760,16 @@ impl Filesystem for CoreSanFS {
                 }
             }
 
-            match db.query_row(
-                "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
-                rusqlite::params![&self.volume_id, &entry.rel_path],
-                |row| row.get::<_, i64>(0),
-            ) {
-                Ok(id) => id,
-                Err(_) => {
-                    // Create file_map entry
-                    let now = chrono::Utc::now().to_rfc3339();
-                    db.execute(
-                        "INSERT INTO file_map (volume_id, rel_path, size_bytes, version, created_at, updated_at)
-                         VALUES (?1, ?2, 0, 1, ?3, ?3)",
-                        rusqlite::params![&self.volume_id, &entry.rel_path, &now],
-                    ).ok();
-                    db.query_row(
-                        "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
-                        rusqlite::params![&self.volume_id, &entry.rel_path],
-                        |row| row.get(0),
-                    ).unwrap_or(0)
-                }
+            {
+                let fid = deterministic_file_id(&self.volume_id, &entry.rel_path);
+                // Ensure file_map entry exists
+                let now = chrono::Utc::now().to_rfc3339();
+                db.execute(
+                    "INSERT OR IGNORE INTO file_map (id, volume_id, rel_path, size_bytes, version, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, 0, 1, ?4, ?4)",
+                    rusqlite::params![fid, &self.volume_id, &entry.rel_path, &now],
+                ).ok();
+                fid
             }
         };
 
@@ -877,11 +867,12 @@ impl Filesystem for CoreSanFS {
 
         // Register in file_map only — chunks are created on first write
         let now = chrono::Utc::now().to_rfc3339();
+        let file_id = deterministic_file_id(&self.volume_id, &rel_path);
         let db = self.state.db.lock().unwrap();
         db.execute(
-            "INSERT OR IGNORE INTO file_map (volume_id, rel_path, size_bytes, version, created_at, updated_at)
-             VALUES (?1, ?2, 0, 0, ?3, ?3)",
-            rusqlite::params![&self.volume_id, &rel_path, &now],
+            "INSERT OR IGNORE INTO file_map (id, volume_id, rel_path, size_bytes, version, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 0, 0, ?4, ?4)",
+            rusqlite::params![file_id, &self.volume_id, &rel_path, &now],
         ).ok();
         drop(db);
 

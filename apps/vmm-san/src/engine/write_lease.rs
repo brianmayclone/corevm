@@ -193,22 +193,16 @@ pub fn atomic_write(
     let now = chrono::Utc::now().to_rfc3339();
     let lease_until = (chrono::Utc::now() + chrono::Duration::seconds(LEASE_DURATION_SECS)).to_rfc3339();
 
+    let file_id = crate::storage::chunk::deterministic_file_id(volume_id, rel_path);
     db.execute(
-        "INSERT INTO file_map (volume_id, rel_path, size_bytes, sha256, version, write_owner, write_lease_until, created_at, updated_at, ownership_tick)
-         VALUES (?1, ?2, 0, '', 0, ?3, ?4, ?5, ?5, 0)
+        "INSERT INTO file_map (id, volume_id, rel_path, size_bytes, sha256, version, write_owner, write_lease_until, created_at, updated_at, ownership_tick)
+         VALUES (?1, ?2, ?3, 0, '', 0, ?4, ?5, ?6, ?6, 0)
          ON CONFLICT(volume_id, rel_path) DO UPDATE SET
             write_owner = excluded.write_owner,
             write_lease_until = excluded.write_lease_until,
             updated_at = excluded.updated_at",
-        rusqlite::params![volume_id, rel_path, node_id, &lease_until, &now],
+        rusqlite::params![file_id, volume_id, rel_path, node_id, &lease_until, &now],
     ).map_err(|e| format!("db file_map: {}", e))?;
-
-    // 4. Get file_id
-    let file_id: i64 = db.query_row(
-        "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
-        rusqlite::params![volume_id, rel_path],
-        |row| row.get(0),
-    ).map_err(|e| format!("db get file_id: {}", e))?;
 
     // 5. Write data through chunk manager
     let write_offset = offset.unwrap_or(0) as u64;

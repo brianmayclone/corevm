@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS peers (
 -- ═══════════════════════════════════════════════════════════════
 
 CREATE TABLE IF NOT EXISTS file_map (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    id              INTEGER PRIMARY KEY,  -- deterministic hash of (volume_id, rel_path)
     volume_id       TEXT NOT NULL REFERENCES volumes(id) ON DELETE CASCADE,
     rel_path        TEXT NOT NULL,
     size_bytes      INTEGER NOT NULL DEFAULT 0,
@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS file_map (
 -- ═══════════════════════════════════════════════════════════════
 
 CREATE TABLE IF NOT EXISTS file_chunks (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    id              INTEGER PRIMARY KEY,  -- deterministic hash of (file_id, chunk_index)
     file_id         INTEGER NOT NULL REFERENCES file_map(id) ON DELETE CASCADE,
     chunk_index     INTEGER NOT NULL,           -- 0, 1, 2, ...
     offset_bytes    INTEGER NOT NULL,           -- byte offset in the file

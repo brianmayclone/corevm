@@ -73,7 +73,7 @@ pub async fn register(
         .map_err(|e| AppError(StatusCode::BAD_GATEWAY, format!("Cannot reach host: {}", e)))?;
 
     if !login_resp.status().is_success() {
-        return Err(AppError(StatusCode::UNAUTHORIZED, "Invalid admin credentials on target host".into()));
+        return Err(AppError(StatusCode::UNPROCESSABLE_ENTITY, "Invalid admin credentials on target host".into()));
     }
 
     // Step 2: Check host isn't already managed

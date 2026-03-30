@@ -5,6 +5,7 @@
 
 use rusqlite::Connection;
 use crate::db::{DbResult, DbContext, db_transaction};
+use crate::storage::chunk::{deterministic_file_id, deterministic_chunk_id};
 
 pub struct FileService;
 
@@ -18,16 +19,14 @@ impl FileService {
 
     pub fn create(db: &Connection, volume_id: &str, rel_path: &str) -> DbResult<i64> {
         let now = chrono::Utc::now().to_rfc3339();
+        let file_id = deterministic_file_id(volume_id, rel_path);
         db.execute(
-            "INSERT OR IGNORE INTO file_map (volume_id, rel_path, size_bytes, version, created_at, updated_at)
-             VALUES (?1, ?2, 0, 0, ?3, ?3)",
-            rusqlite::params![volume_id, rel_path, &now],
+            "INSERT OR IGNORE INTO file_map (id, volume_id, rel_path, size_bytes, version, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 0, 0, ?4, ?4)",
+            rusqlite::params![file_id, volume_id, rel_path, &now],
         ).ctx("FileService::create INSERT")?;
 
-        db.query_row(
-            "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
-            rusqlite::params![volume_id, rel_path], |row| row.get(0),
-        ).ctx("FileService::create SELECT id")
+        Ok(file_id)
     }
 
     pub fn get_size(db: &Connection, file_id: i64) -> u64 {
@@ -97,31 +96,29 @@ impl FileService {
     ) -> DbResult<i64> {
         let now = chrono::Utc::now().to_rfc3339();
 
+        let local_file_id = deterministic_file_id(volume_id, rel_path);
+
         db_transaction(db, "FileService::sync_metadata", || {
             db.execute(
-                "INSERT INTO file_map (volume_id, rel_path, size_bytes, sha256, version, chunk_count, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+                "INSERT INTO file_map (id, volume_id, rel_path, size_bytes, sha256, version, chunk_count, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
                  ON CONFLICT(volume_id, rel_path) DO UPDATE SET
                     size_bytes = CASE WHEN excluded.version > file_map.version THEN excluded.size_bytes ELSE file_map.size_bytes END,
                     sha256 = CASE WHEN excluded.version > file_map.version THEN excluded.sha256 ELSE file_map.sha256 END,
                     version = MAX(file_map.version, excluded.version),
                     chunk_count = CASE WHEN excluded.version > file_map.version THEN excluded.chunk_count ELSE MAX(file_map.chunk_count, excluded.chunk_count) END,
                     updated_at = CASE WHEN excluded.version > file_map.version THEN excluded.updated_at ELSE file_map.updated_at END",
-                rusqlite::params![volume_id, rel_path, size_bytes, sha256, version, chunk_count, &now],
+                rusqlite::params![local_file_id, volume_id, rel_path, size_bytes, sha256, version, chunk_count, &now],
             ).ctx("sync_metadata: UPSERT file_map")?;
-
-            let local_file_id: i64 = db.query_row(
-                "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
-                rusqlite::params![volume_id, rel_path], |row| row.get(0),
-            ).ctx("sync_metadata: get file_id")?;
 
             for ci in 0..chunk_count {
                 let offset = ci as u64 * chunk_size_bytes;
                 let size = chunk_size_bytes.min(size_bytes.saturating_sub(offset));
+                let chunk_id = deterministic_chunk_id(local_file_id, ci);
                 db.execute(
-                    "INSERT OR IGNORE INTO file_chunks (file_id, chunk_index, offset_bytes, size_bytes)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![local_file_id, ci, offset, size],
+                    "INSERT OR IGNORE INTO file_chunks (id, file_id, chunk_index, offset_bytes, size_bytes)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![chunk_id, local_file_id, ci, offset, size],
                 ).ctx("sync_metadata: INSERT file_chunks")?;
             }
 

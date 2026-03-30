@@ -9,11 +9,16 @@ api.interceptors.request.use((config) => {
   return config
 })
 
-// On 401 → redirect to login
+// On 401 → redirect to login (only for our own auth endpoints, not proxied remote-host errors)
 api.interceptors.response.use(
   (res) => res,
   (err) => {
-    if (err.response?.status === 401 && window.location.pathname !== '/login') {
+    if (
+      err.response?.status === 401 &&
+      window.location.pathname !== '/login' &&
+      !err.config?.url?.includes('/api/hosts') &&
+      !err.config?.url?.includes('/api/discovery')
+    ) {
       localStorage.removeItem('vmm_token')
       window.location.href = '/login'
     }

@@ -5,6 +5,7 @@
 
 use rusqlite::Connection;
 use crate::db::{DbResult, DbContext, db_transaction};
+use crate::storage::chunk::deterministic_chunk_id;
 
 pub struct ChunkService;
 
@@ -12,16 +13,14 @@ pub struct ChunkService;
 
 impl ChunkService {
     pub fn create_chunk(db: &Connection, file_id: i64, chunk_index: u32, offset: u64, size: u64) -> DbResult<i64> {
+        let chunk_id = deterministic_chunk_id(file_id, chunk_index);
         db.execute(
-            "INSERT OR IGNORE INTO file_chunks (file_id, chunk_index, offset_bytes, size_bytes)
-             VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![file_id, chunk_index, offset, size],
+            "INSERT OR IGNORE INTO file_chunks (id, file_id, chunk_index, offset_bytes, size_bytes)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![chunk_id, file_id, chunk_index, offset, size],
         ).ctx("ChunkService::create_chunk INSERT")?;
 
-        db.query_row(
-            "SELECT id FROM file_chunks WHERE file_id = ?1 AND chunk_index = ?2",
-            rusqlite::params![file_id, chunk_index], |row| row.get(0),
-        ).ctx("ChunkService::create_chunk SELECT id")
+        Ok(chunk_id)
     }
 
     pub fn get_chunk_id(db: &Connection, file_id: i64, chunk_index: u32) -> DbResult<i64> {
@@ -299,17 +298,14 @@ impl ChunkService {
         let offset = chunk_index as u64 * vol_chunk_size;
         let now = chrono::Utc::now().to_rfc3339();
 
+        let chunk_id = deterministic_chunk_id(file_id, chunk_index);
+
         db_transaction(db, "ChunkService::receive_chunk", || {
             db.execute(
-                "INSERT OR IGNORE INTO file_chunks (file_id, chunk_index, offset_bytes, size_bytes)
-                 VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![file_id, chunk_index, offset, chunk_size],
+                "INSERT OR IGNORE INTO file_chunks (id, file_id, chunk_index, offset_bytes, size_bytes)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![chunk_id, file_id, chunk_index, offset, chunk_size],
             ).ctx("receive_chunk: INSERT file_chunks")?;
-
-            let chunk_id: i64 = db.query_row(
-                "SELECT id FROM file_chunks WHERE file_id = ?1 AND chunk_index = ?2",
-                rusqlite::params![file_id, chunk_index], |row| row.get(0),
-            ).ctx("receive_chunk: get chunk_id")?;
 
             db.execute(
                 "UPDATE file_chunks SET sha256 = ?1, size_bytes = ?2 WHERE id = ?3",

@@ -8,8 +8,24 @@ use std::io::{Read, Seek, SeekFrom, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 use sha2::{Sha256, Digest};
-
 pub const DEFAULT_CHUNK_SIZE: u64 = 4 * 1024 * 1024; // 4 MB
+
+/// Deterministic file_id from (volume_id, rel_path).
+/// Uses SHA256 truncated to i64 — guaranteed identical on every node/process.
+pub fn deterministic_file_id(volume_id: &str, rel_path: &str) -> i64 {
+    let input = format!("{}/{}", volume_id, rel_path);
+    let hash = Sha256::digest(input.as_bytes());
+    let bytes: [u8; 8] = hash[..8].try_into().unwrap();
+    (i64::from_le_bytes(bytes) & 0x7FFF_FFFF_FFFF_FFFF)
+}
+
+/// Deterministic chunk_id from (file_id, chunk_index).
+pub fn deterministic_chunk_id(file_id: i64, chunk_index: u32) -> i64 {
+    let input = format!("{}:{}", file_id, chunk_index);
+    let hash = Sha256::digest(input.as_bytes());
+    let bytes: [u8; 8] = hash[..8].try_into().unwrap();
+    (i64::from_le_bytes(bytes) & 0x7FFF_FFFF_FFFF_FFFF)
+}
 
 /// Describes which part of a chunk is affected by a read/write operation.
 #[derive(Debug, Clone)]
@@ -119,36 +135,27 @@ pub fn ensure_chunks(
 ) {
     let chunk_count = if file_size == 0 { 0 } else { ((file_size - 1) / chunk_size + 1) as u32 };
 
+    // Create missing file_chunks entries (cheap: INSERT OR IGNORE skips existing).
+    // NOTE: We do NOT create chunk_replicas here. Replicas are created on-demand
+    // when the chunk is actually written (in write_chunk_data's inline fallback).
+    // This avoids marking thin-provisioned (never-written) chunks as "syncing"
+    // which would incorrectly show them as "Lost" in the protection status.
     let existing_count: u32 = db.query_row(
         "SELECT COUNT(*) FROM file_chunks WHERE file_id = ?1",
         rusqlite::params![file_id], |row| row.get(0),
     ).unwrap_or(0);
 
-    // Create missing chunk entries
     for ci in existing_count..chunk_count {
+        let chunk_id = deterministic_chunk_id(file_id, ci);
         let offset = ci as u64 * chunk_size;
         let size = chunk_size.min(file_size.saturating_sub(offset));
-
-        db.execute(
-            "INSERT OR IGNORE INTO file_chunks (file_id, chunk_index, offset_bytes, size_bytes)
-             VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![file_id, ci, offset, size],
-        ).ok();
-
-        // Get chunk_id
-        if let Ok(chunk_id) = db.query_row(
-            "SELECT id FROM file_chunks WHERE file_id = ?1 AND chunk_index = ?2",
-            rusqlite::params![file_id, ci], |row| row.get::<_, i64>(0),
+        if let Err(e) = db.execute(
+            "INSERT OR IGNORE INTO file_chunks (id, file_id, chunk_index, offset_bytes, size_bytes)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![chunk_id, file_id, ci, offset, size],
         ) {
-            // Place chunk on local backends
-            let placements = place_chunk(db, volume_id, node_id, ci, local_raid);
-            for (backend_id, _) in &placements {
-                db.execute(
-                    "INSERT OR IGNORE INTO chunk_replicas (chunk_id, backend_id, node_id, state)
-                     VALUES (?1, ?2, ?3, 'syncing')",
-                    rusqlite::params![chunk_id, backend_id, node_id],
-                ).ok();
-            }
+            tracing::error!("ensure_chunks: INSERT file_chunks failed for file_id={} chunk_index={}: {}", file_id, ci, e);
+            return;
         }
     }
 
@@ -326,16 +333,52 @@ pub fn write_chunk_data(
             ).unwrap().filter_map(|r| r.ok()).collect()
         };
 
-        if chunk_backends.is_empty() {
-            tracing::error!(
-                "write_chunk_data: NO backends for file_id={} chunk_index={} node_id={} volume_id={} — DATA LOSS!",
-                file_id, range.chunk_index, node_id, volume_id
-            );
-            return Err(format!(
-                "No backends available for chunk {} of file {} on node {}",
-                range.chunk_index, file_id, node_id
-            ));
-        }
+        // If no backends found, create the replica placement inline and retry
+        let chunk_backends = if chunk_backends.is_empty() {
+            let chunk_id = deterministic_chunk_id(file_id, range.chunk_index);
+            // Ensure file_chunk exists
+            let ci_offset = range.chunk_index as u64 * chunk_size;
+            let ci_size = chunk_size.min(new_size.saturating_sub(ci_offset));
+            db.execute(
+                "INSERT OR IGNORE INTO file_chunks (id, file_id, chunk_index, offset_bytes, size_bytes)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![chunk_id, file_id, range.chunk_index, ci_offset, ci_size],
+            ).ok();
+            // Place on local backends
+            let placements = place_chunk(db, volume_id, node_id, range.chunk_index, local_raid);
+            for (backend_id, _) in &placements {
+                db.execute(
+                    "INSERT OR IGNORE INTO chunk_replicas (chunk_id, backend_id, node_id, state)
+                     VALUES (?1, ?2, ?3, 'syncing')",
+                    rusqlite::params![chunk_id, backend_id, node_id],
+                ).ok();
+            }
+            // Re-query
+            let mut stmt = db.prepare(
+                "SELECT fc.id, cr.backend_id, b.path FROM chunk_replicas cr
+                 JOIN backends b ON b.id = cr.backend_id
+                 JOIN file_chunks fc ON fc.id = cr.chunk_id
+                 WHERE fc.file_id = ?1 AND fc.chunk_index = ?2 AND cr.node_id = ?3"
+            ).unwrap();
+            let retry: Vec<(i64, String, String)> = stmt.query_map(
+                rusqlite::params![file_id, range.chunk_index, node_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).unwrap().filter_map(|r| r.ok()).collect();
+
+            if retry.is_empty() {
+                tracing::error!(
+                    "write_chunk_data: NO backends even after inline placement for file_id={} chunk={} node={}",
+                    file_id, range.chunk_index, node_id
+                );
+                return Err(format!(
+                    "No backends available for chunk {} of file {} on node {}",
+                    range.chunk_index, file_id, node_id
+                ));
+            }
+            retry
+        } else {
+            chunk_backends
+        };
 
         let chunk_data_slice = &data[data_offset..data_offset + range.size as usize];
         data_offset += range.size as usize;

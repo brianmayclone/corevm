@@ -139,9 +139,10 @@ export default function VolumeChunkMap() {
     const required = ftt + 1
     for (const chunk of map.values()) {
       const syncedNodes = chunk.nodes.filter(n => n.state === 'synced').length
+      const syncingNodes = chunk.nodes.filter(n => n.state === 'syncing').length
       if (syncedNodes >= required) {
         chunk.health = 'protected'
-      } else if (syncedNodes > 0) {
+      } else if (syncedNodes > 0 || syncingNodes > 0) {
         chunk.health = 'degraded'
       } else {
         chunk.health = 'lost'

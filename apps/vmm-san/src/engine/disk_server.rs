@@ -136,11 +136,14 @@ async fn handle_connection(
                 let result = {
                     let db = state.db.lock().unwrap();
 
-                    // Get file_id
-                    let file_id = db.query_row(
-                        "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
-                        rusqlite::params![&volume_id, &rel_path], |row| row.get::<_, i64>(0),
-                    ).ok();
+                    // Deterministic file_id — same on every node, no AUTOINCREMENT
+                    let file_id = crate::storage::chunk::deterministic_file_id(&volume_id, &rel_path);
+
+                    // Verify file_map entry exists
+                    let file_exists: bool = db.query_row(
+                        "SELECT COUNT(*) FROM file_map WHERE id = ?1",
+                        rusqlite::params![file_id], |row| row.get::<_, i64>(0),
+                    ).unwrap_or(0) > 0;
 
                     // Get volume config
                     let vol_config = db.query_row(
@@ -149,8 +152,12 @@ async fn handle_connection(
                         |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?)),
                     ).ok();
 
-                    match (file_id, vol_config) {
-                        (Some(fid), Some((cs, lr))) => Ok((fid, cs, lr)),
+                    match (file_exists, vol_config) {
+                        (true, Some((cs, lr))) => Ok((file_id, cs, lr)),
+                        (false, _) => {
+                            tracing::error!("Disk server: file_map entry missing for {}/{} (expected id={})", volume_id, rel_path, file_id);
+                            Err(SanStatus::ErrNotFound)
+                        }
                         _ => Err(SanStatus::ErrNotFound),
                     }
                 };
@@ -461,18 +468,12 @@ fn evict_oldest(state: &CoreSanState, sess: &mut DiskSession) {
 /// Write a chunk to disk via the chunk system.
 fn write_chunk(state: &CoreSanState, sess: &DiskSession, chunk_index: u32, data: &[u8]) {
     let offset = chunk_index as u64 * sess.chunk_size;
-    tracing::info!(
-        "Disk server: persisting chunk idx={} file_id={} offset={} data_len={} volume={} node={} raid={}",
-        chunk_index, sess.file_id, offset, data.len(), sess.volume_id, state.node_id, sess.local_raid
-    );
     let db = state.db.lock().unwrap();
     match crate::storage::chunk::write_chunk_data(
         &db, sess.file_id, offset, data,
         &sess.volume_id, &state.node_id, sess.chunk_size, &sess.local_raid,
     ) {
-        Ok(changed) => {
-            tracing::info!("Disk server: chunk idx={} persisted OK, {} chunks changed", chunk_index, changed.len());
-        }
-        Err(e) => tracing::error!("Disk server: write_chunk_data FAILED: {}", e),
+        Ok(_) => {}
+        Err(e) => tracing::error!("Disk server: write_chunk_data FAILED for {}/{}: {}", sess.volume_id, sess.rel_path, e),
     }
 }

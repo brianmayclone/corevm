@@ -16,6 +16,7 @@ export default function AddHost() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [probeStatus, setProbeStatus] = useState('')
+  const [results, setResults] = useState<{ address: string; ok: boolean; error?: string }[]>([])
 
   // Cluster creation (when no clusters exist)
   const [newClusterName, setNewClusterName] = useState('Default Cluster')
@@ -73,21 +74,57 @@ export default function AddHost() {
     setError('')
     setLoading(true)
     setProbeStatus('')
-    try {
-      const resolvedAddress = await resolveAddress(address)
-      setProbeStatus('Registering host...')
-      await registerHost(resolvedAddress, clusterId, adminUser, adminPass)
-      navigate('/cluster/hosts')
-    } catch (err: any) {
-      setError(err.response?.data?.error || err.message || 'Registration failed')
-      setProbeStatus('')
-    } finally {
+    setResults([])
+
+    // Split by comma, trim, filter empty
+    const addresses = address.split(',').map(a => a.trim()).filter(Boolean)
+    if (addresses.length === 0) {
+      setError('Please enter at least one address')
       setLoading(false)
+      return
+    }
+
+    const registerResults: typeof results = []
+
+    for (let i = 0; i < addresses.length; i++) {
+      const addr = addresses[i]
+      const progress = addresses.length > 1 ? ` (${i + 1}/${addresses.length})` : ''
+      setProbeStatus(`Resolving ${addr}...${progress}`)
+      try {
+        const resolvedAddress = await resolveAddress(addr)
+        setProbeStatus(`Registering ${addr}...${progress}`)
+        await registerHost(resolvedAddress, clusterId, adminUser, adminPass)
+        registerResults.push({ address: addr, ok: true })
+      } catch (err: any) {
+        const msg = err.response?.data?.error || err.message || 'Registration failed'
+        registerResults.push({ address: addr, ok: false, error: msg })
+      }
+    }
+
+    setResults(registerResults)
+    setProbeStatus('')
+    setLoading(false)
+
+    const allOk = registerResults.every(r => r.ok)
+    const anyFailed = registerResults.some(r => !r.ok)
+
+    if (allOk) {
+      navigate('/cluster/hosts')
+    } else if (anyFailed) {
+      const failures = registerResults.filter(r => !r.ok)
+      setError(failures.map(f => `${f.address}: ${f.error}`).join('\n'))
     }
   }
 
   const selectDiscovered = (node: DiscoveredNode) => {
-    setAddress(node.address)
+    const current = address.split(',').map(a => a.trim()).filter(Boolean)
+    const idx = current.indexOf(node.address)
+    if (idx >= 0) {
+      current.splice(idx, 1)
+    } else {
+      current.push(node.address)
+    }
+    setAddress(current.join(', '))
   }
 
   return (
@@ -117,11 +154,11 @@ export default function AddHost() {
                 key={node.address}
                 onClick={() => selectDiscovered(node)}
                 className={`w-full flex items-center gap-3 p-3 rounded-lg border text-left transition-colors cursor-pointer
-                  ${address === node.address
+                  ${address.split(',').map(a => a.trim()).includes(node.address)
                     ? 'border-vmm-accent bg-vmm-accent/5'
                     : 'border-vmm-border hover:border-vmm-accent/30 hover:bg-vmm-surface-hover'}`}
               >
-                <Server size={16} className={address === node.address ? 'text-vmm-accent' : 'text-vmm-text-muted'} />
+                <Server size={16} className={address.split(',').map(a => a.trim()).includes(node.address) ? 'text-vmm-accent' : 'text-vmm-text-muted'} />
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium text-vmm-text">{node.hostname}</span>
@@ -151,8 +188,22 @@ export default function AddHost() {
           </p>
 
           {error && (
-            <div className="bg-vmm-danger/10 border border-vmm-danger/30 text-vmm-danger rounded-lg p-3 text-sm">
+            <div className="bg-vmm-danger/10 border border-vmm-danger/30 text-vmm-danger rounded-lg p-3 text-sm whitespace-pre-line">
               {error}
+            </div>
+          )}
+
+          {results.length > 1 && (
+            <div className="space-y-1">
+              {results.map((r, i) => (
+                <div key={i} className={`flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg ${
+                  r.ok ? 'bg-vmm-success/10 text-vmm-success' : 'bg-vmm-danger/10 text-vmm-danger'
+                }`}>
+                  <span>{r.ok ? '\u2713' : '\u2717'}</span>
+                  <span className="font-medium">{r.address}</span>
+                  {r.error && <span className="text-xs opacity-75">— {r.error}</span>}
+                </div>
+              ))}
             </div>
           )}
 
@@ -161,13 +212,13 @@ export default function AddHost() {
               <label className="block text-sm font-medium text-vmm-text mb-1">Host Address</label>
               <input
                 type="text" value={address} onChange={e => setAddress(e.target.value)}
-                placeholder="192.168.1.10"
+                placeholder="192.168.1.10, 192.168.1.11, 192.168.1.12"
                 className="w-full px-3 py-2 bg-vmm-bg border border-vmm-border rounded-lg text-vmm-text text-sm
                   focus:ring-1 focus:ring-vmm-accent focus:border-vmm-accent"
                 required
               />
               <p className="text-xs text-vmm-text-muted mt-1">
-                IP, hostname, or full URL. Port 8443 with https/http auto-detection.
+                IP, hostname, or full URL. Comma-separated for multiple hosts. Port 8443 with https/http auto-detection.
               </p>
               {probeStatus && (
                 <p className="text-xs text-vmm-accent mt-1 flex items-center gap-1.5">

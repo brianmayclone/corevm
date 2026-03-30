@@ -6,6 +6,7 @@ use axum::Json;
 use serde::Serialize;
 use std::sync::Arc;
 use crate::state::CoreSanState;
+use crate::storage::chunk::deterministic_file_id;
 
 #[derive(Serialize)]
 pub struct FileEntry {
@@ -340,10 +341,11 @@ pub async fn mkdir(
     let marker_path = format!("{}/.keep", body.path.trim_end_matches('/'));
     let db = state.db.lock().unwrap();
     let now = chrono::Utc::now().to_rfc3339();
+    let file_id = deterministic_file_id(&volume_id, &marker_path);
     db.execute(
-        "INSERT OR IGNORE INTO file_map (volume_id, rel_path, size_bytes, version, created_at, updated_at)
-         VALUES (?1, ?2, 0, 0, ?3, ?3)",
-        rusqlite::params![&volume_id, &marker_path, &now],
+        "INSERT OR IGNORE INTO file_map (id, volume_id, rel_path, size_bytes, version, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 0, 0, ?4, ?4)",
+        rusqlite::params![file_id, &volume_id, &marker_path, &now],
     ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
 
     tracing::info!("Created directory {}/{}", volume_id, body.path);
@@ -443,19 +445,15 @@ pub async fn allocate_disk(
         let chunk_count = ((size_bytes + chunk_size - 1) / chunk_size) as u32;
 
         // Create file_map entry with the full logical size
+        let file_id = deterministic_file_id(&volume_id, &body.path);
         db.execute(
-            "INSERT INTO file_map (volume_id, rel_path, size_bytes, sha256, version, chunk_count, created_at, updated_at)
-             VALUES (?1, ?2, ?3, '', 1, ?4, ?5, ?5)
+            "INSERT INTO file_map (id, volume_id, rel_path, size_bytes, sha256, version, chunk_count, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, '', 1, ?5, ?6, ?6)
              ON CONFLICT(volume_id, rel_path) DO UPDATE SET
                 size_bytes = excluded.size_bytes, version = version + 1,
                 chunk_count = excluded.chunk_count, updated_at = excluded.updated_at",
-            rusqlite::params![&volume_id, &body.path, size_bytes as i64, chunk_count, &now],
+            rusqlite::params![file_id, &volume_id, &body.path, size_bytes as i64, chunk_count, &now],
         ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("file_map: {}", e)))?;
-
-        let file_id: i64 = db.query_row(
-            "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
-            rusqlite::params![&volume_id, &body.path], |row| row.get(0),
-        ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("get file_id: {}", e)))?;
 
         // True thin provisioning: NO file_chunks entries created upfront.
         // Chunks are created on-demand when the VM actually writes to them.

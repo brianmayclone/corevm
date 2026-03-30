@@ -85,23 +85,52 @@ export default function VolumeBrowser({ open, onClose, volumeId, volumeName, san
     loadDir(currentPath)
   }
 
+  const [uploadPercent, setUploadPercent] = useState(0)
+  const [uploadFileName, setUploadFileName] = useState('')
+  const [uploadFileIdx, setUploadFileIdx] = useState(0)
+  const [uploadFileTotal, setUploadFileTotal] = useState(0)
+
+  const uploadFile = (url: string, file: File): Promise<boolean> => {
+    return new Promise((resolve) => {
+      const xhr = new XMLHttpRequest()
+      xhr.open('PUT', url)
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream')
+      const token = localStorage.getItem('vmm_token')
+      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) setUploadPercent(Math.round((e.loaded / e.total) * 100))
+      }
+      xhr.onload = () => resolve(xhr.status >= 200 && xhr.status < 300)
+      xhr.onerror = () => resolve(false)
+      xhr.send(file)
+    })
+  }
+
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
     if (!files || files.length === 0) return
     setUploading(true)
+    setUploadFileTotal(files.length)
 
-    for (const file of Array.from(files)) {
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i]
       const fullPath = currentPath ? `${currentPath}/${file.name}` : file.name
-      const data = await file.arrayBuffer()
-      await doFetch(sanApi(`/api/volumes/${volumeId}/files/${encodeURIComponent(fullPath)}`), {
-        method: 'PUT',
-        body: new Uint8Array(data),
-      })
+      setUploadFileName(file.name)
+      setUploadFileIdx(i + 1)
+      setUploadPercent(0)
+
+      const ok = await uploadFile(
+        sanApi(`/api/volumes/${volumeId}/files/${encodeURIComponent(fullPath)}`),
+        file,
+      )
+      if (!ok) console.error(`Upload failed for ${file.name}`)
     }
 
     setUploading(false)
+    setUploadFileName('')
+    setUploadPercent(0)
     loadDir(currentPath)
-    e.target.value = '' // reset input
+    e.target.value = ''
   }
 
   if (!open) return null
@@ -109,7 +138,7 @@ export default function VolumeBrowser({ open, onClose, volumeId, volumeName, san
   const pathParts = currentPath.split('/').filter(Boolean)
 
   return (
-    <Dialog open={open} onClose={onClose} title={`Browse: ${volumeName}`} width="max-w-4xl">
+    <Dialog open={open} onClose={uploading ? () => {} : onClose} title={`Browse: ${volumeName}`} width="max-w-4xl">
       <div className="space-y-3">
         {/* Breadcrumb + Actions */}
         <div className="flex items-center justify-between">
@@ -126,20 +155,38 @@ export default function VolumeBrowser({ open, onClose, volumeId, volumeName, san
           </div>
           <div className="flex items-center gap-2">
             {currentPath && (
-              <Button variant="ghost" size="sm" onClick={navigateUp}>
+              <Button variant="ghost" size="sm" onClick={navigateUp} disabled={uploading}>
                 <ArrowLeft size={13} /> Up
               </Button>
             )}
-            <Button variant="ghost" size="sm" onClick={() => { setMkdirOpen(true); setNewDirName('') }}>
+            <Button variant="ghost" size="sm" onClick={() => { setMkdirOpen(true); setNewDirName('') }} disabled={uploading}>
               <FolderPlus size={13} /> New Folder
             </Button>
-            <label className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg
-              bg-vmm-accent hover:bg-vmm-accent-hover text-white transition-colors cursor-pointer">
+            <label className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg
+              text-white transition-colors ${uploading ? 'bg-vmm-accent/50 cursor-not-allowed' : 'bg-vmm-accent hover:bg-vmm-accent-hover cursor-pointer'}`}>
               <Upload size={13} /> {uploading ? 'Uploading...' : 'Upload'}
               <input type="file" multiple className="hidden" onChange={handleUpload} disabled={uploading} />
             </label>
           </div>
         </div>
+
+        {/* Upload Progress */}
+        {uploading && (
+          <div className="space-y-2 p-3 bg-vmm-surface rounded-lg border border-vmm-border">
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-vmm-text font-medium truncate max-w-[70%]">
+                {uploadFileTotal > 1 ? `(${uploadFileIdx}/${uploadFileTotal}) ` : ''}{uploadFileName}
+              </span>
+              <span className="text-vmm-text-muted">{uploadPercent}%</span>
+            </div>
+            <div className="w-full h-2 bg-vmm-bg rounded-full overflow-hidden">
+              <div
+                className="h-full bg-vmm-accent rounded-full transition-all duration-300"
+                style={{ width: `${uploadPercent}%` }}
+              />
+            </div>
+          </div>
+        )}
 
         {/* File List */}
         <div className="border border-vmm-border rounded-lg overflow-hidden max-h-[50vh] overflow-y-auto">
@@ -181,7 +228,7 @@ export default function VolumeBrowser({ open, onClose, volumeId, volumeName, san
                       {entry.updated_at ? new Date(entry.updated_at).toLocaleString() : '—'}
                     </td>
                     <td className="py-2 px-1">
-                      {!entry.is_dir && (
+                      {!entry.is_dir && !uploading && (
                         <button onClick={() => setDeleteEntry(entry)}
                           className="p-1 rounded hover:bg-vmm-danger/10 text-vmm-text-muted hover:text-vmm-danger transition-colors cursor-pointer">
                           <Trash2 size={12} />
