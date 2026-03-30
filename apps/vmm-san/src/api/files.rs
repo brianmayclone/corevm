@@ -457,19 +457,12 @@ pub async fn allocate_disk(
             rusqlite::params![&volume_id, &body.path], |row| row.get(0),
         ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("get file_id: {}", e)))?;
 
-        // Create file_chunks entries (metadata only — no physical data written)
-        for ci in 0..chunk_count {
-            let offset = ci as u64 * chunk_size;
-            let this_size = std::cmp::min(chunk_size, size_bytes - offset);
-            log_err!(db.execute(
-                "INSERT OR IGNORE INTO file_chunks (file_id, chunk_index, offset_bytes, size_bytes)
-                 VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![file_id, ci, offset, this_size],
-            ), "allocate-disk: INSERT file_chunks");
-        }
+        // True thin provisioning: NO file_chunks entries created upfront.
+        // Chunks are created on-demand when the VM actually writes to them.
+        // This makes allocate-disk instant regardless of disk size.
 
-        tracing::info!("Allocated disk {}/{}: {} chunks, {} bytes (thin provisioned)",
-            volume_id, body.path, chunk_count, size_bytes);
+        tracing::info!("Allocated disk {}/{}: {} bytes (thin provisioned, instant)",
+            volume_id, body.path, size_bytes);
 
         file_id
     };

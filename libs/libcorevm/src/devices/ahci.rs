@@ -310,6 +310,14 @@ impl AhciDrive {
         }
     }
 
+    /// Returns true if this drive should use deferred (async) I/O — either fd-backed or SAN backend.
+    fn has_deferred_io(&self) -> bool {
+        if self.disk_fd >= 0 { return true; }
+        #[cfg(feature = "std")]
+        if self.io_backend.is_some() { return true; }
+        false
+    }
+
     fn sector_size(&self) -> usize {
         match self.kind { AhciDriveKind::AtaDisk => SECTOR_SIZE, AhciDriveKind::AtapiCdrom => ATAPI_SECTOR_SIZE }
     }
@@ -358,6 +366,15 @@ impl AhciDrive {
     }
 
     fn read_at_host(&self, offset: u64, buf: &mut [u8]) {
+        // SAN backend — bypass fd entirely
+        #[cfg(feature = "std")]
+        if let Some(ref backend) = self.io_backend {
+            match backend.read_at(buf, offset) {
+                Ok(n) => { if n < buf.len() { buf[n..].fill(0); } }
+                Err(_) => { buf.fill(0); }
+            }
+            return;
+        }
         if self.disk_fd >= 0 {
             #[cfg(feature = "std")]
             {
@@ -418,6 +435,14 @@ impl AhciDrive {
     }
 
     fn write_at_host(&mut self, offset: u64, buf: &[u8]) {
+        // SAN backend — bypass fd entirely
+        #[cfg(feature = "std")]
+        if let Some(ref backend) = self.io_backend {
+            if let Err(e) = backend.write_at(buf, offset) {
+                eprintln!("[ahci] SAN WRITE ERROR at offset=0x{:X} len={}: {}", offset, buf.len(), e);
+            }
+            return;
+        }
         if self.disk_fd >= 0 {
             #[cfg(feature = "std")]
             {
@@ -923,7 +948,7 @@ impl Ahci {
                 | ATA_CMD_READ_SECTORS | ATA_CMD_READ_SECTORS_EXT => {
                     let ss = port.drive.sector_size();
                     let total = count as usize * ss;
-                    if port.drive.disk_fd >= 0 {
+                    if port.drive.has_deferred_io() {
                         // Mark slot as in-flight (CI stays set so guest sees "busy")
                         port.deferred_ci |= 1 << slot;
                         self.diag_deferred_cmds += 1;
@@ -950,7 +975,7 @@ impl Ahci {
                     let total = count as usize * ss;
                     let mut buf = vec![0u8; total];
                     if prdtl > 0 { dma.read_prdt(prdt_base, prdtl, &mut buf); }
-                    if port.drive.disk_fd >= 0 {
+                    if port.drive.has_deferred_io() {
                         port.deferred_ci |= 1 << slot;
                         self.diag_deferred_cmds += 1;
                         self.pending_io.push(DeferredIo {
@@ -969,7 +994,7 @@ impl Ahci {
                     if let Some(cb) = self.io_activity_cb { cb(self.io_activity_ctx, port_idx as u8); }
                 }
                 ATA_CMD_FLUSH | ATA_CMD_FLUSH_EXT => {
-                    if port.drive.disk_fd >= 0 {
+                    if port.drive.has_deferred_io() {
                         port.deferred_ci |= 1 << slot;
                         self.diag_deferred_cmds += 1;
                         self.pending_io.push(DeferredIo {
@@ -1175,27 +1200,25 @@ impl Ahci {
 impl Drop for Ahci {
     fn drop(&mut self) {
         for port in &mut self.ports {
+            // Flush any pending cache writes (for both fd and SAN backends)
+            if port.drive.cache.dirty_count() > 0 && (port.drive.disk_fd >= 0 || port.drive.io_backend.is_some()) {
+                let dirty = port.drive.cache.collect_dirty();
+                for (offset, data) in dirty {
+                    port.drive.write_at_host(offset, &data);
+                }
+            }
+            // SAN backend — flush and drop
+            if let Some(ref backend) = port.drive.io_backend {
+                let _ = backend.flush();
+            }
+            port.drive.io_backend = None;
+            // fd-backed drive — sync and close
             if port.drive.disk_fd >= 0 {
-                // Flush any pending cache writes
-                if port.drive.cache.dirty_count() > 0 {
-                    let dirty = port.drive.cache.collect_dirty();
-                    for (offset, data) in dirty {
-                        port.drive.write_at_host(offset, &data);
-                    }
-                }
-                // Sync and close the fd
-                #[cfg(feature = "std")]
-                {
-                    // SAFETY: taking ownership of fd; File::drop will close it
-                    let file = unsafe { AhciDrive::borrow_file(port.drive.disk_fd) };
-                    // NOTE: we do NOT mem::forget here — let File drop to close the fd
-                    let _ = file.sync_all();
-                    // File drops here and closes the fd
-                }
-                #[cfg(not(feature = "std"))]
-                {
-                    // fd leaks on non-std — acceptable for no_std targets
-                }
+                // SAFETY: taking ownership of fd; File::drop will close it
+                let file = unsafe { AhciDrive::borrow_file(port.drive.disk_fd) };
+                // NOTE: we do NOT mem::forget here — let File drop to close the fd
+                let _ = file.sync_all();
+                // File drops here and closes the fd
                 port.drive.disk_fd = -1;
             }
         }

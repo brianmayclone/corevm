@@ -284,12 +284,20 @@ pub fn start_vm(config: &VmConfig, bios_paths: &[std::path::PathBuf]) -> Result<
 
 /// Resolve a SAN volume name to its UUID by querying the local vmm-san daemon.
 fn resolve_san_volume_id(volume_name: &str) -> Option<String> {
-    // Query local vmm-san at port 7443
-    let resp = std::process::Command::new("curl")
-        .args(["-s", "-m", "3", "http://127.0.0.1:7443/api/volumes"])
-        .output().ok()?;
-    let body = String::from_utf8_lossy(&resp.stdout);
-    let volumes: serde_json::Value = serde_json::from_str(&body).ok()?;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    let mut stream = TcpStream::connect("127.0.0.1:7443").ok()?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(3))).ok();
+    let req = "GET /api/volumes HTTP/1.0\r\nHost: 127.0.0.1:7443\r\n\r\n";
+    stream.write_all(req.as_bytes()).ok()?;
+
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).ok();
+    let response = String::from_utf8_lossy(&buf);
+    let body = response.split("\r\n\r\n").nth(1)?;
+
+    let volumes: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
     volumes.as_array()?.iter().find_map(|v| {
         if v["name"].as_str() == Some(volume_name) {
             v["id"].as_str().map(|s| s.to_string())
