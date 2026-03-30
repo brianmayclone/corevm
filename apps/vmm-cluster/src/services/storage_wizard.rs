@@ -547,8 +547,9 @@ impl StorageWizardService {
         // Step 4: Add backends on each host
         steps.push(WizardStep { label: "Adding storage backends".into(), status: "running".into(), error: None });
 
-        let default_backend = vec![config.mount_path.replace("/vmm/san/", "/vmm/san-data/")];
-        let paths_to_add = if backend_paths.is_empty() { &default_backend } else { backend_paths };
+        // Backends are ONLY claimed disks — they are automatically registered when disks are claimed.
+        // No manual backend creation needed (the old /vmm/san-data/ path was on the root FS which is wrong).
+        let paths_to_add: &[String] = backend_paths;
 
         for host_id in &config.host_ids {
             let node = match state.nodes.get(host_id) {

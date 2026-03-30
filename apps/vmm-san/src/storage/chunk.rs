@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 use sha2::{Sha256, Digest};
 
-pub const DEFAULT_CHUNK_SIZE: u64 = 64 * 1024 * 1024; // 64 MB
+pub const DEFAULT_CHUNK_SIZE: u64 = 4 * 1024 * 1024; // 4 MB
 
 /// Describes which part of a chunk is affected by a read/write operation.
 #[derive(Debug, Clone)]

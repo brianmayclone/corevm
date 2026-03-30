@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS volumes (
     sync_mode       TEXT NOT NULL DEFAULT 'async',
     -- FTT-based resilience (new model)
     ftt             INTEGER NOT NULL DEFAULT 1,       -- Failures To Tolerate: 0, 1, 2
-    chunk_size_bytes INTEGER NOT NULL DEFAULT 67108864, -- 64MB default
+    chunk_size_bytes INTEGER NOT NULL DEFAULT 4194304, -- 4MB default
     local_raid      TEXT NOT NULL DEFAULT 'stripe',   -- stripe, mirror, stripe_mirror
     max_size_bytes  INTEGER NOT NULL DEFAULT 0,       -- 0 = unlimited (legacy)
     -- Status
@@ -282,7 +282,7 @@ fn migrate(db: &Connection) {
     ).ok();
     // FTT + chunk fields on volumes
     db.execute_batch("ALTER TABLE volumes ADD COLUMN ftt INTEGER NOT NULL DEFAULT 1;").ok();
-    db.execute_batch("ALTER TABLE volumes ADD COLUMN chunk_size_bytes INTEGER NOT NULL DEFAULT 67108864;").ok();
+    db.execute_batch("ALTER TABLE volumes ADD COLUMN chunk_size_bytes INTEGER NOT NULL DEFAULT 4194304;").ok();
     db.execute_batch("ALTER TABLE volumes ADD COLUMN local_raid TEXT NOT NULL DEFAULT 'stripe';").ok();
     // Chunk tracking on file_map
     db.execute_batch("ALTER TABLE file_map ADD COLUMN chunk_count INTEGER NOT NULL DEFAULT 0;").ok();

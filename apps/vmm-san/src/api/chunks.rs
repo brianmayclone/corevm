@@ -134,6 +134,17 @@ pub async fn write_chunk(
                 tracing::error!("write_chunk DB error on backend {}: {}", backend_id, e);
             }
         }
+
+        // Also track the sender as having this chunk (so we know it's replicated)
+        let sender_node_id = headers.get("X-CoreSAN-Sender-Node")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !sender_node_id.is_empty() && sender_node_id != state.node_id {
+            if let Ok(chunk_id) = ChunkService::get_chunk_id(&db, file_id, chunk_index) {
+                log_err!(ChunkService::track_remote_replica(&db, chunk_id, sender_node_id),
+                    "write_chunk: track sender replica");
+            }
+        }
     }
 
     tracing::info!("Received chunk {}/{}/idx{} ({} bytes, sha256={})",

@@ -145,21 +145,14 @@ export default function StorageCoresan() {
       setNewVolError(`FTT=${newVolFtt} needs at least ${requiredHosts} hosts. Select ${requiredHosts - 1} more.`)
       return
     }
+    // Create volume — backends are automatically the claimed disks on each node.
+    // No manual backend creation needed.
     const resp = await sanFetch(sanApi('/api/volumes'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: newVolName, max_size_bytes: newVolSizeGb * 1024 * 1024 * 1024, ftt: newVolFtt, local_raid: newVolRaid }),
     })
     if (!resp.ok) { setNewVolError(await resp.text() || 'Failed to create volume'); return }
-    const volData = await resp.json()
-    const backendPath = `/vmm/san-data/${newVolName}`
-    for (const hostId of newVolSelectedHosts) {
-      await sanFetch(sanApi(`/api/volumes/${volData.id}/backends`), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ host_id: hostId, path: backendPath }),
-      }).catch(() => {})
-    }
     setCreateVolumeOpen(false)
     setNewVolName('')
     setNewVolSelectedHosts([])
@@ -171,12 +164,8 @@ export default function StorageCoresan() {
     setAddHostError('')
     if (!addHostId || !selectedVolume || !sel) return
     try {
-      const resp = await sanFetch(sanApi(`/api/volumes/${selectedVolume}/backends`), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ host_id: addHostId, path: `/vmm/san-data/${sel.name}` }),
-      })
-      if (!resp.ok) { setAddHostError(`Failed to add backend: ${await resp.text()}`); return }
+      // Peer registration is automatic — the volume sync happens when the SAN peer is online.
+      // No manual backend creation needed (backends = claimed disks).
       setAddHostOpen(false)
       setAddHostId('')
       refresh()

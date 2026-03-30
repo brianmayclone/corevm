@@ -133,9 +133,9 @@ async fn run_push_replicator(
                 };
 
                 let client = PeerClient::new(&state.config.peer.secret);
-                match client.push_chunk_with_path(
+                match client.push_chunk_full(
                     &peer_addr, &event.volume_id, event.file_id, *chunk_index, data,
-                    &event.rel_path,
+                    &event.rel_path, &state.node_id,
                 ).await {
                     Ok(_) => {
                         // Record in our local DB that this peer now has the chunk

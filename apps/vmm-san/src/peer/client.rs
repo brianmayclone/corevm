@@ -211,11 +211,28 @@ impl PeerClient {
         data: Vec<u8>,
         rel_path: &str,
     ) -> Result<(), String> {
+        self.push_chunk_full(peer_address, volume_id, file_id, chunk_index, data, rel_path, "").await
+    }
+
+    /// Push a chunk with all metadata headers (rel_path + sender node_id).
+    pub async fn push_chunk_full(
+        &self,
+        peer_address: &str,
+        volume_id: &str,
+        file_id: i64,
+        chunk_index: u32,
+        data: Vec<u8>,
+        rel_path: &str,
+        sender_node_id: &str,
+    ) -> Result<(), String> {
         let url = format!("{}/api/chunks/{}/{}/{}", peer_address, volume_id, file_id, chunk_index);
         let mut req = self.http.put(&url)
             .header(PEER_SECRET_HEADER, &self.secret);
         if !rel_path.is_empty() {
             req = req.header("X-CoreSAN-Rel-Path", rel_path);
+        }
+        if !sender_node_id.is_empty() {
+            req = req.header("X-CoreSAN-Sender-Node", sender_node_id);
         }
         let resp = req.body(data)
             .send().await

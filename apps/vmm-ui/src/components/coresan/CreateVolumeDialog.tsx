@@ -33,6 +33,10 @@ export default function CreateVolumeDialog({
   newVolName, setNewVolName, newVolSizeGb, setNewVolSizeGb, newVolFtt, setNewVolFtt, newVolRaid, setNewVolRaid,
   newVolSelectedHosts, setNewVolSelectedHosts, newVolError, volumes,
 }: Props) {
+  // RAID disk requirements
+  const claimedDisks = status?.claimed_disks || 0
+  const minDisks: Record<string, number> = { stripe: 1, mirror: 2, stripe_mirror: 4 }
+
   // Get raw disk capacity from SAN status (available even before any volumes exist)
   const rawTotal = status?.storage_total_bytes || 0
   const rawFree = status?.storage_free_bytes || 0
@@ -46,10 +50,6 @@ export default function CreateVolumeDialog({
   const totalAllocated = volumes.reduce((sum, v) => sum + (v.max_size_bytes || 0), 0)
   const freeAfterAlloc = diskTotal > 0 ? Math.max(0, Math.min(diskFree, diskTotal - totalAllocated)) : 0
   const maxSizeGb = Math.floor(freeAfterAlloc / (1024 * 1024 * 1024))
-
-  // RAID disk requirements
-  const minDisks: Record<string, number> = { stripe: 1, mirror: 2, stripe_mirror: 4 }
-  const claimedDisks = status?.claimed_disks || 0
   const raidMinDisks = minDisks[newVolRaid] || 1
   const raidDiskOk = claimedDisks >= raidMinDisks
   return (

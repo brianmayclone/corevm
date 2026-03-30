@@ -218,7 +218,7 @@ async fn repair_single_chunk(
                 .unwrap_or_default()
         };
 
-        if client.push_chunk_with_path(&target_addr, volume_id, file_id, chunk_index, data, &rel_path).await.is_ok() {
+        if client.push_chunk_full(&target_addr, volume_id, file_id, chunk_index, data, &rel_path, &state.node_id).await.is_ok() {
             // Record in our LOCAL DB that this peer now has the chunk.
             // Without this, the repair engine would keep thinking the chunk is under-replicated.
             let db = state.db.lock().unwrap();

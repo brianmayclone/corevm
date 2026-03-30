@@ -226,15 +226,19 @@ export default function VolumeChunkMap() {
       {/* Defrag-style block grid */}
       <Card>
         <div className="p-4">
-          <div className="flex flex-wrap gap-[2px]" style={{ minHeight: 40 }}>
-            {/* Used chunks */}
-            {consolidated.map((chunk) => (
+          <div className="flex flex-wrap gap-[1px]" style={{ minHeight: 40 }}>
+            {/* Used chunks — block size scales down for large volumes */}
+            {consolidated.map((chunk) => {
+              const totalBlocks = consolidated.length + emptySlots
+              const blockSize = totalBlocks > 5000 ? 4 : totalBlocks > 2000 ? 6 : totalBlocks > 500 ? 8 : 12
+              return (
               <div
                 key={`${chunk.file_id}-${chunk.chunk_index}`}
-                className="rounded-[2px] cursor-pointer transition-all duration-100"
+                className="cursor-pointer transition-all duration-100"
                 style={{
-                  width: 12,
-                  height: 12,
+                  width: blockSize,
+                  height: blockSize,
+                  borderRadius: blockSize > 6 ? 2 : 1,
                   background: healthColor[chunk.health],
                   border: `1px solid ${healthBorder[chunk.health]}`,
                   opacity: hoveredChunk && hoveredChunk.file_id === chunk.file_id && hoveredChunk.chunk_index !== chunk.chunk_index
@@ -247,20 +251,23 @@ export default function VolumeChunkMap() {
                 onMouseEnter={() => setHoveredChunk(chunk)}
                 onMouseLeave={() => setHoveredChunk(null)}
               />
-            ))}
+            )})}
             {/* Empty/free slots */}
-            {Array.from({ length: emptySlots }, (_, i) => (
+            {Array.from({ length: Math.min(emptySlots, 5000) }, (_, i) => {
+              const totalBlocks = consolidated.length + emptySlots
+              const blockSize = totalBlocks > 5000 ? 4 : totalBlocks > 2000 ? 6 : totalBlocks > 500 ? 8 : 12
+              return (
               <div
                 key={`empty-${i}`}
-                className="rounded-[2px]"
                 style={{
-                  width: 12,
-                  height: 12,
+                  width: blockSize,
+                  height: blockSize,
+                  borderRadius: blockSize > 6 ? 2 : 1,
                   background: healthColor.empty,
                   border: `1px solid ${healthBorder.empty}`,
                 }}
               />
-            ))}
+            )})}
           </div>
         </div>
       </Card>

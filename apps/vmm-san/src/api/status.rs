@@ -324,7 +324,7 @@ fn query_volume_raid_info(db: &rusqlite::Connection, volume_id: &str) -> (u32, S
         "SELECT ftt, local_raid, chunk_size_bytes FROM volumes WHERE id = ?1",
         rusqlite::params![volume_id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    ).unwrap_or((1, "stripe".into(), 67108864))
+    ).unwrap_or((1, "stripe".into(), 4194304))
 }
 
 fn query_chunk_counts(db: &rusqlite::Connection, volume_id: &str) -> (u64, u64, u64) {
