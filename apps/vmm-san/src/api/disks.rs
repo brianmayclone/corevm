@@ -133,6 +133,15 @@ pub async fn claim(
     let disk_id = Uuid::new_v4().to_string();
     let mount_path = format!("/vmm/san-disks/{}", disk_id);
 
+    // Remove any old released/error entry for this device_path so re-claim works
+    {
+        let db = state.db.lock().unwrap();
+        db.execute(
+            "DELETE FROM claimed_disks WHERE device_path = ?1 AND status IN ('released', 'error')",
+            rusqlite::params![&body.device_path],
+        ).ok();
+    }
+
     // Record claim in DB (status: formatting)
     {
         let db = state.db.lock().unwrap();

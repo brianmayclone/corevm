@@ -10,12 +10,15 @@
 #   - Shared L2 network (bridge or user-mode NAT with full connectivity)
 #
 # Usage:
-#   ./tools/coresan/run-install-vms.sh                     # 3 VMs (default)
-#   ./tools/coresan/run-install-vms.sh --count 5            # 5 VMs
+#   ./tools/coresan/run-install-vms.sh                     # 1 VM (next free slot)
+#   ./tools/coresan/run-install-vms.sh --count 3            # 3 VMs
 #   ./tools/coresan/run-install-vms.sh --reset              # Recreate all disks
-#   ./tools/coresan/run-install-vms.sh --count 4 --reset    # 4 VMs, fresh disks
+#   ./tools/coresan/run-install-vms.sh --count 2 --reset    # 2 VMs, fresh disks
 #   ./tools/coresan/run-install-vms.sh --bridge br0         # Use existing bridge
 #   ./tools/coresan/run-install-vms.sh --cleanup            # Remove all VM data
+#
+# Parallel: Run multiple times to add VMs at runtime. Each instance
+# auto-detects the next free slot (tap device + IP address).
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -36,7 +39,7 @@ fail()  { echo -e "${RED}[install-vm]${NC} $*"; exit 1; }
 
 # ── Defaults ─────────────────────────────────────────────────────
 
-VM_COUNT=3
+VM_COUNT=1
 RESET_DISKS=false
 CLEANUP=false
 BRIDGE=""
@@ -153,7 +156,37 @@ create_disks() {
     fi
 }
 
-for i in $(seq 1 "$VM_COUNT"); do
+# ── Find next free VM slots ──────────────────────────────────────
+#
+# Look at existing tap devices and VM dirs to find which slots are taken.
+# This allows parallel invocations to add VMs without conflicts.
+
+find_free_slots() {
+    local needed=$1
+    local slots=()
+    for candidate in $(seq 1 99); do
+        # Check if tap device or QEMU process already exists for this slot
+        if ip link show "coresan-tap${candidate}" &>/dev/null 2>&1; then
+            continue
+        fi
+        if pgrep -f "coresan-vm${candidate}" &>/dev/null 2>&1; then
+            continue
+        fi
+        slots+=("$candidate")
+        if [[ ${#slots[@]} -ge $needed ]]; then
+            break
+        fi
+    done
+    if [[ ${#slots[@]} -lt $needed ]]; then
+        fail "Cannot find $needed free VM slots (checked 1-99)"
+    fi
+    echo "${slots[@]}"
+}
+
+VM_SLOTS=($(find_free_slots "$VM_COUNT"))
+info "Using VM slots: ${VM_SLOTS[*]}"
+
+for i in "${VM_SLOTS[@]}"; do
     create_disks "$i"
 done
 ok "Disk images ready."
@@ -181,15 +214,17 @@ cleanup_on_exit() {
         kill "$pid" 2>/dev/null && wait "$pid" 2>/dev/null || true
     done
 
-    # Stop dnsmasq DHCP server
-    if [[ -n "$DNSMASQ_PID" ]] && kill -0 "$DNSMASQ_PID" 2>/dev/null; then
-        kill "$DNSMASQ_PID" 2>/dev/null || true
-        info "Stopped dnsmasq (PID $DNSMASQ_PID)"
-    elif [[ -f "$DNSMASQ_PIDFILE" ]]; then
-        kill "$(cat "$DNSMASQ_PIDFILE")" 2>/dev/null || true
-        rm -f "$DNSMASQ_PIDFILE"
+    # Stop dnsmasq only if we started it (not if reused from another instance)
+    if ! ${DNSMASQ_REUSED:-false}; then
+        if [[ -n "$DNSMASQ_PID" ]] && kill -0 "$DNSMASQ_PID" 2>/dev/null; then
+            kill "$DNSMASQ_PID" 2>/dev/null || true
+            info "Stopped dnsmasq (PID $DNSMASQ_PID)"
+        elif [[ -f "$DNSMASQ_PIDFILE" ]]; then
+            kill "$(cat "$DNSMASQ_PIDFILE")" 2>/dev/null || true
+            rm -f "$DNSMASQ_PIDFILE"
+        fi
+        rm -f "$DNSMASQ_LEASEFILE"
     fi
-    rm -f "$DNSMASQ_LEASEFILE"
 
     for tap in "${TAP_DEVICES[@]}"; do
         ip link set "$tap" down 2>/dev/null || true
@@ -245,8 +280,8 @@ setup_bridge_network() {
         info "Using existing bridge: $BRIDGE_NAME"
     fi
 
-    # Create tap devices
-    for i in $(seq 1 "$VM_COUNT"); do
+    # Create tap devices for our slots only
+    for i in "${VM_SLOTS[@]}"; do
         local tap="coresan-tap${i}"
         if ip link show "$tap" &>/dev/null; then
             ip link delete "$tap" 2>/dev/null || true
@@ -277,17 +312,40 @@ ip_for_vm() {
 
 # ── Start DHCP server on bridge ──────────────────────────────────
 
+DNSMASQ_REUSED=false
+
 start_dhcp() {
-    # Build static DHCP host entries: MAC → fixed IP per VM
+    # Check if dnsmasq is already running on this bridge (from another instance)
+    if [[ -f "$DNSMASQ_PIDFILE" ]] && kill -0 "$(cat "$DNSMASQ_PIDFILE")" 2>/dev/null; then
+        ok "dnsmasq already running (PID $(cat "$DNSMASQ_PIDFILE")), reusing."
+        DNSMASQ_PID=""
+        DNSMASQ_REUSED=true
+        return
+    fi
+
+    # Also check by process
+    local existing_pid
+    existing_pid=$(pgrep -f "dnsmasq.*${BRIDGE_NAME}" 2>/dev/null | head -1 || true)
+    if [[ -n "$existing_pid" ]]; then
+        ok "dnsmasq already running on $BRIDGE_NAME (PID $existing_pid), reusing."
+        DNSMASQ_PID=""
+        DNSMASQ_REUSED=true
+        return
+    fi
+
+    # Build static DHCP host entries for ALL possible VMs (1-99)
+    # This way any parallel instance can add VMs without restarting dnsmasq
     local dhcp_hosts=()
-    for i in $(seq 1 "$VM_COUNT"); do
+    for i in $(seq 1 99); do
         local mac ip
         mac=$(mac_for_vm "$i")
         ip=$(ip_for_vm "$i")
         dhcp_hosts+=("--dhcp-host=${mac},coresan-vm${i},${ip}")
     done
 
-    info "Starting dnsmasq DHCP on $BRIDGE_NAME (static: ${SUBNET}.101–${SUBNET}.$((100 + VM_COUNT)))"
+    local first_slot="${VM_SLOTS[0]}"
+    local last_slot="${VM_SLOTS[${#VM_SLOTS[@]}-1]}"
+    info "Starting dnsmasq DHCP on $BRIDGE_NAME (range: ${SUBNET}.101–${SUBNET}.199)"
     dnsmasq \
         --strict-order \
         --bind-interfaces \
@@ -319,15 +377,17 @@ start_dhcp
 
 # ── Launch VMs ───────────────────────────────────────────────────
 
-info "Starting ${VM_COUNT} VMs..."
+info "Starting ${VM_COUNT} VM(s) (slots: ${VM_SLOTS[*]})..."
 echo ""
 
-for i in $(seq 1 "$VM_COUNT"); do
+tap_idx=0
+for i in "${VM_SLOTS[@]}"; do
     vm_path="$VM_DIR/vm${i}"
     mac=$(mac_for_vm "$i")
     monitor_sock="$vm_path/monitor.sock"
     serial_log="$vm_path/serial.log"
-    tap_dev="${TAP_DEVICES[$((i - 1))]}"
+    tap_dev="${TAP_DEVICES[$tap_idx]}"
+    tap_idx=$((tap_idx + 1))
 
     vm_ip=$(ip_for_vm "$i")
     info "VM ${i}: ${vm_ip}  mac=${mac}  tap=${tap_dev}"
@@ -354,21 +414,21 @@ for i in $(seq 1 "$VM_COUNT"); do
 done
 
 echo ""
-ok "${VM_COUNT} VMs started with GUI windows."
+ok "${VM_COUNT} VM(s) started with GUI windows."
 echo ""
 info "VM network (fixed DHCP assignments):"
 echo "  Host:   ${SUBNET}.1"
-for i in $(seq 1 "$VM_COUNT"); do
+for i in "${VM_SLOTS[@]}"; do
     echo "  VM ${i}:   $(ip_for_vm "$i")  ($(mac_for_vm "$i"))"
 done
 echo ""
 info "Monitor sockets (use 'socat - UNIX-CONNECT:<path>'):"
-for i in $(seq 1 "$VM_COUNT"); do
+for i in "${VM_SLOTS[@]}"; do
     echo "  VM ${i}: $VM_DIR/vm${i}/monitor.sock"
 done
 echo ""
 info "Serial logs:"
-for i in $(seq 1 "$VM_COUNT"); do
+for i in "${VM_SLOTS[@]}"; do
     echo "  VM ${i}: $VM_DIR/vm${i}/serial.log"
 done
 echo ""
