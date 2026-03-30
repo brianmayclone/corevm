@@ -168,6 +168,11 @@ pub async fn create(
         tracing::info!("FUSE mounted: /vmm/san/{}", body.name);
     }
 
+    // Start disk server for this volume (direct VM I/O via UDS)
+    crate::engine::disk_server::spawn_volume_listener(
+        Arc::clone(&state), id.clone(), body.name.clone(),
+    );
+
     // Sync volume to all peers so they mount it too
     let vol_json = serde_json::json!({
         "id": &id, "name": &body.name, "ftt": body.ftt,

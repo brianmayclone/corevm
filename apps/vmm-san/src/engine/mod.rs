@@ -22,3 +22,4 @@ pub mod metadata_sync;
 pub mod sanitize;
 pub mod smart_monitor;
 pub mod event_reporter;
+pub mod disk_server;

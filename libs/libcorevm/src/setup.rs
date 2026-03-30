@@ -561,6 +561,22 @@ pub fn attach_image_to_ahci(handle: u64, path: &str, port: u32, is_cdrom: bool) 
     Ok(())
 }
 
+/// Attach a SAN disk to an AHCI port via a DiskIoBackend.
+/// The backend handles all I/O — no file descriptor needed.
+/// This is ADDITIVE — the existing attach_image_to_ahci is unchanged.
+#[cfg(unix)]
+pub fn attach_san_disk_to_ahci(
+    handle: u64,
+    port: u32,
+    size: u64,
+    backend: Box<dyn crate::devices::ahci::DiskIoBackend>,
+) -> Result<(), String> {
+    // Access the AHCI controller through the VM handle.
+    // This uses the same pattern as corevm_ahci_attach_disk in ffi.rs.
+    crate::ffi::ahci_attach_san_backend(handle, port as usize, size, backend)
+
+}
+
 #[cfg(unix)]
 use std::os::unix::io::FromRawFd;
 

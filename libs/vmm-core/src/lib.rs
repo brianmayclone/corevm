@@ -6,4 +6,5 @@
 
 pub mod cluster;
 pub mod config;
+pub mod san_disk;
 pub mod snapshot;

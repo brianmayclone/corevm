@@ -183,11 +183,44 @@ pub fn start_vm(config: &VmConfig, bios_paths: &[std::path::PathBuf]) -> Result<
     }
 
     // Attach disk images (ports 0, 2, 3, 4, 5)
+    // SAN disks (path starts with /vmm/san/) use direct UDS connection to vmm-san.
+    // Local disks use traditional fd-based I/O.
     let disk_ports = [0u32, 2, 3, 4, 5];
     for (i, disk_path) in config.disk_images.iter().enumerate() {
         if !disk_path.is_empty() {
             if let Some(&port) = disk_ports.get(i) {
-                setup::attach_image_to_ahci(handle, disk_path, port, false)?;
+                if disk_path.starts_with("/vmm/san/") {
+                    // SAN disk — connect directly to vmm-san via UDS (bypasses FUSE)
+                    // Parse: /vmm/san/<volume_name>/<rel_path>
+                    let parts: Vec<&str> = disk_path.strip_prefix("/vmm/san/").unwrap().splitn(2, '/').collect();
+                    if parts.len() == 2 {
+                        let volume_name = parts[0];
+                        let rel_path = parts[1];
+                        // Resolve volume_id from volume_name via SAN API
+                        let volume_id = resolve_san_volume_id(volume_name);
+                        if let Some(vid) = volume_id {
+                            match libcorevm::san_disk::SanDiskConnection::open(&vid, rel_path) {
+                                Ok(conn) => {
+                                    let size = conn.disk_size;
+                                    tracing::info!("SAN disk attached: {} ({}B) via UDS on port {}", disk_path, size, port);
+                                    setup::attach_san_disk_to_ahci(handle, port, size, Box::new(conn))?;
+                                }
+                                Err(e) => {
+                                    tracing::warn!("SAN disk {} failed, falling back to FUSE: {}", disk_path, e);
+                                    setup::attach_image_to_ahci(handle, disk_path, port, false)?;
+                                }
+                            }
+                        } else {
+                            tracing::warn!("Cannot resolve SAN volume '{}', falling back to FUSE", volume_name);
+                            setup::attach_image_to_ahci(handle, disk_path, port, false)?;
+                        }
+                    } else {
+                        setup::attach_image_to_ahci(handle, disk_path, port, false)?;
+                    }
+                } else {
+                    // Local disk — standard fd-based I/O (unchanged)
+                    setup::attach_image_to_ahci(handle, disk_path, port, false)?;
+                }
                 let cache_mode = match config.disk_cache_mode {
                     DiskCacheMode::WriteBack => 0u32,
                     DiskCacheMode::WriteThrough => 1,
@@ -246,5 +279,22 @@ pub fn start_vm(config: &VmConfig, bios_paths: &[std::path::PathBuf]) -> Result<
         framebuffer: fb,
         serial_tx,
         thread: vm_thread,
+    })
+}
+
+/// Resolve a SAN volume name to its UUID by querying the local vmm-san daemon.
+fn resolve_san_volume_id(volume_name: &str) -> Option<String> {
+    // Query local vmm-san at port 7443
+    let resp = std::process::Command::new("curl")
+        .args(["-s", "-m", "3", "http://127.0.0.1:7443/api/volumes"])
+        .output().ok()?;
+    let body = String::from_utf8_lossy(&resp.stdout);
+    let volumes: serde_json::Value = serde_json::from_str(&body).ok()?;
+    volumes.as_array()?.iter().find_map(|v| {
+        if v["name"].as_str() == Some(volume_name) {
+            v["id"].as_str().map(|s| s.to_string())
+        } else {
+            None
+        }
     })
 }

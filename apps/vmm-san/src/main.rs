@@ -277,6 +277,9 @@ async fn main() {
     engine::metadata_sync::spawn(Arc::clone(&state));
     tracing::info!("Metadata sync engine started (leader pushes file_map to peers, 10s interval)");
 
+    engine::disk_server::spawn_all(Arc::clone(&state));
+    tracing::info!("Disk server started (UDS per volume for direct VM I/O)");
+
     engine::smart_monitor::spawn(Arc::clone(&state));
     tracing::info!("SMART monitor started ({}s interval)", 300);
 

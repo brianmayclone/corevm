@@ -23,6 +23,15 @@ use crate::memory::mmio::MmioHandler;
 //   3. Caller executes pread/pwrite (no lock held)
 //   4. Caller re-acquires AHCI_LOCK, calls complete_io (brief state update)
 
+/// Trait for custom disk I/O backends (e.g., SAN disk via UDS).
+/// When set on an AhciDrive, DeferredIo uses this instead of the raw fd.
+#[cfg(feature = "std")]
+pub trait DiskIoBackend: Send + Sync {
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<usize>;
+    fn write_at(&self, buf: &[u8], offset: u64) -> std::io::Result<()>;
+    fn flush(&self) -> std::io::Result<()>;
+}
+
 /// A disk I/O operation extracted from process_commands for lock-free execution.
 pub struct DeferredIo {
     pub fd: i32,
@@ -36,12 +45,34 @@ pub struct DeferredIo {
     pub prdt_base: u64,
     pub prdtl: u32,
     pub total: usize,
+    /// Optional custom I/O backend (bypasses fd-based pread/pwrite).
+    #[cfg(feature = "std")]
+    pub io_backend: Option<*const dyn DiskIoBackend>,
 }
 
 impl DeferredIo {
     /// Execute the disk I/O. Call WITHOUT AHCI_LOCK held.
     #[cfg(feature = "std")]
     pub fn execute(&mut self) {
+        // Use custom I/O backend if available (SAN disk via UDS)
+        if let Some(backend_ptr) = self.io_backend {
+            let backend = unsafe { &*backend_ptr };
+            if self.is_flush {
+                let _ = backend.flush();
+            } else if self.is_write {
+                let _ = backend.write_at(&self.buf, self.disk_offset);
+            } else {
+                match backend.read_at(&mut self.buf, self.disk_offset) {
+                    Ok(done) => {
+                        if done < self.buf.len() { self.buf[done..].fill(0); }
+                    }
+                    Err(_) => { self.buf.fill(0); }
+                }
+            }
+            return;
+        }
+
+        // Standard fd-based I/O (unchanged)
         if self.fd < 0 { return; }
         let file = unsafe { AhciDrive::borrow_file(self.fd) };
         if self.is_flush {
@@ -263,6 +294,9 @@ struct AhciDrive {
     total_bytes: u64,
     present: bool,
     cache: super::disk_cache::DiskCache,
+    /// Optional custom I/O backend (SAN disk via UDS). When set, DeferredIo uses this.
+    #[cfg(feature = "std")]
+    io_backend: Option<alloc::boxed::Box<dyn DiskIoBackend>>,
 }
 
 impl AhciDrive {
@@ -271,6 +305,8 @@ impl AhciDrive {
             kind: AhciDriveKind::AtaDisk, disk: Vec::new(), disk_fd: -1,
             total_bytes: 0, present: false,
             cache: super::disk_cache::DiskCache::new(0, super::disk_cache::CacheMode::None),
+            #[cfg(feature = "std")]
+            io_backend: None,
         }
     }
 
@@ -603,14 +639,14 @@ impl Ahci {
     pub fn attach_disk(&mut self, port: usize, image: Vec<u8>, kind: AhciDriveKind) {
         if port >= MAX_PORTS { return; }
         let total = image.len() as u64;
-        self.ports[port].drive = AhciDrive { kind, disk: image, disk_fd: -1, total_bytes: total, present: true, cache: super::disk_cache::DiskCache::new(0, super::disk_cache::CacheMode::None) };
+        self.ports[port].drive = AhciDrive { kind, disk: image, disk_fd: -1, total_bytes: total, present: true, cache: super::disk_cache::DiskCache::new(0, super::disk_cache::CacheMode::None), #[cfg(feature = "std")] io_backend: None };
         self.ports[port].update_presence();
         self.pi |= 1u32 << port;
     }
 
     pub fn attach_disk_fd(&mut self, port: usize, fd: i32, size: u64, kind: AhciDriveKind) {
         if port >= MAX_PORTS { return; }
-        self.ports[port].drive = AhciDrive { kind, disk: Vec::new(), disk_fd: fd, total_bytes: size, present: true, cache: super::disk_cache::DiskCache::new(0, super::disk_cache::CacheMode::None) };
+        self.ports[port].drive = AhciDrive { kind, disk: Vec::new(), disk_fd: fd, total_bytes: size, present: true, cache: super::disk_cache::DiskCache::new(0, super::disk_cache::CacheMode::None), #[cfg(feature = "std")] io_backend: None };
         self.ports[port].update_presence();
         self.pi |= 1u32 << port;
     }
@@ -671,6 +707,20 @@ impl Ahci {
             p1.ci, p1.deferred_ci, p1.is,
             self.ghc, self.is,
             self.pending_io.len());
+    }
+
+    /// Attach a SAN disk backend to a port. The backend handles all I/O.
+    #[cfg(feature = "std")]
+    pub fn attach_san_backend(&mut self, port: usize, size: u64, backend: alloc::boxed::Box<dyn DiskIoBackend>) {
+        if port >= self.ports.len() { return; }
+        let p = &mut self.ports[port];
+        p.drive.disk_fd = -1;
+        p.drive.total_bytes = size;
+        p.drive.present = true;
+        p.drive.kind = AhciDriveKind::AtaDisk;
+        p.drive.io_backend = Some(backend);
+        p.sig = 0x0000_0101;
+        self.pi |= 1 << port;
     }
 
     /// Drain pending I/O requests. Caller executes them outside AHCI_LOCK.
@@ -881,6 +931,8 @@ impl Ahci {
                             fd: port.drive.disk_fd, disk_offset: lba * ss as u64,
                             buf: vec![0u8; total], is_write: false, is_flush: false,
                             port_idx, slot, cmd_hdr_addr, prdt_base, prdtl, total,
+                            #[cfg(feature = "std")]
+                            io_backend: port.drive.io_backend.as_deref().map(|b| b as *const dyn DiskIoBackend),
                         });
                         continue; // Skip inline completion
                     }
@@ -905,6 +957,8 @@ impl Ahci {
                             fd: port.drive.disk_fd, disk_offset: lba * ss as u64,
                             buf, is_write: true, is_flush: false,
                             port_idx, slot, cmd_hdr_addr, prdt_base, prdtl, total,
+                            #[cfg(feature = "std")]
+                            io_backend: port.drive.io_backend.as_deref().map(|b| b as *const dyn DiskIoBackend),
                         });
                         continue;
                     }
@@ -922,6 +976,8 @@ impl Ahci {
                             fd: port.drive.disk_fd, disk_offset: 0,
                             buf: Vec::new(), is_write: false, is_flush: true,
                             port_idx, slot, cmd_hdr_addr, prdt_base, prdtl, total: 0,
+                            #[cfg(feature = "std")]
+                            io_backend: port.drive.io_backend.as_deref().map(|b| b as *const dyn DiskIoBackend),
                         });
                         continue;
                     }
@@ -1307,6 +1363,8 @@ fn process_atapi(port: &mut AhciPort, dma: &GuestDma, acmd: &[u8], prdt_base: u6
                     fd: port.drive.disk_fd, disk_offset: lba * ss as u64,
                     buf: vec![0u8; total], is_write: false, is_flush: false,
                     port_idx, slot, cmd_hdr_addr, prdt_base, prdtl, total,
+                    #[cfg(feature = "std")]
+                    io_backend: port.drive.io_backend.as_deref().map(|b| b as *const dyn DiskIoBackend),
                 });
             }
             let mut buf = vec![0u8; total];
@@ -1444,6 +1502,8 @@ fn process_atapi(port: &mut AhciPort, dma: &GuestDma, acmd: &[u8], prdt_base: u6
                     fd: port.drive.disk_fd, disk_offset: lba * ss as u64,
                     buf: vec![0u8; total], is_write: false, is_flush: false,
                     port_idx, slot, cmd_hdr_addr, prdt_base, prdtl, total,
+                    #[cfg(feature = "std")]
+                    io_backend: port.drive.io_backend.as_deref().map(|b| b as *const dyn DiskIoBackend),
                 });
             }
             let mut buf = vec![0u8; total];

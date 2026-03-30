@@ -2544,6 +2544,19 @@ pub extern "C" fn corevm_ahci_attach_cdrom(handle: u64, port: u32, fd: i32, size
     }
 }
 
+/// Attach a SAN disk backend to an AHCI port (no file descriptor needed).
+/// Used internally by setup::attach_san_disk_to_ahci.
+#[cfg(feature = "std")]
+pub fn ahci_attach_san_backend(
+    handle: u64, port: usize, size: u64,
+    backend: alloc::boxed::Box<dyn crate::devices::ahci::DiskIoBackend>,
+) -> Result<(), String> {
+    let vm = get_vm(handle).ok_or("Invalid VM handle")?;
+    let ahci = vm.ahci().ok_or("AHCI not initialized")?;
+    ahci.attach_san_backend(port, size, backend);
+    Ok(())
+}
+
 /// Send input bytes to the serial port (COM1).
 #[no_mangle]
 pub extern "C" fn corevm_serial_send_input(handle: u64, data: *const u8, len: u32) -> i32 {

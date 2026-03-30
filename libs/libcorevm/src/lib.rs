@@ -37,6 +37,8 @@ pub mod vm;
 pub mod ffi;
 #[cfg(feature = "std")]
 pub mod setup;
+#[cfg(feature = "std")]
+pub mod san_disk;
 #[cfg(feature = "linux")]
 pub mod net;
 #[cfg(feature = "std")]
