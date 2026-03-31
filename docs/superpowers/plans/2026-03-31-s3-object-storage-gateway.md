@@ -3348,21 +3348,906 @@ git commit -m "feat: add S3 multipart upload operations"
 
 ---
 
-## Task 15: Full Build Verification
+## Task 15: vmm-san — S3 Credential REST API (`apps/vmm-san/src/api/s3.rs`)
+
+The Management Socket handles auth validation from the gateway, but the UI and cluster need a REST API to manage credentials (create/list/delete). This runs on the existing vmm-san HTTP port.
+
+**Files:**
+- Create: `apps/vmm-san/src/api/s3.rs`
+- Modify: `apps/vmm-san/src/api/mod.rs`
+
+- [ ] **Step 1: Create the S3 credential REST API**
+
+```rust
+// apps/vmm-san/src/api/s3.rs
+
+//! S3 credential management REST endpoints.
+//! Used by vmm-ui and vmm-cluster to create/list/delete S3 access keys.
+
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::Json;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use crate::state::CoreSanState;
+
+#[derive(Deserialize)]
+pub struct CreateCredentialRequest {
+    pub user_id: String,
+    #[serde(default)]
+    pub display_name: String,
+}
+
+#[derive(Serialize)]
+pub struct CreateCredentialResponse {
+    pub id: String,
+    pub access_key: String,
+    pub secret_key: String, // Only returned on creation
+}
+
+#[derive(Serialize)]
+pub struct CredentialResponse {
+    pub id: String,
+    pub access_key: String,
+    pub user_id: String,
+    pub display_name: String,
+    pub status: String,
+    pub created_at: String,
+    pub expires_at: Option<String>,
+}
+
+/// GET /api/s3/credentials
+pub async fn list(
+    State(state): State<Arc<CoreSanState>>,
+) -> Result<Json<Vec<CredentialResponse>>, (StatusCode, String)> {
+    let db = state.db.lock().unwrap();
+    let mut stmt = db.prepare(
+        "SELECT id, access_key, user_id, display_name, status, created_at, expires_at FROM s3_credentials"
+    ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let creds: Vec<CredentialResponse> = stmt.query_map([], |row| {
+        Ok(CredentialResponse {
+            id: row.get(0)?,
+            access_key: row.get(1)?,
+            user_id: row.get(2)?,
+            display_name: row.get(3)?,
+            status: row.get(4)?,
+            created_at: row.get(5)?,
+            expires_at: row.get(6)?,
+        })
+    }).unwrap().filter_map(|r| r.ok()).collect();
+
+    Ok(Json(creds))
+}
+
+/// POST /api/s3/credentials
+pub async fn create(
+    State(state): State<Arc<CoreSanState>>,
+    Json(body): Json<CreateCredentialRequest>,
+) -> Result<(StatusCode, Json<CreateCredentialResponse>), (StatusCode, String)> {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+
+    // Generate AWS-compatible access key (20 uppercase alphanumeric)
+    let access_key: String = (0..20).map(|_| {
+        let idx = rng.gen_range(0..36u8);
+        if idx < 10 { (b'0' + idx) as char } else { (b'A' + idx - 10) as char }
+    }).collect();
+
+    // Generate secret key (40 chars)
+    let secret_key: String = (0..40).map(|_| {
+        let idx = rng.gen_range(0..62u8);
+        if idx < 10 { (b'0' + idx) as char }
+        else if idx < 36 { (b'A' + idx - 10) as char }
+        else { (b'a' + idx - 36) as char }
+    }).collect();
+
+    // Encrypt secret key (XOR with node_id hash — same as mgmt_server)
+    use sha2::{Sha256, Digest};
+    let key_hash = Sha256::digest(state.node_id.as_bytes());
+    let encrypted: Vec<u8> = secret_key.bytes()
+        .zip(key_hash.iter().cycle())
+        .map(|(b, k)| b ^ k)
+        .collect();
+    let secret_key_enc = crate::engine::mgmt_server::base64_encode(&encrypted);
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let db = state.db.lock().unwrap();
+    db.execute(
+        "INSERT INTO s3_credentials (id, access_key, secret_key_enc, user_id, display_name)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![&id, &access_key, &secret_key_enc, &body.user_id, &body.display_name],
+    ).map_err(|e| (StatusCode::CONFLICT, format!("Failed to create credential: {}", e)))?;
+
+    tracing::info!("S3 credential created: access_key={} user={}", access_key, body.user_id);
+
+    Ok((StatusCode::CREATED, Json(CreateCredentialResponse {
+        id, access_key, secret_key,
+    })))
+}
+
+/// DELETE /api/s3/credentials/{id}
+pub async fn delete(
+    State(state): State<Arc<CoreSanState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let db = state.db.lock().unwrap();
+    let deleted = db.execute("DELETE FROM s3_credentials WHERE id = ?1", rusqlite::params![&id])
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if deleted == 0 {
+        return Err((StatusCode::NOT_FOUND, "Credential not found".into()));
+    }
+
+    tracing::info!("S3 credential deleted: id={}", id);
+    Ok(StatusCode::NO_CONTENT)
+}
+```
+
+- [ ] **Step 2: Make `base64_encode` public in mgmt_server.rs**
+
+In `apps/vmm-san/src/engine/mgmt_server.rs`, change:
+```rust
+fn base64_encode(data: &[u8]) -> String {
+```
+to:
+```rust
+pub fn base64_encode(data: &[u8]) -> String {
+```
+
+- [ ] **Step 3: Register routes in api/mod.rs**
+
+Add `pub mod s3;` to `apps/vmm-san/src/api/mod.rs` and add routes:
+
+```rust
+        // ── S3 Credential Management ─────────────────────
+        .route("/api/s3/credentials", get(s3::list).post(s3::create))
+        .route("/api/s3/credentials/{id}", delete(s3::delete))
+```
+
+- [ ] **Step 4: Verify it compiles**
+
+Run: `cargo check -p vmm-san`
+Expected: compiles with no errors
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/vmm-san/src/api/s3.rs apps/vmm-san/src/api/mod.rs apps/vmm-san/src/engine/mgmt_server.rs
+git commit -m "feat: add S3 credential REST API for UI/cluster access"
+```
+
+---
+
+## Task 16: vmm-cluster — S3 Credential Proxy Routes
+
+**Files:**
+- Modify: `apps/vmm-cluster/src/api/san.rs`
+- Modify: `apps/vmm-cluster/src/api/mod.rs`
+- Modify: `apps/vmm-cluster/src/san_client.rs`
+
+- [ ] **Step 1: Add S3 credential methods to SanClient**
+
+In `apps/vmm-cluster/src/san_client.rs`, add these methods to the `SanClient` impl:
+
+```rust
+    pub async fn list_s3_credentials(&self) -> Result<serde_json::Value, String> {
+        let url = format!("{}/api/s3/credentials", self.base_url);
+        let resp = self.client.get(&url).send().await.map_err(|e| e.to_string())?;
+        resp.json().await.map_err(|e| e.to_string())
+    }
+
+    pub async fn create_s3_credential(&self, body: &serde_json::Value) -> Result<serde_json::Value, String> {
+        let url = format!("{}/api/s3/credentials", self.base_url);
+        let resp = self.client.post(&url).json(body).send().await.map_err(|e| e.to_string())?;
+        resp.json().await.map_err(|e| e.to_string())
+    }
+
+    pub async fn delete_s3_credential(&self, id: &str) -> Result<(), String> {
+        let url = format!("{}/api/s3/credentials/{}", self.base_url, id);
+        let resp = self.client.delete(&url).send().await.map_err(|e| e.to_string())?;
+        if resp.status().is_success() { Ok(()) } else { Err(format!("Delete failed: {}", resp.status())) }
+    }
+```
+
+- [ ] **Step 2: Add S3 proxy handlers to san.rs**
+
+Append to `apps/vmm-cluster/src/api/san.rs`:
+
+```rust
+// ── S3 Credentials ────────────────────────────────────────────
+
+/// GET /api/san/s3/credentials
+pub async fn list_s3_credentials(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+) -> Result<Json<Value>, AppError> {
+    let (client, _) = any_san_client(&state)?;
+    client.list_s3_credentials().await.map(Json).map_err(san_err)
+}
+
+/// POST /api/san/s3/credentials
+pub async fn create_s3_credential(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Json(body): Json<Value>,
+) -> Result<(StatusCode, Json<Value>), AppError> {
+    let (client, host_id) = any_san_client(&state)?;
+    let user_id = body.get("user_id").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let result = client.create_s3_credential(&body).await.map_err(san_err)?;
+
+    let db = state.db.lock().map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    EventService::log(&db, "info", "san",
+        &format!("S3 credential created for user '{}'", user_id),
+        Some("s3_credential"), None, Some(&host_id));
+
+    Ok((StatusCode::CREATED, Json(result)))
+}
+
+/// DELETE /api/san/s3/credentials/{id}
+pub async fn delete_s3_credential(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    let (client, host_id) = any_san_client(&state)?;
+    client.delete_s3_credential(&id).await.map_err(san_err)?;
+
+    let db = state.db.lock().map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    EventService::log(&db, "info", "san",
+        &format!("S3 credential deleted (id={})", id),
+        Some("s3_credential"), Some(&id), Some(&host_id));
+
+    Ok(StatusCode::NO_CONTENT)
+}
+```
+
+- [ ] **Step 3: Register routes in cluster api/mod.rs**
+
+In `apps/vmm-cluster/src/api/mod.rs`, add after the SAN witness route:
+
+```rust
+        // ── S3 Credentials (proxied) ─────────────────────
+        .route("/api/san/s3/credentials", get(san::list_s3_credentials).post(san::create_s3_credential))
+        .route("/api/san/s3/credentials/{id}", delete(san::delete_s3_credential))
+```
+
+- [ ] **Step 4: Verify it compiles**
+
+Run: `cargo check -p vmm-cluster`
+Expected: compiles with no errors
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/vmm-cluster/src/api/san.rs apps/vmm-cluster/src/api/mod.rs apps/vmm-cluster/src/san_client.rs
+git commit -m "feat: add S3 credential proxy routes in vmm-cluster"
+```
+
+---
+
+## Task 17: vmm-ui — Types and Sidebar Navigation
+
+**Files:**
+- Modify: `apps/vmm-ui/src/api/types.ts`
+- Modify: `apps/vmm-ui/src/components/Sidebar.tsx`
+- Modify: `apps/vmm-ui/src/App.tsx`
+
+- [ ] **Step 1: Add types to types.ts**
+
+In `apps/vmm-ui/src/api/types.ts`, add `access_protocols` to `CoreSanVolume`:
+
+```typescript
+export interface CoreSanVolume {
+  id: string
+  name: string
+  ftt: number
+  local_raid: 'stripe' | 'mirror' | 'stripe_mirror'
+  chunk_size_bytes: number
+  max_size_bytes: number
+  access_protocols: string[]  // NEW: ["fuse", "s3"]
+  status: 'creating' | 'online' | 'degraded' | 'offline'
+  total_bytes: number
+  free_bytes: number
+  backend_count: number
+  created_at: string
+}
+```
+
+Add new `S3Credential` interface after the CoreSAN section:
+
+```typescript
+export interface S3Credential {
+  id: string
+  access_key: string
+  user_id: string
+  display_name: string
+  status: 'active' | 'disabled'
+  created_at: string
+  expires_at: string | null
+}
+
+export interface S3CredentialCreateResponse {
+  id: string
+  access_key: string
+  secret_key: string  // Only returned on creation
+}
+```
+
+- [ ] **Step 2: Add "Object Storage" to sidebar navigation**
+
+In `apps/vmm-ui/src/components/Sidebar.tsx`, add to `standaloneNavItems` in the Storage children, after CoreSAN:
+
+```typescript
+      { to: '/storage/object-storage', icon: Globe, label: 'Object Storage' },
+```
+
+Add the same to `clusterNavItems` in the Storage children, after CoreSAN:
+
+```typescript
+      { to: '/storage/object-storage', icon: Globe, label: 'Object Storage' },
+```
+
+(`Globe` is already imported from lucide-react)
+
+- [ ] **Step 3: Add route in App.tsx**
+
+Import the new page at the top of `apps/vmm-ui/src/App.tsx`:
+
+```typescript
+import StorageObjectStorage from './pages/StorageObjectStorage'
+```
+
+Add the route inside the Storage `<Route>` group (after the `coresan` route):
+
+```tsx
+            <Route path="object-storage" element={<StorageObjectStorage />} />
+```
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/vmm-ui/src/api/types.ts apps/vmm-ui/src/components/Sidebar.tsx apps/vmm-ui/src/App.tsx
+git commit -m "feat: add Object Storage types, sidebar nav, and route"
+```
+
+---
+
+## Task 18: vmm-ui — Object Storage Page (`StorageObjectStorage.tsx`)
+
+**Files:**
+- Create: `apps/vmm-ui/src/pages/StorageObjectStorage.tsx`
+
+- [ ] **Step 1: Create the Object Storage management page**
+
+```tsx
+// apps/vmm-ui/src/pages/StorageObjectStorage.tsx
+
+import { useState, useEffect } from 'react'
+import { Key, Trash2, Plus, Copy, ExternalLink, Shield } from 'lucide-react'
+import { useClusterStore } from '../stores/clusterStore'
+import api from '../api/client'
+import type { CoreSanVolume, S3Credential } from '../api/types'
+import { formatBytes } from '../utils/format'
+import Button from '../components/Button'
+import Card from '../components/Card'
+import CreateS3CredentialDialog from '../components/coresan/CreateS3CredentialDialog'
+import ConfirmDialog from '../components/ConfirmDialog'
+
+export default function StorageObjectStorage() {
+  const { backendMode } = useClusterStore()
+  const isCluster = backendMode === 'cluster'
+
+  const [volumes, setVolumes] = useState<CoreSanVolume[]>([])
+  const [credentials, setCredentials] = useState<S3Credential[]>([])
+  const [tab, setTab] = useState<'volumes' | 'credentials' | 'connect'>('volumes')
+  const [showCreateCred, setShowCreateCred] = useState(false)
+  const [deleteCredId, setDeleteCredId] = useState<string | null>(null)
+  const [error, setError] = useState('')
+
+  const sanBase = 'http://localhost:7443'
+
+  const fetchData = async () => {
+    try {
+      // Fetch volumes
+      let vols: CoreSanVolume[]
+      if (isCluster) {
+        const { data } = await api.get<CoreSanVolume[]>('/api/san/volumes')
+        vols = data
+      } else {
+        const resp = await fetch(`${sanBase}/api/volumes`)
+        vols = await resp.json()
+      }
+      setVolumes(vols.filter(v => v.access_protocols?.includes('s3')))
+
+      // Fetch credentials
+      let creds: S3Credential[]
+      if (isCluster) {
+        const { data } = await api.get<S3Credential[]>('/api/san/s3/credentials')
+        creds = data
+      } else {
+        const resp = await fetch(`${sanBase}/api/s3/credentials`)
+        creds = await resp.json()
+      }
+      setCredentials(creds)
+    } catch (e: any) {
+      setError(e.message || 'Failed to load data')
+    }
+  }
+
+  useEffect(() => { fetchData() }, [isCluster])
+
+  const handleDeleteCred = async () => {
+    if (!deleteCredId) return
+    try {
+      if (isCluster) {
+        await api.delete(`/api/san/s3/credentials/${deleteCredId}`)
+      } else {
+        await fetch(`${sanBase}/api/s3/credentials/${deleteCredId}`, { method: 'DELETE' })
+      }
+      setDeleteCredId(null)
+      fetchData()
+    } catch (e: any) {
+      setError(e.message || 'Failed to delete credential')
+    }
+  }
+
+  const tabs = [
+    { key: 'volumes' as const, label: 'S3 Volumes' },
+    { key: 'credentials' as const, label: 'Credentials' },
+    { key: 'connect' as const, label: 'Connection Info' },
+  ]
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <h1 className="text-xl font-semibold text-vmm-text">Object Storage</h1>
+      </div>
+
+      {error && (
+        <div className="bg-vmm-danger/10 border border-vmm-danger/30 text-vmm-danger rounded-lg p-3 text-sm">{error}</div>
+      )}
+
+      {/* Tabs */}
+      <div className="flex gap-1 border-b border-vmm-border">
+        {tabs.map(t => (
+          <button key={t.key} onClick={() => setTab(t.key)}
+            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+              tab === t.key ? 'border-vmm-accent text-vmm-accent' : 'border-transparent text-vmm-muted hover:text-vmm-text'
+            }`}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Tab: S3 Volumes */}
+      {tab === 'volumes' && (
+        <Card>
+          <div className="p-4">
+            <p className="text-sm text-vmm-muted mb-4">
+              Volumes with S3 access protocol enabled. Manage volumes in the CoreSAN page.
+            </p>
+            {volumes.length === 0 ? (
+              <p className="text-vmm-muted text-sm py-8 text-center">
+                No S3-enabled volumes. Create a volume with S3 protocol in CoreSAN, or enable S3 on an existing volume.
+              </p>
+            ) : (
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-vmm-muted border-b border-vmm-border">
+                    <th className="pb-2 font-medium">Name</th>
+                    <th className="pb-2 font-medium">Status</th>
+                    <th className="pb-2 font-medium">Size</th>
+                    <th className="pb-2 font-medium">Used</th>
+                    <th className="pb-2 font-medium">Protocols</th>
+                    <th className="pb-2 font-medium">FTT</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {volumes.map(v => (
+                    <tr key={v.id} className="border-b border-vmm-border/50 hover:bg-vmm-hover">
+                      <td className="py-2 font-medium text-vmm-text">{v.name}</td>
+                      <td className="py-2">
+                        <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                          v.status === 'online' ? 'bg-green-500/10 text-green-400' :
+                          v.status === 'degraded' ? 'bg-yellow-500/10 text-yellow-400' :
+                          'bg-red-500/10 text-red-400'
+                        }`}>{v.status}</span>
+                      </td>
+                      <td className="py-2 text-vmm-muted">{formatBytes(v.max_size_bytes)}</td>
+                      <td className="py-2 text-vmm-muted">{formatBytes(v.total_bytes)}</td>
+                      <td className="py-2">
+                        {v.access_protocols?.map(p => (
+                          <span key={p} className="px-1.5 py-0.5 rounded text-xs bg-vmm-accent/10 text-vmm-accent mr-1">{p}</span>
+                        ))}
+                      </td>
+                      <td className="py-2 text-vmm-muted">{v.ftt}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </Card>
+      )}
+
+      {/* Tab: Credentials */}
+      {tab === 'credentials' && (
+        <Card>
+          <div className="p-4">
+            <div className="flex items-center justify-between mb-4">
+              <p className="text-sm text-vmm-muted">S3 access keys for external client access.</p>
+              <Button size="sm" onClick={() => setShowCreateCred(true)}>
+                <Plus size={14} className="mr-1" /> Create Key
+              </Button>
+            </div>
+            {credentials.length === 0 ? (
+              <p className="text-vmm-muted text-sm py-8 text-center">
+                No S3 credentials. Create one to access object storage via S3 API.
+              </p>
+            ) : (
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-vmm-muted border-b border-vmm-border">
+                    <th className="pb-2 font-medium">Access Key</th>
+                    <th className="pb-2 font-medium">User</th>
+                    <th className="pb-2 font-medium">Name</th>
+                    <th className="pb-2 font-medium">Status</th>
+                    <th className="pb-2 font-medium">Created</th>
+                    <th className="pb-2 font-medium w-16"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {credentials.map(c => (
+                    <tr key={c.id} className="border-b border-vmm-border/50 hover:bg-vmm-hover">
+                      <td className="py-2 font-mono text-xs text-vmm-text">{c.access_key}</td>
+                      <td className="py-2 text-vmm-muted">{c.user_id}</td>
+                      <td className="py-2 text-vmm-muted">{c.display_name || '—'}</td>
+                      <td className="py-2">
+                        <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                          c.status === 'active' ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'
+                        }`}>{c.status}</span>
+                      </td>
+                      <td className="py-2 text-vmm-muted text-xs">{c.created_at}</td>
+                      <td className="py-2">
+                        <button onClick={() => setDeleteCredId(c.id)}
+                          className="p-1 rounded hover:bg-vmm-danger/10 text-vmm-muted hover:text-vmm-danger">
+                          <Trash2 size={14} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </Card>
+      )}
+
+      {/* Tab: Connection Info */}
+      {tab === 'connect' && (
+        <Card>
+          <div className="p-4 space-y-4">
+            <p className="text-sm text-vmm-muted">
+              Use any S3-compatible client to access your object storage volumes.
+            </p>
+            <div className="space-y-3">
+              <div>
+                <h3 className="text-sm font-medium text-vmm-text mb-1">Endpoint</h3>
+                <code className="block bg-vmm-surface-2 rounded px-3 py-2 text-sm font-mono text-vmm-text">
+                  http://&lt;host&gt;:9000
+                </code>
+              </div>
+              <div>
+                <h3 className="text-sm font-medium text-vmm-text mb-1">AWS CLI</h3>
+                <code className="block bg-vmm-surface-2 rounded px-3 py-2 text-sm font-mono text-vmm-text whitespace-pre">{
+`aws configure
+# Access Key: <your access key>
+# Secret Key: <your secret key>
+# Region: us-east-1
+
+aws s3 ls --endpoint-url http://<host>:9000
+aws s3 cp myfile.txt s3://<bucket>/myfile.txt --endpoint-url http://<host>:9000`}</code>
+              </div>
+              <div>
+                <h3 className="text-sm font-medium text-vmm-text mb-1">MinIO Client (mc)</h3>
+                <code className="block bg-vmm-surface-2 rounded px-3 py-2 text-sm font-mono text-vmm-text whitespace-pre">{
+`mc alias set coresan http://<host>:9000 <access_key> <secret_key>
+mc ls coresan
+mc cp myfile.txt coresan/<bucket>/`}</code>
+              </div>
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {/* Dialogs */}
+      <CreateS3CredentialDialog
+        open={showCreateCred}
+        onClose={() => setShowCreateCred(false)}
+        onCreated={() => { setShowCreateCred(false); fetchData() }}
+        isCluster={isCluster}
+        sanBase={sanBase}
+      />
+
+      <ConfirmDialog
+        open={!!deleteCredId}
+        title="Delete S3 Credential"
+        message="This will immediately revoke access for any client using this key. This action cannot be undone."
+        confirmLabel="Delete"
+        danger
+        onConfirm={handleDeleteCred}
+        onCancel={() => setDeleteCredId(null)}
+      />
+    </div>
+  )
+}
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add apps/vmm-ui/src/pages/StorageObjectStorage.tsx
+git commit -m "feat: add Object Storage management page with volumes, credentials, and connection info"
+```
+
+---
+
+## Task 19: vmm-ui — Create S3 Credential Dialog
+
+**Files:**
+- Create: `apps/vmm-ui/src/components/coresan/CreateS3CredentialDialog.tsx`
+
+- [ ] **Step 1: Create the dialog component**
+
+```tsx
+// apps/vmm-ui/src/components/coresan/CreateS3CredentialDialog.tsx
+
+import { useState } from 'react'
+import { Copy, AlertTriangle } from 'lucide-react'
+import api from '../../api/client'
+import type { S3CredentialCreateResponse } from '../../api/types'
+import Dialog from '../Dialog'
+import FormField from '../FormField'
+import TextInput from '../TextInput'
+import Button from '../Button'
+
+interface Props {
+  open: boolean
+  onClose: () => void
+  onCreated: () => void
+  isCluster: boolean
+  sanBase: string
+}
+
+export default function CreateS3CredentialDialog({ open, onClose, onCreated, isCluster, sanBase }: Props) {
+  const [userId, setUserId] = useState('')
+  const [displayName, setDisplayName] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [result, setResult] = useState<S3CredentialCreateResponse | null>(null)
+  const [copied, setCopied] = useState('')
+
+  const handleCreate = async () => {
+    if (!userId.trim()) { setError('User ID is required'); return }
+    setSaving(true)
+    setError('')
+    try {
+      let data: S3CredentialCreateResponse
+      if (isCluster) {
+        const resp = await api.post<S3CredentialCreateResponse>('/api/san/s3/credentials', { user_id: userId, display_name: displayName })
+        data = resp.data
+      } else {
+        const resp = await fetch(`${sanBase}/api/s3/credentials`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_id: userId, display_name: displayName }),
+        })
+        data = await resp.json()
+      }
+      setResult(data)
+    } catch (e: any) {
+      setError(e.response?.data?.error || e.message || 'Failed to create credential')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleCopy = (text: string, label: string) => {
+    navigator.clipboard.writeText(text)
+    setCopied(label)
+    setTimeout(() => setCopied(''), 2000)
+  }
+
+  const handleClose = () => {
+    if (result) onCreated()
+    setUserId('')
+    setDisplayName('')
+    setError('')
+    setResult(null)
+    onClose()
+  }
+
+  return (
+    <Dialog open={open} title="Create S3 Access Key" onClose={handleClose} width="max-w-md">
+      {!result ? (
+        <div className="space-y-4">
+          {error && (
+            <div className="bg-vmm-danger/10 border border-vmm-danger/30 text-vmm-danger rounded-lg p-3 text-sm">{error}</div>
+          )}
+          <FormField label="User ID">
+            <TextInput value={userId} onChange={e => setUserId(e.target.value)} placeholder="admin" />
+          </FormField>
+          <FormField label="Display Name (optional)">
+            <TextInput value={displayName} onChange={e => setDisplayName(e.target.value)} placeholder="Backup Service Key" />
+          </FormField>
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="ghost" onClick={handleClose}>Cancel</Button>
+            <Button onClick={handleCreate} disabled={saving}>
+              {saving ? 'Creating...' : 'Create Key'}
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 flex gap-2">
+            <AlertTriangle size={16} className="text-yellow-400 shrink-0 mt-0.5" />
+            <p className="text-sm text-yellow-300">
+              Save the Secret Key now. It will not be shown again.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-xs text-vmm-muted mb-1">Access Key</label>
+            <div className="flex items-center gap-2">
+              <code className="flex-1 bg-vmm-surface-2 rounded px-3 py-2 text-sm font-mono text-vmm-text">{result.access_key}</code>
+              <button onClick={() => handleCopy(result.access_key, 'access')}
+                className="p-2 rounded hover:bg-vmm-hover text-vmm-muted hover:text-vmm-text">
+                <Copy size={14} />
+              </button>
+              {copied === 'access' && <span className="text-xs text-green-400">Copied</span>}
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs text-vmm-muted mb-1">Secret Key</label>
+            <div className="flex items-center gap-2">
+              <code className="flex-1 bg-vmm-surface-2 rounded px-3 py-2 text-sm font-mono text-vmm-text break-all">{result.secret_key}</code>
+              <button onClick={() => handleCopy(result.secret_key, 'secret')}
+                className="p-2 rounded hover:bg-vmm-hover text-vmm-muted hover:text-vmm-text">
+                <Copy size={14} />
+              </button>
+              {copied === 'secret' && <span className="text-xs text-green-400">Copied</span>}
+            </div>
+          </div>
+
+          <div className="flex justify-end pt-2">
+            <Button onClick={handleClose}>Done</Button>
+          </div>
+        </div>
+      )}
+    </Dialog>
+  )
+}
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add apps/vmm-ui/src/components/coresan/CreateS3CredentialDialog.tsx
+git commit -m "feat: add S3 credential creation dialog with secret key reveal"
+```
+
+---
+
+## Task 20: vmm-ui — Update CreateVolumeDialog with access_protocols
+
+**Files:**
+- Modify: `apps/vmm-ui/src/components/coresan/CreateVolumeDialog.tsx`
+- Modify: `apps/vmm-ui/src/pages/StorageCoresan.tsx`
+
+- [ ] **Step 1: Add access_protocols props to CreateVolumeDialog**
+
+In `apps/vmm-ui/src/components/coresan/CreateVolumeDialog.tsx`, add to the `Props` interface:
+
+```typescript
+  newVolProtocols: string[]
+  setNewVolProtocols: (v: string[]) => void
+```
+
+Add to the destructured props in the function signature.
+
+- [ ] **Step 2: Add protocol checkboxes to the dialog form**
+
+Add after the RAID select field in the dialog's JSX, before the size input:
+
+```tsx
+        {/* Access Protocols */}
+        <FormField label="Access Protocols">
+          <div className="flex gap-4">
+            <label className="flex items-center gap-2 text-sm text-vmm-text cursor-pointer">
+              <input type="checkbox" checked={newVolProtocols.includes('fuse')}
+                onChange={e => {
+                  if (e.target.checked) setNewVolProtocols([...newVolProtocols, 'fuse'])
+                  else setNewVolProtocols(newVolProtocols.filter(p => p !== 'fuse'))
+                }}
+                className="rounded border-vmm-border" />
+              FUSE Mount
+            </label>
+            <label className="flex items-center gap-2 text-sm text-vmm-text cursor-pointer">
+              <input type="checkbox" checked={newVolProtocols.includes('s3')}
+                onChange={e => {
+                  if (e.target.checked) setNewVolProtocols([...newVolProtocols, 's3'])
+                  else setNewVolProtocols(newVolProtocols.filter(p => p !== 's3'))
+                }}
+                className="rounded border-vmm-border" />
+              S3 Object Storage
+            </label>
+          </div>
+          {newVolProtocols.includes('s3') && (
+            <p className="text-xs text-vmm-muted mt-1">
+              S3 access requires vmm-s3gw running on the host. Manage keys in Object Storage page.
+            </p>
+          )}
+        </FormField>
+```
+
+- [ ] **Step 3: Add state and pass props in StorageCoresan.tsx**
+
+In `apps/vmm-ui/src/pages/StorageCoresan.tsx`, add state:
+
+```typescript
+const [newVolProtocols, setNewVolProtocols] = useState<string[]>(['fuse'])
+```
+
+Pass as props to `CreateVolumeDialog`:
+
+```tsx
+newVolProtocols={newVolProtocols}
+setNewVolProtocols={setNewVolProtocols}
+```
+
+Include `access_protocols` in the volume creation fetch body (in the `handleCreateVolume` function):
+
+```typescript
+access_protocols: newVolProtocols,
+```
+
+Reset after creation:
+
+```typescript
+setNewVolProtocols(['fuse'])
+```
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add apps/vmm-ui/src/components/coresan/CreateVolumeDialog.tsx apps/vmm-ui/src/pages/StorageCoresan.tsx
+git commit -m "feat: add access_protocols selector to volume creation dialog"
+```
+
+---
+
+## Task 21: Full Build Verification
 
 **Files:** None (verification only)
 
-- [ ] **Step 1: Build the entire workspace**
+- [ ] **Step 1: Build Rust workspace**
 
 Run: `cargo build --workspace`
 Expected: all crates compile successfully
 
-- [ ] **Step 2: Run existing tests to verify nothing is broken**
+- [ ] **Step 2: Build frontend**
+
+Run: `cd apps/vmm-ui && npm run build`
+Expected: builds with no errors
+
+- [ ] **Step 3: Run existing tests**
 
 Run: `cargo test --workspace`
 Expected: all existing tests pass, no regressions
 
-- [ ] **Step 3: Commit any fixes needed**
+- [ ] **Step 4: Commit any fixes needed**
 
 If compilation or tests revealed issues, fix them and commit:
 ```bash

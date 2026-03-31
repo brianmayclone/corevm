@@ -276,6 +276,140 @@ All errors returned as XML:
 - Write lease system — zero changes
 - All existing REST APIs — zero changes
 
+## vmm-cluster Integration
+
+The cluster already proxies all SAN operations via `/api/san/*` routes (in `apps/vmm-cluster/src/api/san.rs`) using `SanClient` HTTP forwarding. S3 object storage extends this pattern:
+
+### New Cluster API Routes
+
+```
+GET    /api/san/s3/credentials              → List S3 credentials (forward to any SAN host mgmt API)
+POST   /api/san/s3/credentials              → Create S3 credential
+DELETE /api/san/s3/credentials/{id}          → Delete S3 credential
+GET    /api/san/s3/status                    → S3 gateway status per host
+```
+
+### Volume access_protocols in Cluster
+
+- `POST /api/san/volumes` already forwards to any SAN host — `access_protocols` is simply a new field in the request body, no special cluster handling needed
+- `GET /api/san/volumes` response now includes `access_protocols` — cluster passes through transparently
+- Volume update (`PUT /api/san/volumes/{id}`) supports changing `access_protocols` — cluster logs event
+
+### S3 Credential Management via Cluster
+
+The cluster acts as proxy for S3 credential CRUD. Credentials are stored in vmm-san's DB and synced via the existing peer replication. The cluster routes credential requests to any online SAN host via a new REST API on vmm-san:
+
+```
+GET    /api/s3/credentials                  → List all credentials
+POST   /api/s3/credentials                  → Create credential (returns access_key + secret_key)
+DELETE /api/s3/credentials/{id}             → Delete credential
+```
+
+### S3 Gateway Health in SAN Health Engine
+
+The existing `engine/san_health.rs` health polling (30s interval) is extended to report S3 gateway status per host. Each SAN host reports whether `vmm-s3gw` is running and accessible.
+
+## vmm-ui Integration
+
+### Navigation
+
+Add "Object Storage" as a new item under the Storage sidebar section (both standalone and cluster mode):
+
+```
+Storage (expandable)
+  ├─ Overview
+  ├─ Local Storage
+  ├─ Shared Storage
+  ├─ CoreSAN
+  ├─ Object Storage    ← NEW
+  ├─ Disk Management
+  └─ QoS Policies
+```
+
+### New Page: StorageObjectStorage.tsx
+
+Main object storage management page with three tabs:
+
+**Tab 1: Volumes**
+- Table of all volumes that have `"s3"` in `access_protocols`
+- Columns: Name, Status, Size, Used, Protocols, FTT, RAID
+- Actions: Enable/Disable S3 on existing volumes (PATCH access_protocols)
+- Link to CoreSAN page for full volume management
+
+**Tab 2: Credentials**
+- Table of all S3 credentials
+- Columns: Access Key (visible), User, Display Name, Status, Created
+- Actions: Create new, Delete, Disable/Enable
+- "Create Credential" button opens `CreateS3CredentialDialog`
+
+**Tab 3: Connection Info**
+- S3 endpoint URL per host (shows all hosts with vmm-s3gw running)
+- Region name from config
+- Quick-start examples: `aws s3 ls --endpoint-url http://host:9000`
+- MinIO mc configuration example
+
+### New Dialog: CreateS3CredentialDialog.tsx
+
+Located in `src/components/coresan/CreateS3CredentialDialog.tsx`:
+
+- Form fields: User (dropdown of existing users), Display Name (text)
+- On submit: POST to `/api/san/s3/credentials` (cluster) or direct to SAN
+- **Critical UX**: Shows the secret key exactly ONCE after creation in a copyable field with warning that it cannot be retrieved again
+
+### Volume Creation Dialog Changes
+
+Modify existing `CreateVolumeDialog.tsx`:
+
+- Add "Access Protocols" multi-select field (checkboxes: FUSE, S3)
+- Default: FUSE checked (backward compatible)
+- When S3 is selected, show info banner: "S3 access requires vmm-s3gw running on this host"
+
+### API Communication Pattern
+
+- **Standalone mode**: `sanFetch()` to `http://localhost:7443/api/s3/credentials`
+- **Cluster mode**: `api.get('/api/san/s3/credentials')` through cluster proxy
+- Follows the existing `sanFetch()` / cluster API pattern used for all CoreSAN operations
+
+## File Inventory (Updated)
+
+### New files
+
+| File | Purpose |
+|------|---------|
+| `apps/vmm-s3gw/` | S3 Gateway binary (Axum, AWS SigV4, UDS client) |
+| `apps/vmm-san/src/engine/object_server.rs` | Object Socket listener per volume |
+| `apps/vmm-san/src/engine/mgmt_server.rs` | Management Socket (auth, ListBuckets) |
+| `apps/vmm-san/src/api/s3.rs` | REST endpoints for S3 credential CRUD (used by cluster proxy) |
+| `libs/vmm-core/src/san_object.rs` | Shared protocol structs (ObjectCommand, headers) |
+| `libs/vmm-core/src/san_mgmt.rs` | Shared mgmt protocol structs (MgmtCommand, headers) |
+| `apps/vmm-cluster/src/api/san_s3.rs` | Cluster proxy routes for S3 credential management |
+| `apps/vmm-ui/src/pages/StorageObjectStorage.tsx` | Object Storage management page |
+| `apps/vmm-ui/src/components/coresan/CreateS3CredentialDialog.tsx` | S3 credential creation dialog |
+
+### Changed files
+
+| File | Change |
+|------|--------|
+| `apps/vmm-san/src/db/mod.rs` | `access_protocols` field, `s3_credentials`, `multipart_uploads`, `multipart_parts` tables |
+| `apps/vmm-san/src/api/volumes.rs` | `access_protocols` in Create/Update/Response |
+| `apps/vmm-san/src/api/mod.rs` | Add S3 credential routes |
+| `apps/vmm-san/src/main.rs` | Spawn object_server + mgmt_server |
+| `apps/vmm-cluster/src/api/mod.rs` | Add `/api/san/s3/*` routes |
+| `apps/vmm-cluster/src/api/san.rs` | Pass through `access_protocols` in volume operations |
+| `apps/vmm-ui/src/App.tsx` | Add `/storage/object-storage` route |
+| `apps/vmm-ui/src/components/Sidebar.tsx` | Add "Object Storage" nav item |
+| `apps/vmm-ui/src/components/coresan/CreateVolumeDialog.tsx` | Add access_protocols multi-select |
+| `apps/vmm-ui/src/api/types.ts` | Add S3Credential interface, update Volume type |
+| `Cargo.toml` (workspace) | New member `apps/vmm-s3gw` |
+
+### Untouched
+
+- `engine/disk_server.rs` — zero changes
+- `engine/fuse_mount.rs` — zero changes
+- `storage/chunk.rs` — zero changes
+- Replication engine — zero changes
+- Write lease system — zero changes
+
 ## Extensibility Pattern
 
 For future protocols (NFS, iSCSI, etc.):
