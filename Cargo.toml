@@ -6,6 +6,7 @@ members = [
   "apps/vmm-server",
   "apps/vmm-cluster",
   "apps/vmm-san",
+  "apps/vmm-s3gw",
   "apps/vmm-appliance",
   "apps/san-testbed",
   "libs/vmm-core",

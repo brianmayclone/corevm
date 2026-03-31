@@ -1,0 +1,23 @@
+[package]
+name = "vmm-s3gw"
+version.workspace = true
+edition = "2021"
+description = "S3-compatible gateway for CoreSAN object storage"
+
+[[bin]]
+name = "vmm-s3gw"
+path = "src/main.rs"
+
+[dependencies]
+vmm-core = { path = "../../libs/vmm-core" }
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
