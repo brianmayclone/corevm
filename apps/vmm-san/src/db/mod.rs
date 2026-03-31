@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS volumes (
     max_size_bytes  INTEGER NOT NULL DEFAULT 0,       -- 0 = unlimited (legacy)
     -- Status
     status          TEXT NOT NULL DEFAULT 'creating',
+    -- Access protocols: JSON array of enabled protocols ("fuse", "s3", future: "nfs", "iscsi")
+    access_protocols TEXT NOT NULL DEFAULT '["fuse"]',
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -218,6 +220,48 @@ CREATE INDEX IF NOT EXISTS idx_file_chunks_file ON file_chunks(file_id);
 CREATE INDEX IF NOT EXISTS idx_chunk_replicas_chunk ON chunk_replicas(chunk_id);
 CREATE INDEX IF NOT EXISTS idx_chunk_replicas_backend ON chunk_replicas(backend_id);
 CREATE INDEX IF NOT EXISTS idx_chunk_replicas_node ON chunk_replicas(node_id);
+CREATE INDEX IF NOT EXISTS idx_s3_credentials_access_key ON s3_credentials(access_key);
+CREATE INDEX IF NOT EXISTS idx_s3_credentials_user ON s3_credentials(user_id);
+CREATE INDEX IF NOT EXISTS idx_multipart_uploads_volume ON multipart_uploads(volume_id);
+CREATE INDEX IF NOT EXISTS idx_multipart_uploads_status ON multipart_uploads(status);
+
+-- ═══════════════════════════════════════════════════════════════
+-- S3_CREDENTIALS: access keys for S3-compatible API access
+-- Secret keys are AES-256-GCM encrypted (SigV4 needs plaintext)
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS s3_credentials (
+    id              TEXT PRIMARY KEY,
+    access_key      TEXT NOT NULL UNIQUE,
+    secret_key_enc  TEXT NOT NULL,          -- AES-256-GCM encrypted
+    user_id         TEXT NOT NULL,
+    display_name    TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'active',  -- active, disabled
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at      TEXT                    -- NULL = no expiry
+);
+
+-- ═══════════════════════════════════════════════════════════════
+-- MULTIPART_UPLOADS: in-progress S3 multipart uploads
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS multipart_uploads (
+    upload_id       TEXT PRIMARY KEY,
+    volume_id       TEXT NOT NULL REFERENCES volumes(id) ON DELETE CASCADE,
+    object_key      TEXT NOT NULL,
+    created_by      TEXT NOT NULL,          -- access_key
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    status          TEXT NOT NULL DEFAULT 'active'  -- active, completed, aborted
+);
+
+CREATE TABLE IF NOT EXISTS multipart_parts (
+    upload_id       TEXT NOT NULL REFERENCES multipart_uploads(upload_id) ON DELETE CASCADE,
+    part_number     INTEGER NOT NULL,
+    size_bytes      INTEGER NOT NULL,
+    etag            TEXT NOT NULL,
+    backend_path    TEXT NOT NULL,          -- temp chunk path on disk
+    PRIMARY KEY (upload_id, part_number)
+);
 
 -- ═══════════════════════════════════════════════════════════════
 -- SMART_DATA: S.M.A.R.T. disk health metrics per physical device
