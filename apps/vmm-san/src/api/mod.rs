@@ -12,6 +12,7 @@ pub mod chunks;
 pub mod status;
 pub mod benchmark;
 pub mod disks;
+pub mod s3;
 
 pub fn router() -> Router<Arc<CoreSanState>> {
     Router::new()
@@ -60,6 +61,10 @@ pub fn router() -> Router<Arc<CoreSanState>> {
         .route("/api/chunks/{volume_id}/{file_id}/{chunk_index}",
             get(chunks::read_chunk).put(chunks::write_chunk))
         .route("/api/file-meta/sync", post(chunks::sync_file_meta))
+
+        // ── S3 Credential Management ─────────────────────
+        .route("/api/s3/credentials", get(s3::list).post(s3::create))
+        .route("/api/s3/credentials/{id}", delete(s3::delete))
 
         // ── Benchmark ─────────────────────────────────────
         .route("/api/benchmark/results", get(benchmark::results))

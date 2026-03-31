@@ -674,3 +674,49 @@ pub async fn volume_remove_host(
     let resp = client.raw_post_json(&format!("/api/volumes/{}/remove-host", id), &body).await.map_err(san_err)?;
     Ok(Json(resp))
 }
+
+// ── S3 Credentials ────────────────────────────────────────────
+
+/// GET /api/san/s3/credentials
+pub async fn list_s3_credentials(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+) -> Result<Json<Value>, AppError> {
+    let (client, _) = any_san_client(&state)?;
+    client.list_s3_credentials().await.map(Json).map_err(san_err)
+}
+
+/// POST /api/san/s3/credentials
+pub async fn create_s3_credential(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Json(body): Json<Value>,
+) -> Result<(StatusCode, Json<Value>), AppError> {
+    let (client, host_id) = any_san_client(&state)?;
+    let user_id = body.get("user_id").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let result = client.create_s3_credential(&body).await.map_err(san_err)?;
+
+    let db = state.db.lock().map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    EventService::log(&db, "info", "san",
+        &format!("S3 credential created for user '{}'", user_id),
+        Some("s3_credential"), None, Some(&host_id));
+
+    Ok((StatusCode::CREATED, Json(result)))
+}
+
+/// DELETE /api/san/s3/credentials/{id}
+pub async fn delete_s3_credential(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    let (client, host_id) = any_san_client(&state)?;
+    client.delete_s3_credential(&id).await.map_err(san_err)?;
+
+    let db = state.db.lock().map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    EventService::log(&db, "info", "san",
+        &format!("S3 credential deleted (id={})", id),
+        Some("s3_credential"), Some(&id), Some(&host_id));
+
+    Ok(StatusCode::NO_CONTENT)
+}

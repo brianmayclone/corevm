@@ -188,6 +188,22 @@ impl SanClient {
         self.post("/api/benchmark/run", &serde_json::json!({})).await
     }
 
+    // ── S3 Credentials ────────────────────────────────────────────
+
+    pub async fn list_s3_credentials(&self) -> Result<Value, String> {
+        self.get("/api/s3/credentials").await
+    }
+
+    pub async fn create_s3_credential(&self, body: &Value) -> Result<Value, String> {
+        self.post("/api/s3/credentials", body).await
+    }
+
+    pub async fn delete_s3_credential(&self, id: &str) -> Result<(), String> {
+        let url = format!("{}/api/s3/credentials/{}", self.base_url, id);
+        let resp = self.http.delete(&url).send().await.map_err(|e| format!("SAN request failed ({}): {}", url, e))?;
+        if resp.status().is_success() { Ok(()) } else { Err(format!("Delete failed: {}", resp.status())) }
+    }
+
     // ── Internal HTTP helpers ─────────────────────────────────────
 
     async fn get(&self, path: &str) -> Result<Value, String> {

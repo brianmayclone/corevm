@@ -181,6 +181,10 @@ pub fn router() -> Router<Arc<ClusterState>> {
         .route("/api/san/benchmark/run", post(san::run_benchmark))
         .route("/api/san/witness/{node_id}", get(san::witness))
 
+        // ── S3 Credentials (proxied) ─────────────────────
+        .route("/api/san/s3/credentials", get(san::list_s3_credentials).post(san::create_s3_credential))
+        .route("/api/san/s3/credentials/{id}", delete(san::delete_s3_credential))
+
         // ── WebSocket ───────────────────────────────────
         .route("/ws/console/{vm_id}", get(crate::ws::console_bridge::handler))
         .route("/ws/terminal", get(crate::ws::terminal::ws_terminal))
