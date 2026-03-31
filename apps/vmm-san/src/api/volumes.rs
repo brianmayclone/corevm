@@ -21,16 +21,20 @@ pub struct CreateVolumeRequest {
     pub local_raid: String,
     #[serde(default = "default_chunk_size")]
     pub chunk_size_bytes: u64,
+    #[serde(default = "default_access_protocols")]
+    pub access_protocols: Vec<String>,
 }
 
 fn default_ftt() -> u32 { 1 }
 fn default_local_raid() -> String { "stripe".into() }
 fn default_chunk_size() -> u64 { crate::storage::chunk::DEFAULT_CHUNK_SIZE }
+fn default_access_protocols() -> Vec<String> { vec!["fuse".into()] }
 
 #[derive(Deserialize)]
 pub struct UpdateVolumeRequest {
     pub ftt: Option<u32>,
     pub local_raid: Option<String>,
+    pub access_protocols: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -46,6 +50,7 @@ pub struct VolumeResponse {
     pub free_bytes: u64,
     pub backend_count: u32,
     pub created_at: String,
+    pub access_protocols: Vec<String>,
 }
 
 /// POST /api/volumes — create a new volume with resilience policy.
@@ -53,6 +58,19 @@ pub async fn create(
     State(state): State<Arc<CoreSanState>>,
     Json(body): Json<CreateVolumeRequest>,
 ) -> Result<(StatusCode, Json<VolumeResponse>), (StatusCode, String)> {
+    // Validate access_protocols
+    let valid_protocols = ["fuse", "s3"];
+    for proto in &body.access_protocols {
+        if !valid_protocols.contains(&proto.as_str()) {
+            return Err((StatusCode::BAD_REQUEST,
+                format!("Unknown access protocol '{}'. Valid: {:?}", proto, valid_protocols)));
+        }
+    }
+    if body.access_protocols.is_empty() {
+        return Err((StatusCode::BAD_REQUEST,
+            "access_protocols must contain at least one protocol".into()));
+    }
+
     // Validate FTT
     if body.ftt > 2 {
         return Err((StatusCode::BAD_REQUEST, "ftt must be 0, 1, or 2".into()));
@@ -120,28 +138,33 @@ pub async fn create(
                 body.local_raid, format_size(usable_total))));
     }
 
+    let protocols_json = serde_json::to_string(&body.access_protocols).unwrap_or_else(|_| "[\"fuse\"]".into());
+
     db.execute(
-        "INSERT INTO volumes (id, name, ftt, chunk_size_bytes, local_raid, max_size_bytes, status)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'online')",
-        rusqlite::params![&id, &body.name, body.ftt, body.chunk_size_bytes, &body.local_raid, body.max_size_bytes],
+        "INSERT INTO volumes (id, name, ftt, chunk_size_bytes, local_raid, max_size_bytes, access_protocols, status)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'online')",
+        rusqlite::params![&id, &body.name, body.ftt, body.chunk_size_bytes, &body.local_raid, body.max_size_bytes, &protocols_json],
     ).map_err(|e| (StatusCode::CONFLICT, format!("Failed to create volume: {}", e)))?;
 
-    // Create FUSE mount point for this volume
-    let fuse_path = state.config.data.fuse_root.join(&body.name);
-    if !fuse_path.exists() {
-        std::fs::create_dir_all(&fuse_path).ok();
+    // Create FUSE mount point for this volume (only if FUSE protocol enabled)
+    if body.access_protocols.contains(&"fuse".into()) {
+        let fuse_path = state.config.data.fuse_root.join(&body.name);
+        if !fuse_path.exists() {
+            std::fs::create_dir_all(&fuse_path).ok();
+        }
     }
 
     // Backends are ONLY claimed disks (/vmm/san-disks/*).
     // The root filesystem must NEVER be used as a storage backend.
 
-    tracing::info!("Created volume '{}' (id={}, ftt={}, local_raid={}, chunk={}MB)",
-        body.name, id, body.ftt, body.local_raid, body.chunk_size_bytes / (1024 * 1024));
+    tracing::info!("Created volume '{}' (id={}, ftt={}, local_raid={}, chunk={}MB, protocols={:?})",
+        body.name, id, body.ftt, body.local_raid, body.chunk_size_bytes / (1024 * 1024), body.access_protocols);
 
     drop(db);
 
-    // Mount FUSE for the new volume
-    {
+    // Mount FUSE for the new volume (only if FUSE protocol enabled)
+    if body.access_protocols.contains(&"fuse".into()) {
+        let fuse_path = state.config.data.fuse_root.join(&body.name);
         let rt = tokio::runtime::Handle::current();
         let state_clone = Arc::clone(&state);
         let vol_id = id.clone();
@@ -180,6 +203,7 @@ pub async fn create(
         "id": &id, "name": &body.name, "ftt": body.ftt,
         "chunk_size_bytes": body.chunk_size_bytes, "local_raid": &body.local_raid,
         "max_size_bytes": body.max_size_bytes,
+        "access_protocols": &body.access_protocols,
     });
     let peers: Vec<String> = state.peers.iter()
         .filter(|p| p.status == crate::state::PeerStatus::Online)
@@ -196,9 +220,16 @@ pub async fn create(
         }
     });
 
+    // Start object server listener for this volume if S3 protocol enabled
+    if body.access_protocols.contains(&"s3".into()) {
+        crate::engine::object_server::spawn_volume_listener(
+            Arc::clone(&state), id.clone(), body.name.clone(),
+        );
+    }
+
     Ok((StatusCode::CREATED, Json(VolumeResponse {
         id,
-        name: body.name,
+        name: body.name.clone(),
         ftt: body.ftt,
         local_raid: body.local_raid,
         chunk_size_bytes: body.chunk_size_bytes,
@@ -208,6 +239,7 @@ pub async fn create(
         free_bytes: 0,
         backend_count: 0,
         created_at: chrono::Utc::now().to_rfc3339(),
+        access_protocols: body.access_protocols,
     })))
 }
 
@@ -223,7 +255,7 @@ pub async fn list(
     ).unwrap_or(0);
 
     let mut stmt = db.prepare(
-        "SELECT id, name, ftt, local_raid, chunk_size_bytes, status, created_at, max_size_bytes
+        "SELECT id, name, ftt, local_raid, chunk_size_bytes, status, created_at, max_size_bytes, access_protocols
          FROM volumes ORDER BY name"
     ).unwrap();
 
@@ -231,6 +263,8 @@ pub async fn list(
         let local_raid: String = row.get(3)?;
         // Calculate RAID-corrected capacity from claimed disks only
         let (total_bytes, free_bytes) = usable_capacity_for_raid_static(&db, &local_raid);
+        let protocols_json: String = row.get::<_, String>(8).unwrap_or_else(|_| "[\"fuse\"]".into());
+        let access_protocols: Vec<String> = serde_json::from_str(&protocols_json).unwrap_or_else(|_| vec!["fuse".into()]);
         Ok(VolumeResponse {
             id: row.get(0)?,
             name: row.get(1)?,
@@ -243,6 +277,7 @@ pub async fn list(
             total_bytes,
             free_bytes,
             backend_count,
+            access_protocols,
         })
     }).unwrap().filter_map(|r| r.ok()).collect();
 
@@ -270,22 +305,27 @@ pub async fn get(
     ).unwrap_or(0);
 
     let vol = db.query_row(
-        "SELECT id, name, ftt, local_raid, chunk_size_bytes, status, created_at, max_size_bytes
+        "SELECT id, name, ftt, local_raid, chunk_size_bytes, status, created_at, max_size_bytes, access_protocols
          FROM volumes WHERE id = ?1",
         rusqlite::params![&id],
-        |row| Ok(VolumeResponse {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            ftt: row.get(2)?,
-            local_raid: row.get(3)?,
-            chunk_size_bytes: row.get(4)?,
-            status: row.get(5)?,
-            created_at: row.get(6)?,
-            max_size_bytes: row.get(7)?,
-            total_bytes,
-            free_bytes,
-            backend_count,
-        }),
+        |row| {
+            let protocols_json: String = row.get::<_, String>(8).unwrap_or_else(|_| "[\"fuse\"]".into());
+            let access_protocols: Vec<String> = serde_json::from_str(&protocols_json).unwrap_or_else(|_| vec!["fuse".into()]);
+            Ok(VolumeResponse {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                ftt: row.get(2)?,
+                local_raid: row.get(3)?,
+                chunk_size_bytes: row.get(4)?,
+                status: row.get(5)?,
+                created_at: row.get(6)?,
+                max_size_bytes: row.get(7)?,
+                total_bytes,
+                free_bytes,
+                backend_count,
+                access_protocols,
+            })
+        },
     ).map_err(|_| StatusCode::NOT_FOUND)?;
 
     Ok(Json(vol))
@@ -323,6 +363,22 @@ pub async fn update(
         }
         db.execute("UPDATE volumes SET local_raid = ?1 WHERE id = ?2",
             rusqlite::params![raid, &id]).ok();
+    }
+    if let Some(ref protocols) = body.access_protocols {
+        let valid_protocols = ["fuse", "s3"];
+        for proto in protocols {
+            if !valid_protocols.contains(&proto.as_str()) {
+                return Err((StatusCode::BAD_REQUEST,
+                    format!("Unknown access protocol '{}'. Valid: {:?}", proto, valid_protocols)));
+            }
+        }
+        if protocols.is_empty() {
+            return Err((StatusCode::BAD_REQUEST,
+                "access_protocols must contain at least one protocol".into()));
+        }
+        let protocols_json = serde_json::to_string(protocols).unwrap_or_else(|_| "[\"fuse\"]".into());
+        db.execute("UPDATE volumes SET access_protocols = ?1 WHERE id = ?2",
+            rusqlite::params![&protocols_json, &id]).ok();
     }
 
     tracing::info!("Updated volume {} policy", id);

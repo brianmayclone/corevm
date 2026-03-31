@@ -280,6 +280,12 @@ async fn main() {
     engine::disk_server::spawn_all(Arc::clone(&state));
     tracing::info!("Disk server started (UDS per volume for direct VM I/O)");
 
+    engine::object_server::spawn_all(Arc::clone(&state));
+    tracing::info!("Object server started (UDS per S3-enabled volume)");
+
+    engine::mgmt_server::spawn(Arc::clone(&state));
+    tracing::info!("Mgmt server started ({})", vmm_core::san_mgmt::MGMT_SOCKET_PATH);
+
     engine::smart_monitor::spawn(Arc::clone(&state));
     tracing::info!("SMART monitor started ({}s interval)", 300);
 
