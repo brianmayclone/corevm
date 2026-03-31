@@ -29,6 +29,7 @@ const standaloneNavItems: NavItem[] = [
       { to: '/storage/local', icon: Database, label: 'Local Storage' },
       { to: '/storage/shared', icon: Share2, label: 'Shared Storage' },
       { to: '/storage/coresan', icon: Boxes, label: 'CoreSAN' },
+      { to: '/storage/object-storage', icon: Globe, label: 'Object Storage' },
       { to: '/storage/disks', icon: Disc, label: 'Disk Management' },
       { to: '/storage/qos', icon: Gauge, label: 'QoS Policies' },
     ],
@@ -87,6 +88,7 @@ const clusterNavItems: NavItem[] = [
     children: [
       { to: '/storage/overview', icon: HardDrive, label: 'Overview' },
       { to: '/storage/coresan', icon: Boxes, label: 'CoreSAN' },
+      { to: '/storage/object-storage', icon: Globe, label: 'Object Storage' },
       { to: '/storage/disks', icon: Disc, label: 'Disk Management' },
     ],
   },

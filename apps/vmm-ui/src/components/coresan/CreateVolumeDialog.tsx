@@ -24,6 +24,8 @@ interface Props {
   setNewVolRaid: (v: string) => void
   newVolSelectedHosts: string[]
   setNewVolSelectedHosts: (v: string[] | ((prev: string[]) => string[])) => void
+  newVolProtocols: string[]
+  setNewVolProtocols: (v: string[]) => void
   newVolError: string
   volumes: CoreSanVolume[]
 }
@@ -31,7 +33,7 @@ interface Props {
 export default function CreateVolumeDialog({
   open, onClose, onSubmit, status, sanHosts, availableHosts,
   newVolName, setNewVolName, newVolSizeGb, setNewVolSizeGb, newVolFtt, setNewVolFtt, newVolRaid, setNewVolRaid,
-  newVolSelectedHosts, setNewVolSelectedHosts, newVolError, volumes,
+  newVolSelectedHosts, setNewVolSelectedHosts, newVolProtocols, setNewVolProtocols, newVolError, volumes,
 }: Props) {
   // RAID disk requirements
   const claimedDisks = status?.claimed_disks || 0
@@ -110,6 +112,35 @@ export default function CreateVolumeDialog({
               <AlertTriangle size={14} />
               {newVolRaid} requires {raidMinDisks} claimed disks, but only {claimedDisks} available. Claim more disks first.
             </div>
+          )}
+        </FormField>
+
+        {/* Access Protocols */}
+        <FormField label="Access Protocols">
+          <div className="flex gap-4">
+            <label className="flex items-center gap-2 text-sm text-vmm-text cursor-pointer">
+              <input type="checkbox" checked={newVolProtocols.includes('fuse')}
+                onChange={e => {
+                  if (e.target.checked) setNewVolProtocols([...newVolProtocols, 'fuse'])
+                  else setNewVolProtocols(newVolProtocols.filter(p => p !== 'fuse'))
+                }}
+                className="rounded border-vmm-border" />
+              FUSE Mount
+            </label>
+            <label className="flex items-center gap-2 text-sm text-vmm-text cursor-pointer">
+              <input type="checkbox" checked={newVolProtocols.includes('s3')}
+                onChange={e => {
+                  if (e.target.checked) setNewVolProtocols([...newVolProtocols, 's3'])
+                  else setNewVolProtocols(newVolProtocols.filter(p => p !== 's3'))
+                }}
+                className="rounded border-vmm-border" />
+              S3 Object Storage
+            </label>
+          </div>
+          {newVolProtocols.includes('s3') && (
+            <p className="text-xs text-vmm-muted mt-1">
+              S3 access requires vmm-s3gw running on the host. Manage keys in Object Storage page.
+            </p>
           )}
         </FormField>
 

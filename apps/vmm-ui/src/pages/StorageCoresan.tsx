@@ -86,6 +86,7 @@ export default function StorageCoresan() {
   const [newVolFtt, setNewVolFtt] = useState(1)
   const [newVolRaid, setNewVolRaid] = useState('stripe')
   const [newVolSelectedHosts, setNewVolSelectedHosts] = useState<string[]>([])
+  const [newVolProtocols, setNewVolProtocols] = useState<string[]>(['fuse'])
   const [newVolError, setNewVolError] = useState('')
 
   // Add host form
@@ -169,12 +170,13 @@ export default function StorageCoresan() {
     const resp = await sanFetch(sanApi('/api/volumes'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: newVolName, max_size_bytes: newVolSizeGb * 1024 * 1024 * 1024, ftt: newVolFtt, local_raid: newVolRaid }),
+      body: JSON.stringify({ name: newVolName, max_size_bytes: newVolSizeGb * 1024 * 1024 * 1024, ftt: newVolFtt, local_raid: newVolRaid, access_protocols: newVolProtocols }),
     })
     if (!resp.ok) { setNewVolError(await resp.text() || 'Failed to create volume'); return }
     setCreateVolumeOpen(false)
     setNewVolName('')
     setNewVolSelectedHosts([])
+    setNewVolProtocols(['fuse'])
     setNewVolError('')
     refresh()
   }
@@ -1057,6 +1059,7 @@ export default function StorageCoresan() {
         newVolFtt={newVolFtt} setNewVolFtt={setNewVolFtt}
         newVolRaid={newVolRaid} setNewVolRaid={setNewVolRaid}
         newVolSelectedHosts={newVolSelectedHosts} setNewVolSelectedHosts={setNewVolSelectedHosts}
+        newVolProtocols={newVolProtocols} setNewVolProtocols={setNewVolProtocols}
         newVolError={newVolError}
         volumes={volumes}
       />

@@ -403,6 +403,7 @@ export interface CoreSanVolume {
   local_raid: 'stripe' | 'mirror' | 'stripe_mirror'
   chunk_size_bytes: number
   max_size_bytes: number
+  access_protocols: string[]
   status: 'creating' | 'online' | 'degraded' | 'offline'
   total_bytes: number
   free_bytes: number
@@ -494,6 +495,24 @@ export interface CoreSanFile {
   updated_at: string
   replica_count: number
   synced_count: number
+}
+
+// ── S3 Object Storage ─────────────────────────────────────────────────
+
+export interface S3Credential {
+  id: string
+  access_key: string
+  user_id: string
+  display_name: string
+  status: 'active' | 'disabled'
+  created_at: string
+  expires_at: string | null
+}
+
+export interface S3CredentialCreateResponse {
+  id: string
+  access_key: string
+  secret_key: string
 }
 
 // ── CoreSAN Chunk Map (Allocation Details) ──────────────────────────────
