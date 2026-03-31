@@ -1,16 +1,20 @@
 import { create } from 'zustand'
 
+export type SidebarMode = 'modules' | 'inventory'
+
 interface UiState {
   theme: 'dark' | 'light' | 'system'
   accentColor: string
   brandName: string
   brandSubtitle: string
   dashboardRefreshSecs: number
+  sidebarMode: SidebarMode
   setTheme: (t: 'dark' | 'light' | 'system') => void
   setAccentColor: (c: string) => void
   setBrandName: (n: string) => void
   setBrandSubtitle: (s: string) => void
   setDashboardRefreshSecs: (s: number) => void
+  setSidebarMode: (m: SidebarMode) => void
   loadFromStorage: () => void
 }
 
@@ -68,6 +72,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   brandName: 'CoreVM',
   brandSubtitle: 'V2.4.0-ENTERPRISE',
   dashboardRefreshSecs: 10,
+  sidebarMode: 'modules',
 
   setTheme: (t) => {
     applyTheme(t)
@@ -96,6 +101,11 @@ export const useUiStore = create<UiState>((set, get) => ({
     persist({ ...getStored(), dashboardRefreshSecs: s })
   },
 
+  setSidebarMode: (m) => {
+    set({ sidebarMode: m })
+    persist({ ...getStored(), sidebarMode: m })
+  },
+
   loadFromStorage: () => {
     const stored = getStored()
     const theme = (stored.theme as any) || 'dark'
@@ -108,6 +118,7 @@ export const useUiStore = create<UiState>((set, get) => ({
       brandName: stored.brandName || 'CoreVM',
       brandSubtitle: stored.brandSubtitle || 'V2.4.0-ENTERPRISE',
       dashboardRefreshSecs: stored.dashboardRefreshSecs || 10,
+      sidebarMode: (stored.sidebarMode as SidebarMode) || 'modules',
     })
   },
 }))

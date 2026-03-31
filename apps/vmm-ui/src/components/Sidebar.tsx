@@ -1,8 +1,9 @@
 import { useState } from 'react'
-import { NavLink, useLocation, useNavigate } from 'react-router-dom'
+import { NavLink, useLocation } from 'react-router-dom'
 import { useUiStore } from '../stores/uiStore'
 import { useClusterStore } from '../stores/clusterStore'
-import { Monitor, HardDrive, Network, Settings, Zap, LifeBuoy, FileText, ChevronDown, Cable, Layers, Globe, Unplug, Database, Share2, Gauge, Disc, Palette, Users, Clock, Server, Shield, LayoutDashboard, List, FolderOpen, Activity, Bell, CheckSquare, Workflow, Boxes } from 'lucide-react'
+import InventoryTree from './InventoryTree'
+import { Monitor, HardDrive, Network, Settings, Zap, LifeBuoy, FileText, ChevronDown, Cable, Layers, Globe, Unplug, Database, Share2, Gauge, Disc, Palette, Users, Clock, Server, Shield, LayoutDashboard, List, FolderOpen, Activity, Bell, CheckSquare, Workflow, Boxes, TreePine, LayoutList } from 'lucide-react'
 
 interface NavItem {
   to: string
@@ -117,8 +118,7 @@ interface SidebarProps {
 
 export default function Sidebar({ onNavigate }: SidebarProps) {
   const location = useLocation()
-  const navigate = useNavigate()
-  const { brandName, brandSubtitle } = useUiStore()
+  const { brandName, brandSubtitle, sidebarMode, setSidebarMode } = useUiStore()
   const { backendMode } = useClusterStore()
 
   const isClusterMode = backendMode === 'cluster'
@@ -138,22 +138,18 @@ export default function Sidebar({ onNavigate }: SidebarProps) {
   }
 
   const handleUpgradeCluster = () => {
-    // Navigate to cluster setup / connect to running vmm-cluster
     const clusterUrl = prompt(
       'Enter the URL of the running vmm-cluster instance:\n\n(e.g. http://localhost:9443)',
       'http://localhost:9443'
     )
     if (!clusterUrl) return
-
-    // Switch the API base URL to the cluster
-    // This reloads the page pointing to the cluster
     window.location.href = clusterUrl
   }
 
   return (
     <aside className="w-56 bg-vmm-sidebar border-r border-vmm-border flex flex-col h-full">
       {/* Branding */}
-      <div className="px-5 pt-5 pb-4">
+      <div className="px-5 pt-5 pb-2">
         <div className="flex items-center gap-2.5">
           <div className="w-8 h-8 rounded-lg bg-vmm-accent/20 flex items-center justify-center">
             {isClusterMode ? <Workflow size={16} className="text-vmm-accent" /> : <Monitor size={16} className="text-vmm-accent" />}
@@ -167,83 +163,117 @@ export default function Sidebar({ onNavigate }: SidebarProps) {
         </div>
       </div>
 
-      {/* Navigation */}
-      <nav className="flex-1 px-3 space-y-0.5 overflow-y-auto">
-        {navItems.map((item) => {
-          const Icon = item.icon
-          const hasChildren = !!item.children
-          const isExpanded = expandedSections.has(item.to)
-          const isParentActive = hasChildren && location.pathname.startsWith(item.to)
+      {/* View mode toggle */}
+      <div className="px-3 pb-2">
+        <div className="flex rounded-lg bg-vmm-bg/50 p-0.5 border border-vmm-border/50">
+          <button
+            onClick={() => setSidebarMode('modules')}
+            className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-md text-[11px] font-medium transition-all duration-200 cursor-pointer
+              ${sidebarMode === 'modules'
+                ? 'bg-vmm-accent/15 text-vmm-accent shadow-sm'
+                : 'text-vmm-text-muted hover:text-vmm-text'
+              }`}
+          >
+            <LayoutList size={12} />
+            Modules
+          </button>
+          <button
+            onClick={() => setSidebarMode('inventory')}
+            className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-md text-[11px] font-medium transition-all duration-200 cursor-pointer
+              ${sidebarMode === 'inventory'
+                ? 'bg-vmm-accent/15 text-vmm-accent shadow-sm'
+                : 'text-vmm-text-muted hover:text-vmm-text'
+              }`}
+          >
+            <TreePine size={12} />
+            Inventory
+          </button>
+        </div>
+      </div>
 
-          if (hasChildren) {
+      {/* Navigation content */}
+      {sidebarMode === 'modules' ? (
+        <nav className="flex-1 px-3 space-y-0.5 overflow-y-auto">
+          {navItems.map((item) => {
+            const Icon = item.icon
+            const hasChildren = !!item.children
+            const isExpanded = expandedSections.has(item.to)
+            const isParentActive = hasChildren && location.pathname.startsWith(item.to)
+
+            if (hasChildren) {
+              return (
+                <div key={item.to}>
+                  <button
+                    onClick={() => toggleSection(item.to)}
+                    className={`w-full flex items-center justify-between gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer
+                      ${isParentActive
+                        ? 'bg-vmm-sidebar-active text-vmm-accent border-l-2 border-vmm-accent'
+                        : 'text-vmm-text-dim hover:text-vmm-text hover:bg-vmm-surface-hover'
+                      }`}
+                  >
+                    <span className="flex items-center gap-3">
+                      <Icon size={18} />
+                      {item.label}
+                    </span>
+                    <ChevronDown
+                      size={14}
+                      className={`transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}
+                    />
+                  </button>
+
+                  {isExpanded && (
+                    <div className="mt-0.5 ml-4 pl-3 border-l border-vmm-border space-y-0.5">
+                      {item.children!.map((child) => {
+                        const ChildIcon = child.icon
+                        return (
+                          <NavLink
+                            key={child.to}
+                            to={child.to}
+                            onClick={onNavigate}
+                            className={({ isActive }) =>
+                              `flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium transition-colors
+                              ${isActive
+                                ? 'bg-vmm-sidebar-active text-vmm-accent'
+                                : 'text-vmm-text-muted hover:text-vmm-text hover:bg-vmm-surface-hover'
+                              }`
+                            }
+                          >
+                            <ChildIcon size={15} />
+                            {child.label}
+                          </NavLink>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              )
+            }
+
             return (
-              <div key={item.to}>
-                <button
-                  onClick={() => toggleSection(item.to)}
-                  className={`w-full flex items-center justify-between gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer
-                    ${isParentActive
-                      ? 'bg-vmm-sidebar-active text-vmm-accent border-l-2 border-vmm-accent'
-                      : 'text-vmm-text-dim hover:text-vmm-text hover:bg-vmm-surface-hover'
-                    }`}
-                >
-                  <span className="flex items-center gap-3">
-                    <Icon size={18} />
-                    {item.label}
-                  </span>
-                  <ChevronDown
-                    size={14}
-                    className={`transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}
-                  />
-                </button>
-
-                {isExpanded && (
-                  <div className="mt-0.5 ml-4 pl-3 border-l border-vmm-border space-y-0.5">
-                    {item.children!.map((child) => {
-                      const ChildIcon = child.icon
-                      return (
-                        <NavLink
-                          key={child.to}
-                          to={child.to}
-                          onClick={onNavigate}
-                          className={({ isActive }) =>
-                            `flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] font-medium transition-colors
-                            ${isActive
-                              ? 'bg-vmm-sidebar-active text-vmm-accent'
-                              : 'text-vmm-text-muted hover:text-vmm-text hover:bg-vmm-surface-hover'
-                            }`
-                          }
-                        >
-                          <ChildIcon size={15} />
-                          {child.label}
-                        </NavLink>
-                      )
-                    })}
-                  </div>
-                )}
-              </div>
+              <NavLink
+                key={item.to}
+                to={item.to}
+                end={item.to === '/'}
+                onClick={onNavigate}
+                className={({ isActive }) =>
+                  `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors
+                  ${isActive
+                    ? 'bg-vmm-sidebar-active text-vmm-accent border-l-2 border-vmm-accent'
+                    : 'text-vmm-text-dim hover:text-vmm-text hover:bg-vmm-surface-hover'
+                  }`
+                }
+              >
+                <Icon size={18} />
+                {item.label}
+              </NavLink>
             )
-          }
-
-          return (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.to === '/'}
-              onClick={onNavigate}
-              className={({ isActive }) =>
-                `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors
-                ${isActive
-                  ? 'bg-vmm-sidebar-active text-vmm-accent border-l-2 border-vmm-accent'
-                  : 'text-vmm-text-dim hover:text-vmm-text hover:bg-vmm-surface-hover'
-                }`
-              }
-            >
-              <Icon size={18} />
-              {item.label}
-            </NavLink>
-          )
-        })}
-      </nav>
+          })}
+        </nav>
+      ) : (
+        <div className="flex-1 px-2 overflow-y-auto">
+          <InventoryTree onNavigate={onNavigate} />
+        </div>
+      )}
 
       {/* Upgrade banner — only shown in standalone mode */}
       {!isClusterMode && (

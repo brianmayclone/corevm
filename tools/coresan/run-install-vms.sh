@@ -51,6 +51,7 @@ DISK_SYS_SIZE="20G"
 DISK_DATA_SIZE="40G"
 SUBNET="192.168.100"        # Subnet for auto-created bridge
 QEMU_BIN="qemu-system-x86_64"
+VM_PORTS=(22 9443 8443 7443 7444)   # Ports to forward from host→VM (WSL2 mirrored mode)
 
 # ── Parse args ───────────────────────────────────────────────────
 
@@ -231,6 +232,8 @@ cleanup_on_exit() {
         ip link delete "$tap" 2>/dev/null || true
     done
 
+    cleanup_port_forwarding
+
     if $CREATED_BRIDGE; then
         iptables -t nat -D POSTROUTING -s "${SUBNET}.0/24" ! -o "$BRIDGE_NAME" -j MASQUERADE 2>/dev/null || true
         iptables -D FORWARD -i "$BRIDGE_NAME" -o "$BRIDGE_NAME" -j ACCEPT 2>/dev/null || true
@@ -294,7 +297,55 @@ setup_bridge_network() {
     ok "${#TAP_DEVICES[@]} tap devices created on $BRIDGE_NAME"
 }
 
+# ── Port forwarding (WSL2 mirrored mode) ───────────────────────
+#
+# DNAT rules forward host ports to each VM's bridge IP so that
+# Windows can reach the VMs via localhost when WSL2 mirrored
+# networking is enabled. Each VM gets an offset: VM1 → base port,
+# VM2 → base port + 100, etc. SSH is special: 2201, 2202, ...
+#
+# Example for VM 1 (192.168.100.101):
+#   localhost:2201  → 192.168.100.101:22
+#   localhost:9443  → 192.168.100.101:9443
+#   localhost:8443  → 192.168.100.101:8443
+# Example for VM 2 (192.168.100.102):
+#   localhost:2202  → 192.168.100.102:22
+#   localhost:9543  → 192.168.100.102:9443
+#   localhost:8543  → 192.168.100.102:8443
+
+DNAT_RULES=()
+
+setup_port_forwarding() {
+    for i in "${VM_SLOTS[@]}"; do
+        local vm_ip
+        vm_ip=$(ip_for_vm "$i")
+        local offset=$(( (i - 1) * 100 ))
+
+        for port in "${VM_PORTS[@]}"; do
+            local host_port
+            if [[ "$port" -eq 22 ]]; then
+                host_port=$((2200 + i))
+            else
+                host_port=$((port + offset))
+            fi
+            iptables -t nat -A PREROUTING -p tcp --dport "$host_port" -j DNAT --to-destination "${vm_ip}:${port}"
+            iptables -t nat -A OUTPUT -p tcp --dport "$host_port" -j DNAT --to-destination "${vm_ip}:${port}"
+            DNAT_RULES+=("${host_port}:${vm_ip}:${port}")
+        done
+    done
+    ok "Port forwarding configured for ${#VM_SLOTS[@]} VM(s)"
+}
+
+cleanup_port_forwarding() {
+    for rule in "${DNAT_RULES[@]}"; do
+        IFS=: read -r host_port vm_ip vm_port <<< "$rule"
+        iptables -t nat -D PREROUTING -p tcp --dport "$host_port" -j DNAT --to-destination "${vm_ip}:${vm_port}" 2>/dev/null || true
+        iptables -t nat -D OUTPUT -p tcp --dport "$host_port" -j DNAT --to-destination "${vm_ip}:${vm_port}" 2>/dev/null || true
+    done
+}
+
 setup_bridge_network
+setup_port_forwarding
 
 # ── Deterministic MAC + IP per VM ────────────────────────────────
 #
@@ -420,6 +471,19 @@ info "VM network (fixed DHCP assignments):"
 echo "  Host:   ${SUBNET}.1"
 for i in "${VM_SLOTS[@]}"; do
     echo "  VM ${i}:   $(ip_for_vm "$i")  ($(mac_for_vm "$i"))"
+done
+echo ""
+info "Port forwarding (WSL2 → VM, accessible from Windows via localhost):"
+for i in "${VM_SLOTS[@]}"; do
+    local offset=$(( (i - 1) * 100 ))
+    echo "  VM ${i}:"
+    for port in "${VM_PORTS[@]}"; do
+        if [[ "$port" -eq 22 ]]; then
+            echo "    localhost:$((2200 + i)) → $(ip_for_vm "$i"):22  (SSH)"
+        else
+            echo "    localhost:$((port + offset)) → $(ip_for_vm "$i"):${port}"
+        fi
+    done
 done
 echo ""
 info "Monitor sockets (use 'socat - UNIX-CONNECT:<path>'):"

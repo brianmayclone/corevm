@@ -82,68 +82,32 @@ impl NodeClient {
 
     /// POST /agent/storage/mount
     pub async fn mount_datastore(&self, req: &MountDatastoreRequest) -> Result<AgentResponse, String> {
-        let resp = self.http.post(format!("{}/agent/storage/mount", &self.base_url))
-            .header("X-Agent-Token", &self.agent_token)
-            .json(req)
-            .send().await
-            .map_err(|e| format!("Connection failed: {}", e))?;
-
-        resp.json().await.map_err(|e| format!("Invalid response: {}", e))
+        self.post_agent_json("/agent/storage/mount", req).await
     }
 
     /// POST /agent/storage/unmount
     pub async fn unmount_datastore(&self, req: &vmm_core::cluster::UnmountDatastoreRequest) -> Result<AgentResponse, String> {
-        let resp = self.http.post(format!("{}/agent/storage/unmount", &self.base_url))
-            .header("X-Agent-Token", &self.agent_token)
-            .json(req)
-            .send().await
-            .map_err(|e| format!("Connection failed: {}", e))?;
-
-        resp.json().await.map_err(|e| format!("Invalid response: {}", e))
+        self.post_agent_json("/agent/storage/unmount", req).await
     }
 
     /// POST /agent/network/bridge/setup — Set up a bridge on this node.
     pub async fn setup_bridge(&self, req: &vmm_core::cluster::SetupBridgeRequest) -> Result<AgentResponse, String> {
-        let resp = self.http.post(format!("{}/agent/network/bridge/setup", &self.base_url))
-            .header("X-Agent-Token", &self.agent_token)
-            .json(req)
-            .send().await
-            .map_err(|e| format!("Connection failed: {}", e))?;
-
-        resp.json().await.map_err(|e| format!("Invalid response: {}", e))
+        self.post_agent_json("/agent/network/bridge/setup", req).await
     }
 
     /// POST /agent/network/bridge/teardown — Remove a bridge from this node.
     pub async fn teardown_bridge(&self, req: &vmm_core::cluster::TeardownBridgeRequest) -> Result<AgentResponse, String> {
-        let resp = self.http.post(format!("{}/agent/network/bridge/teardown", &self.base_url))
-            .header("X-Agent-Token", &self.agent_token)
-            .json(req)
-            .send().await
-            .map_err(|e| format!("Connection failed: {}", e))?;
-
-        resp.json().await.map_err(|e| format!("Invalid response: {}", e))
+        self.post_agent_json("/agent/network/bridge/teardown", req).await
     }
 
     /// POST /agent/network/viswitch/setup — Set up a viSwitch on this node.
     pub async fn setup_viswitch(&self, req: &SetupViSwitchRequest) -> Result<AgentResponse, String> {
-        let resp = self.http.post(format!("{}/agent/network/viswitch/setup", &self.base_url))
-            .header("X-Agent-Token", &self.agent_token)
-            .json(req)
-            .send().await
-            .map_err(|e| format!("Connection failed: {}", e))?;
-
-        resp.json().await.map_err(|e| format!("Invalid response: {}", e))
+        self.post_agent_json("/agent/network/viswitch/setup", req).await
     }
 
     /// POST /agent/network/viswitch/teardown — Remove a viSwitch from this node.
     pub async fn teardown_viswitch(&self, req: &TeardownViSwitchRequest) -> Result<AgentResponse, String> {
-        let resp = self.http.post(format!("{}/agent/network/viswitch/teardown", &self.base_url))
-            .header("X-Agent-Token", &self.agent_token)
-            .json(req)
-            .send().await
-            .map_err(|e| format!("Connection failed: {}", e))?;
-
-        resp.json().await.map_err(|e| format!("Invalid response: {}", e))
+        self.post_agent_json("/agent/network/viswitch/teardown", req).await
     }
 
     /// POST /agent/network/configure-ip — Set static IP or DHCP on a NIC.
@@ -198,6 +162,23 @@ impl NodeClient {
     async fn post_agent(&self, path: &str) -> Result<AgentResponse, String> {
         let resp = self.http.post(format!("{}{}", &self.base_url, path))
             .header("X-Agent-Token", &self.agent_token)
+            .send().await
+            .map_err(|e| format!("Connection failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let err = resp.text().await.unwrap_or_default();
+            return Ok(AgentResponse::err(err));
+        }
+
+        resp.json().await.map_err(|e| format!("Invalid response: {}", e))
+    }
+
+    /// Generic POST with a JSON body, returning AgentResponse.
+    /// Handles non-2xx responses gracefully instead of failing to deserialize.
+    async fn post_agent_json<T: serde::Serialize>(&self, path: &str, body: &T) -> Result<AgentResponse, String> {
+        let resp = self.http.post(format!("{}{}", &self.base_url, path))
+            .header("X-Agent-Token", &self.agent_token)
+            .json(body)
             .send().await
             .map_err(|e| format!("Connection failed: {}", e))?;
 
