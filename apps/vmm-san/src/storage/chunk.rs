@@ -544,6 +544,10 @@ pub fn write_chunk_data(
 }
 
 /// Compute protection status for a file based on FTT.
+///
+/// Multi-node: a chunk is protected if it exists on `ftt + 1` distinct nodes.
+/// Single-node: a chunk is protected if it exists on `ftt + 1` distinct backends
+/// (local mirror across multiple disks).
 pub fn compute_protection_status(db: &Connection, file_id: i64, ftt: u32) -> &'static str {
     if ftt == 0 {
         return "unprotected";
@@ -551,18 +555,37 @@ pub fn compute_protection_status(db: &Connection, file_id: i64, ftt: u32) -> &'s
 
     let required_copies = ftt + 1;
 
-    // Find chunks with fewer than required distinct node replicas.
-    // Exclude thin-provisioned chunks (zero synced replicas = never written, intentionally empty).
-    let degraded_count: u64 = db.query_row(
+    // Determine if we have online peers (multi-node) or are single-node.
+    let peer_count: i64 = db.query_row(
+        "SELECT COUNT(*) FROM peers WHERE status != 'offline'",
+        [], |row| row.get(0),
+    ).unwrap_or(0);
+
+    // Multi-node: count distinct nodes with synced replicas.
+    // Single-node: count distinct backends with synced replicas (local disk mirrors).
+    let count_expr = if peer_count > 0 {
+        "COUNT(DISTINCT cr.node_id)"
+    } else {
+        "COUNT(DISTINCT cr.backend_id)"
+    };
+
+    // Find chunks with fewer than required replicas.
+    // Exclude thin-provisioned chunks (zero synced replicas = never written).
+    let query = format!(
         "SELECT COUNT(*) FROM file_chunks fc
          WHERE fc.file_id = ?1 AND (
-             SELECT COUNT(DISTINCT cr.node_id) FROM chunk_replicas cr
+             SELECT {} FROM chunk_replicas cr
              WHERE cr.chunk_id = fc.id AND cr.state = 'synced'
          ) < ?2
          AND EXISTS (
              SELECT 1 FROM chunk_replicas cr2
              WHERE cr2.chunk_id = fc.id AND cr2.state = 'synced'
          )",
+        count_expr
+    );
+
+    let degraded_count: u64 = db.query_row(
+        &query,
         rusqlite::params![file_id, required_copies],
         |row| row.get(0),
     ).unwrap_or(0);
