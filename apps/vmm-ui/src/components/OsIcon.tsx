@@ -8,7 +8,7 @@ interface Props {
 
 /** Map guest_os enum values to icon filenames. */
 function getIconFile(guestOs: string): string {
-  const os = guestOs.toLowerCase()
+  const os = (guestOs || '').toLowerCase()
   if (os.includes('anyos')) return 'anyos.png'
   if (os.includes('windows') || os === 'win7' || os === 'win10' || os === 'win11' || os === 'winxp') return 'windows.png'
   if (os.includes('linux') || os.includes('ubuntu') || os.includes('debian') || os.includes('fedora')
@@ -19,7 +19,7 @@ function getIconFile(guestOs: string): string {
 
 /** Background color tint based on OS. */
 function getBgClass(guestOs: string): string {
-  const os = guestOs.toLowerCase()
+  const os = (guestOs || '').toLowerCase()
   if (os.includes('anyos')) return 'bg-emerald-500/10'
   if (os.includes('windows') || os === 'win7' || os === 'win10' || os === 'win11' || os === 'winxp') return 'bg-blue-500/10'
   if (os.includes('linux') || os.includes('ubuntu') || os.includes('debian') || os.includes('fedora')
