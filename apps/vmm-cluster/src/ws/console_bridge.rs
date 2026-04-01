@@ -53,18 +53,36 @@ pub async fn handler(
 }
 
 async fn bridge_console(mut client_ws: WebSocket, host_address: String, agent_token: String, vm_id: String) {
-    // Connect to the node's WebSocket console
+    // Connect to the node's WebSocket console with retry logic.
+    // After VM start, the console may not be ready immediately (VM still initializing).
     let ws_url = format!("{}/ws/console/{}?token={}",
         host_address.replace("https://", "wss://").replace("http://", "ws://"),
         vm_id, agent_token);
 
-    let node_ws = match tokio_tungstenite::connect_async(&ws_url).await {
-        Ok((ws, _)) => ws,
-        Err(e) => {
-            tracing::error!("Console bridge: Cannot connect to node: {}", e);
-            // Send error message to client before closing
+    let mut node_ws = None;
+    let retry_delays = [200, 400, 800, 1500, 3000]; // ms
+    for (attempt, delay_ms) in retry_delays.iter().enumerate() {
+        match tokio_tungstenite::connect_async(&ws_url).await {
+            Ok((ws, _)) => {
+                node_ws = Some(ws);
+                if attempt > 0 {
+                    tracing::info!("Console bridge: connected after {} retries", attempt);
+                }
+                break;
+            }
+            Err(e) => {
+                tracing::debug!("Console bridge: attempt {} failed ({}), retrying in {}ms", attempt + 1, e, delay_ms);
+                tokio::time::sleep(tokio::time::Duration::from_millis(*delay_ms)).await;
+            }
+        }
+    }
+
+    let node_ws = match node_ws {
+        Some(ws) => ws,
+        None => {
+            tracing::error!("Console bridge: Cannot connect to node after {} attempts", retry_delays.len());
             let _ = client_ws.send(Message::Text(
-                serde_json::json!({"error": format!("Cannot reach host: {}", e)}).to_string().into()
+                serde_json::json!({"error": "Cannot reach VM console — VM may still be starting"}).to_string().into()
             )).await;
             let _ = client_ws.close().await;
             return;

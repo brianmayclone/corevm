@@ -95,7 +95,7 @@ impl EventHandler for ServerEventHandler {
     }
 
     fn on_tick(&mut self, handle: u64) {
-        if self.last_fb_update.elapsed() >= Duration::from_millis(33) {
+        if self.last_fb_update.elapsed() >= Duration::from_millis(16) {
             update_framebuffer(handle, &self.fb);
             self.last_fb_update = Instant::now();
 

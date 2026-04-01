@@ -26,6 +26,16 @@ pub struct RunningVm {
 
 /// Start a VM from config. Returns RunningVm on success.
 pub fn start_vm(config: &VmConfig, bios_paths: &[std::path::PathBuf]) -> Result<RunningVm, String> {
+    // Validate disk and ISO paths before allocating VM resources
+    for (i, path) in config.disk_images.iter().enumerate() {
+        if !path.is_empty() && !std::path::Path::new(path).exists() {
+            return Err(format!("Disk {}: '{}' not found", i, path));
+        }
+    }
+    if !config.iso_image.is_empty() && !std::path::Path::new(&config.iso_image).exists() {
+        return Err(format!("ISO image '{}' not found", config.iso_image));
+    }
+
     // Install SIGUSR1 handler (Linux/KVM — allows cancel_vcpu to interrupt KVM_RUN)
     #[cfg(target_os = "linux")]
     libcorevm::backend::kvm::install_sigusr1_handler();
@@ -150,7 +160,9 @@ pub fn start_vm(config: &VmConfig, bios_paths: &[std::path::PathBuf]) -> Result<
     let has_intel_gpu = config.gpu_model == GpuModel::IntelHD;
     if has_virtio_gpu {
         corevm_setup_virtio_gpu(handle, config.vram_mb.max(64));
-        corevm_setup_virtio_input(handle);
+        // VirtIO Input disabled — PS/2 keyboard/mouse works fine with VirtIO GPU.
+        // Re-enable once VirtIO Input driver issues are resolved.
+        // corevm_setup_virtio_input(handle);
     } else if has_intel_gpu {
         corevm_setup_intel_gpu(handle, config.vram_mb);
     }
