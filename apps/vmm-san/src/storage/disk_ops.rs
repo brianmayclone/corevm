@@ -131,6 +131,66 @@ pub fn reset_disk(device_path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Create a sparse file, attach it as a loop device, format, and return (loop_device, uuid).
+///
+/// This enables CoreSAN to work without physical disks — perfect for development and testing.
+/// The file acts as a virtual disk: sparse allocation means it only consumes actual space on write.
+pub fn create_file_disk(file_path: &str, size_bytes: u64, fs_type: &str) -> Result<(String, String), String> {
+    // Create parent directory
+    if let Some(parent) = std::path::Path::new(file_path).parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Cannot create directory {}: {}", parent.display(), e))?;
+    }
+
+    // Create sparse file with truncate
+    tracing::info!("Creating sparse file {} ({} bytes)", file_path, size_bytes);
+    let file = std::fs::File::create(file_path)
+        .map_err(|e| format!("Cannot create file {}: {}", file_path, e))?;
+    file.set_len(size_bytes)
+        .map_err(|e| format!("Cannot set file size: {}", e))?;
+    drop(file);
+
+    // Attach as loop device
+    tracing::info!("Attaching {} as loop device", file_path);
+    let output = Command::new("losetup")
+        .args(["--find", "--show", file_path])
+        .output()
+        .map_err(|e| format!("losetup failed: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("losetup failed: {}", stderr.trim()));
+    }
+
+    let loop_device = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    tracing::info!("Attached {} → {}", file_path, loop_device);
+
+    // Format the loop device
+    let uuid = match format_disk(&loop_device, fs_type) {
+        Ok(uuid) => uuid,
+        Err(e) => {
+            // Detach on failure
+            Command::new("losetup").args(["-d", &loop_device]).output().ok();
+            std::fs::remove_file(file_path).ok();
+            return Err(e);
+        }
+    };
+
+    Ok((loop_device, uuid))
+}
+
+/// Detach a loop device and optionally remove the backing file.
+pub fn detach_file_disk(loop_device: &str, file_path: &str, remove_file: bool) -> Result<(), String> {
+    run_cmd("losetup", &["-d", loop_device])?;
+    tracing::info!("Detached loop device {}", loop_device);
+
+    if remove_file {
+        std::fs::remove_file(file_path).ok();
+        tracing::info!("Removed backing file {}", file_path);
+    }
+    Ok(())
+}
+
 /// Get the filesystem UUID of a device via blkid.
 pub fn get_fs_uuid(device_path: &str) -> Result<String, String> {
     let output = Command::new("blkid")

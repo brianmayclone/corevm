@@ -219,6 +219,112 @@ pub async fn claim(
 }
 
 #[derive(Deserialize)]
+pub struct CreateFileDiskRequest {
+    /// Size in bytes for the virtual disk file.
+    pub size_bytes: u64,
+    #[serde(default = "default_ext4")]
+    pub fs_type: String,
+    /// Optional custom name (used in filename). Defaults to UUID.
+    #[serde(default)]
+    pub name: String,
+}
+
+/// POST /api/disks/create-file — create a file-backed virtual disk for development/testing.
+///
+/// Creates a sparse file, attaches it as a loop device, formats it, mounts it,
+/// and registers it as a backend — identical to a physical claimed disk from that point on.
+pub async fn create_file(
+    State(state): State<Arc<CoreSanState>>,
+    Json(body): Json<CreateFileDiskRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !["ext4", "xfs"].contains(&body.fs_type.as_str()) {
+        return Err((StatusCode::BAD_REQUEST, "fs_type must be 'ext4' or 'xfs'".into()));
+    }
+    if body.size_bytes < 64 * 1024 * 1024 {
+        return Err((StatusCode::BAD_REQUEST, "Minimum size is 64 MB".into()));
+    }
+
+    let disk_id = Uuid::new_v4().to_string();
+    let label = if body.name.is_empty() { disk_id.clone() } else { body.name.clone() };
+    let file_dir = state.config.data.data_dir.join("file-disks");
+    let file_path = file_dir.join(format!("{}.img", label));
+    let file_path_str = file_path.to_string_lossy().to_string();
+    let mount_path = format!("/vmm/san-disks/{}", disk_id);
+
+    // Record in DB as formatting
+    {
+        let db = state.db.lock().unwrap();
+        db.execute(
+            "INSERT INTO claimed_disks (id, device_path, mount_path, fs_type, model, serial, size_bytes, status)
+             VALUES (?1, ?2, ?3, ?4, 'file-disk', ?5, ?6, 'formatting')",
+            rusqlite::params![
+                &disk_id, &file_path_str, &mount_path, &body.fs_type,
+                &label, body.size_bytes
+            ],
+        ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)))?;
+    }
+
+    // Create file, attach loop, format, mount (blocking)
+    let fs = body.fs_type.clone();
+    let fp = file_path_str.clone();
+    let mp = mount_path.clone();
+    let size = body.size_bytes;
+
+    let result = tokio::task::spawn_blocking(move || -> Result<(String, String), String> {
+        let (loop_dev, uuid) = disk_ops::create_file_disk(&fp, size, &fs)?;
+        disk_ops::mount_disk(&loop_dev, &mp)?;
+        Ok((loop_dev, uuid))
+    }).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Task error: {}", e)))?;
+
+    let (loop_device, device_uuid) = match result {
+        Ok(r) => r,
+        Err(e) => {
+            let db = state.db.lock().unwrap();
+            db.execute("UPDATE claimed_disks SET status = 'error' WHERE id = ?1",
+                rusqlite::params![&disk_id]).ok();
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Failed: {}", e)));
+        }
+    };
+
+    // Create backend
+    let backend_id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let (total_bytes, free_bytes) = crate::storage::backend::refresh_stats(&mount_path);
+
+    {
+        let db = state.db.lock().unwrap();
+
+        db.execute(
+            "UPDATE claimed_disks SET device_uuid = ?1, status = 'mounted', backend_id = ?2, device_path = ?3 WHERE id = ?4",
+            rusqlite::params![&device_uuid, &backend_id, &loop_device, &disk_id],
+        ).ok();
+
+        db.execute(
+            "INSERT INTO backends (id, node_id, path, total_bytes, free_bytes, status, last_check, claimed_disk_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'online', ?6, ?7)",
+            rusqlite::params![
+                &backend_id, &state.node_id, &mount_path,
+                total_bytes, free_bytes, &now, &disk_id
+            ],
+        ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Backend creation: {}", e)))?;
+    }
+
+    tracing::info!("Created file-disk {} → {} → {} (backend={})",
+        file_path_str, loop_device, mount_path, backend_id);
+
+    Ok(Json(serde_json::json!({
+        "disk_id": disk_id,
+        "backend_id": backend_id,
+        "file_path": file_path_str,
+        "loop_device": loop_device,
+        "mount_path": mount_path,
+        "device_uuid": device_uuid,
+        "fs_type": body.fs_type,
+        "size_bytes": body.size_bytes,
+    })))
+}
+
+#[derive(Deserialize)]
 pub struct ReleaseDiskRequest {
     pub device_path: String,
     #[serde(default)]

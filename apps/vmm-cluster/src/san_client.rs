@@ -133,6 +133,10 @@ impl SanClient {
         self.post("/api/disks/reset", body).await
     }
 
+    pub async fn create_file_disk(&self, body: &Value) -> Result<Value, String> {
+        self.post("/api/disks/create-file", body).await
+    }
+
     pub async fn allocate_disk(&self, volume_id: &str, body: &Value) -> Result<Value, String> {
         self.post(&format!("/api/volumes/{}/allocate-disk", volume_id), body).await
     }

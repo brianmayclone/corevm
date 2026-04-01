@@ -370,6 +370,32 @@ pub async fn reset_disk(
     Ok(Json(result))
 }
 
+/// POST /api/san/disks/create-file — create file-backed virtual disk on specific host.
+pub async fn create_file_disk(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, AppError> {
+    let host_id = body.get("host_id").and_then(|v| v.as_str()).unwrap_or("");
+    if host_id.is_empty() {
+        return Err(AppError(StatusCode::BAD_REQUEST, "host_id is required".into()));
+    }
+    let client = san_client_for_host(&state, host_id)?;
+    let san_body = serde_json::json!({
+        "size_bytes": body.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0),
+        "fs_type": body.get("fs_type").and_then(|v| v.as_str()).unwrap_or("ext4"),
+        "name": body.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+    });
+    let result = client.create_file_disk(&san_body).await.map_err(san_err)?;
+
+    let db = state.db.lock().map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    EventService::log(&db, "info", "san",
+        &format!("Virtual disk created on host {}", host_id),
+        Some("disk"), None, Some(host_id));
+
+    Ok(Json(result))
+}
+
 // ── Benchmark ─────────────────────────────────────────────────────
 
 /// GET /api/san/benchmark — forward to any SAN host.

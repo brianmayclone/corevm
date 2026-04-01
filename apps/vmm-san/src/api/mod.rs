@@ -28,6 +28,7 @@ pub fn router() -> Router<Arc<CoreSanState>> {
         .route("/api/disks/claim", post(disks::claim))
         .route("/api/disks/release", post(disks::release))
         .route("/api/disks/reset", post(disks::reset))
+        .route("/api/disks/create-file", post(disks::create_file))
         .route("/api/disks/{device_name}/smart", get(disks::smart_detail))
 
         // ── Volumes (CRUD + resilience policy) ────────────

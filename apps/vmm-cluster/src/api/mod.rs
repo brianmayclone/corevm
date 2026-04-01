@@ -167,6 +167,7 @@ pub fn router() -> Router<Arc<ClusterState>> {
         .route("/api/san/disks/claim", post(san::claim_disk))
         .route("/api/san/disks/release", post(san::release_disk))
         .route("/api/san/disks/reset", post(san::reset_disk))
+        .route("/api/san/disks/create-file", post(san::create_file_disk))
         .route("/api/san/volumes/{id}/health", get(san::volume_health))
         .route("/api/san/volumes/{id}/repair", post(san::volume_repair))
         .route("/api/san/volumes/{id}/remove-host", post(san::volume_remove_host))

@@ -17,6 +17,7 @@ import AddHostDialog from '../components/coresan/AddHostDialog'
 import ClaimDiskDialog from '../components/coresan/ClaimDiskDialog'
 import AutoClaimDialog from '../components/coresan/AutoClaimDialog'
 import SmartDetailDialog from '../components/coresan/SmartDetailDialog'
+import CreateFileDiskDialog from '../components/coresan/CreateFileDiskDialog'
 import EventFeed from '../components/EventFeed'
 
 export default function StorageCoresan() {
@@ -69,6 +70,9 @@ export default function StorageCoresan() {
 
   // SMART detail dialog
   const [smartDisk, setSmartDisk] = useState<DiscoveredDisk | null>(null)
+
+  // Create file disk dialog
+  const [createFileDiskOpen, setCreateFileDiskOpen] = useState(false)
 
   // Edit volume dialog
   const [editVolumeOpen, setEditVolumeOpen] = useState(false)
@@ -548,6 +552,13 @@ export default function StorageCoresan() {
 
       {/* ── Tab: Disks & Nodes ──────────────────────────────────── */}
       {activeTab === 'disks' && <>
+
+      {/* Virtual Disk Creation */}
+      <div className="flex justify-end">
+        <Button variant="outline" onClick={() => setCreateFileDiskOpen(true)} disabled={!sanAvailable}>
+          <Plus size={14} /> Create Virtual Disk
+        </Button>
+      </div>
 
       {/* Physical Disks */}
       {disks.length > 0 && (
@@ -1162,6 +1173,16 @@ export default function StorageCoresan() {
         hostId={smartDisk?._host_id}
         hostName={smartDisk?._host_name}
         sanAddress={smartDisk?._san_address}
+      />
+
+      <CreateFileDiskDialog
+        open={createFileDiskOpen}
+        onClose={() => setCreateFileDiskOpen(false)}
+        onCreated={() => { setCreateFileDiskOpen(false); refresh() }}
+        isCluster={isCluster}
+        sanHosts={sanHosts}
+        sanFetch={sanFetch}
+        sanApi={sanApi}
       />
 
       {/* Edit Volume Dialog */}
