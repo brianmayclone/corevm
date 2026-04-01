@@ -126,11 +126,12 @@ export default function StorageCoresan() {
       } else {
         setStatus(statusData)
       }
-      const vols: CoreSanVolume[] = await vRes.json()
-      setVolumes(vols)
-      setPeers(await pRes.json())
-      if (vols.length > 0 && !selectedVolume) setSelectedVolume(vols[0].id)
-      sanFetch(sanApi('/api/disks')).then(r => r.json()).then(setDisks).catch(() => setDisks([]))
+      const vols = vRes.ok ? await vRes.json() : []
+      setVolumes(Array.isArray(vols) ? vols : [])
+      const peersData = pRes.ok ? await pRes.json() : []
+      setPeers(Array.isArray(peersData) ? peersData : [])
+      if (Array.isArray(vols) && vols.length > 0 && !selectedVolume) setSelectedVolume(vols[0].id)
+      sanFetch(sanApi('/api/disks')).then(r => r.ok ? r.json() : []).then(d => setDisks(Array.isArray(d) ? d : [])).catch(() => setDisks([]))
       if (isCluster) {
         sanFetch(sanApi('/api/health')).then(r => r.ok ? r.json() : null).then(setSanHealth).catch(() => {})
       }

@@ -24,24 +24,28 @@ export default function StorageObjectStorage() {
 
   const fetchData = async () => {
     try {
-      let vols: CoreSanVolume[]
-      if (isCluster) {
-        const { data } = await api.get<CoreSanVolume[]>('/api/san/volumes')
-        vols = data
-      } else {
-        const resp = await fetch(`${sanBase}/api/volumes`)
-        vols = await resp.json()
-      }
+      let vols: CoreSanVolume[] = []
+      try {
+        if (isCluster) {
+          const { data } = await api.get<CoreSanVolume[]>('/api/san/volumes')
+          vols = Array.isArray(data) ? data : []
+        } else {
+          const resp = await fetch(`${sanBase}/api/volumes`)
+          if (resp.ok) { const d = await resp.json(); vols = Array.isArray(d) ? d : [] }
+        }
+      } catch {}
       setVolumes(vols.filter(v => v.access_protocols?.includes('s3')))
 
-      let creds: S3Credential[]
-      if (isCluster) {
-        const { data } = await api.get<S3Credential[]>('/api/san/s3/credentials')
-        creds = data
-      } else {
-        const resp = await fetch(`${sanBase}/api/s3/credentials`)
-        creds = await resp.json()
-      }
+      let creds: S3Credential[] = []
+      try {
+        if (isCluster) {
+          const { data } = await api.get<S3Credential[]>('/api/san/s3/credentials')
+          creds = Array.isArray(data) ? data : []
+        } else {
+          const resp = await fetch(`${sanBase}/api/s3/credentials`)
+          if (resp.ok) { const d = await resp.json(); creds = Array.isArray(d) ? d : [] }
+        }
+      } catch {}
       setCredentials(creds)
     } catch (e: any) {
       setError(e.message || 'Failed to load data')
