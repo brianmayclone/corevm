@@ -116,6 +116,7 @@ export default function CreateFileDiskDialog({
               { value: 'xfs', label: 'XFS' },
             ]}
           />
+        </FormField>
 
         <FormField label="Name (optional)">
           <TextInput value={name} onChange={e => setName(e.target.value)} placeholder="test-disk-1" />
