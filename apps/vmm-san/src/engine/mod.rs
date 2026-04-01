@@ -26,3 +26,4 @@ pub mod disk_server;
 pub mod object_server;
 pub mod mgmt_server;
 pub mod dedup;
+pub mod iscsi_server;

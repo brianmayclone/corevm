@@ -283,6 +283,9 @@ async fn main() {
     engine::object_server::spawn_all(Arc::clone(&state));
     tracing::info!("Object server started (UDS per S3-enabled volume)");
 
+    engine::iscsi_server::spawn_all(Arc::clone(&state));
+    tracing::info!("iSCSI block server started (UDS per iSCSI-enabled volume)");
+
     engine::mgmt_server::spawn(Arc::clone(&state));
     tracing::info!("Mgmt server started ({})", vmm_core::san_mgmt::MGMT_SOCKET_PATH);
 
