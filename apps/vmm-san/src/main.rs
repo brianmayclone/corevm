@@ -175,8 +175,10 @@ async fn main() {
     // Start in Sanitizing state — node is not yet available
     let initial_quorum = crate::state::QuorumStatus::Sanitizing;
 
+    // Close init connection — DbPool creates its own read + write connections
+    drop(conn);
+
     // Create read/write DB pool for concurrent access
-    drop(conn); // Close the init connection — DbPool creates its own
     let db_pool = crate::state::DbPool::new(&db_path).unwrap_or_else(|e| {
         eprintln!("Database pool init failed: {}", e);
         std::process::exit(1);

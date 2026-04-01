@@ -14,7 +14,7 @@ use sha2::{Sha256, Digest};
 /// Spawn UDS listeners for all volumes with "s3" in access_protocols.
 pub fn spawn_all(state: Arc<CoreSanState>) {
     let volumes: Vec<(String, String)> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let mut stmt = db.prepare(
             "SELECT id, name FROM volumes WHERE status = 'online' AND access_protocols LIKE '%s3%'"
         ).unwrap();
@@ -164,7 +164,7 @@ async fn send_response(stream: &mut UnixStream, header: ObjectResponseHeader, me
 
 /// Get volume config (chunk_size, local_raid) from DB.
 fn get_volume_config(state: &CoreSanState, volume_id: &str) -> Option<(u64, String)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.read();
     db.query_row(
         "SELECT chunk_size_bytes, local_raid FROM volumes WHERE id = ?1",
         rusqlite::params![volume_id],
@@ -195,7 +195,7 @@ async fn handle_put(
 
     // Upsert file_map entry
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         db.execute(
             "INSERT INTO file_map (id, volume_id, rel_path, size_bytes, sha256, version, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6)
@@ -207,7 +207,7 @@ async fn handle_put(
 
     // Write chunk data
     let write_result = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         crate::storage::chunk::write_chunk_data(
             &db, file_id, 0, data, volume_id, &state.node_id, chunk_size, &local_raid,
         )
@@ -221,7 +221,7 @@ async fn handle_put(
 
     // Trigger push replication
     let version = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         db.query_row("SELECT version FROM file_map WHERE id = ?1",
             rusqlite::params![file_id], |row| row.get::<_, i64>(0)).unwrap_or(0)
     };
@@ -250,7 +250,7 @@ async fn handle_get(
     let file_id = crate::storage::chunk::deterministic_file_id(volume_id, key);
 
     let file_info = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         db.query_row(
             "SELECT size_bytes, sha256, updated_at FROM file_map WHERE id = ?1 AND volume_id = ?2",
             rusqlite::params![file_id, volume_id],
@@ -276,7 +276,7 @@ async fn handle_get(
 
     // Read all chunk data
     let data = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         crate::storage::chunk::read_chunk_data(
             &db, file_id, 0, size, volume_id, &state.node_id, chunk_size,
         ).unwrap_or_default()
@@ -303,7 +303,7 @@ async fn handle_head(
     let file_id = crate::storage::chunk::deterministic_file_id(volume_id, key);
 
     let file_info = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         db.query_row(
             "SELECT size_bytes, sha256, updated_at FROM file_map WHERE id = ?1 AND volume_id = ?2",
             rusqlite::params![file_id, volume_id],
@@ -340,7 +340,7 @@ async fn handle_delete(
     let file_id = crate::storage::chunk::deterministic_file_id(volume_id, key);
 
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
 
         // Delete chunk_replicas
         db.execute(
@@ -365,7 +365,7 @@ async fn handle_delete(
 
     // Delete chunk files on disk
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let backend_paths: Vec<String> = {
             let mut stmt = db.prepare(
                 "SELECT path FROM backends WHERE status = 'online' AND claimed_disk_id != ''"
@@ -419,7 +419,7 @@ async fn handle_list(
     let like_pattern = format!("{}%", params.prefix);
 
     let entries: Vec<(String, u64, String, String)> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let mut stmt = db.prepare(
             "SELECT rel_path, size_bytes, sha256, updated_at FROM file_map
              WHERE volume_id = ?1 AND rel_path LIKE ?2 AND rel_path > ?3
@@ -490,7 +490,7 @@ async fn handle_copy(
     let src_file_id = crate::storage::chunk::deterministic_file_id(volume_id, &params.src_key);
 
     let src_info = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         db.query_row(
             "SELECT size_bytes, sha256 FROM file_map WHERE id = ?1 AND volume_id = ?2",
             rusqlite::params![src_file_id, volume_id],
@@ -516,7 +516,7 @@ async fn handle_copy(
 
     // Read source data
     let data = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         crate::storage::chunk::read_chunk_data(
             &db, src_file_id, 0, src_size, volume_id, &state.node_id, chunk_size,
         ).unwrap_or_default()
@@ -527,7 +527,7 @@ async fn handle_copy(
     let now = chrono::Utc::now().to_rfc3339();
 
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         db.execute(
             "INSERT INTO file_map (id, volume_id, rel_path, size_bytes, sha256, version, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6)
@@ -538,7 +538,7 @@ async fn handle_copy(
     }
 
     let write_result = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         crate::storage::chunk::write_chunk_data(
             &db, dst_file_id, 0, &data, volume_id, &state.node_id, chunk_size, &local_raid,
         )
@@ -552,7 +552,7 @@ async fn handle_copy(
 
     // Trigger replication for destination
     let version = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         db.query_row("SELECT version FROM file_map WHERE id = ?1",
             rusqlite::params![dst_file_id], |row| row.get::<_, i64>(0)).unwrap_or(0)
     };
@@ -580,7 +580,7 @@ async fn handle_init_multipart(
     let upload_id = uuid::Uuid::new_v4().to_string();
 
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         db.execute(
             "INSERT INTO multipart_uploads (upload_id, volume_id, object_key, created_by, status)
              VALUES (?1, ?2, ?3, 'object_server', 'active')",
@@ -622,7 +622,7 @@ async fn handle_upload_part(
 
     // Verify upload exists and is active
     let upload_ok = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         db.query_row(
             "SELECT COUNT(*) FROM multipart_uploads WHERE upload_id = ?1 AND volume_id = ?2 AND status = 'active'",
             rusqlite::params![&params.upload_id, volume_id],
@@ -647,7 +647,7 @@ async fn handle_upload_part(
 
     // Record part in DB
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         db.execute(
             "INSERT OR REPLACE INTO multipart_parts (upload_id, part_number, size_bytes, etag, backend_path)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -692,7 +692,7 @@ async fn handle_complete_multipart(
 
     // Get upload info
     let object_key = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         db.query_row(
             "SELECT object_key FROM multipart_uploads WHERE upload_id = ?1 AND volume_id = ?2 AND status = 'active'",
             rusqlite::params![&params.upload_id, volume_id],
@@ -710,7 +710,7 @@ async fn handle_complete_multipart(
 
     // Read all parts in order and assemble
     let parts: Vec<(u32, String)> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let mut stmt = db.prepare(
             "SELECT part_number, backend_path FROM multipart_parts
              WHERE upload_id = ?1 ORDER BY part_number"
@@ -746,7 +746,7 @@ async fn handle_complete_multipart(
     let now = chrono::Utc::now().to_rfc3339();
 
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         db.execute(
             "INSERT INTO file_map (id, volume_id, rel_path, size_bytes, sha256, version, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6)
@@ -757,7 +757,7 @@ async fn handle_complete_multipart(
     }
 
     let write_result = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         crate::storage::chunk::write_chunk_data(
             &db, file_id, 0, &assembled, volume_id, &state.node_id, chunk_size, &local_raid,
         )
@@ -771,7 +771,7 @@ async fn handle_complete_multipart(
 
     // Trigger push replication
     let version = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         db.query_row("SELECT version FROM file_map WHERE id = ?1",
             rusqlite::params![file_id], |row| row.get::<_, i64>(0)).unwrap_or(0)
     };
@@ -785,7 +785,7 @@ async fn handle_complete_multipart(
 
     // Mark upload as completed
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         db.execute(
             "UPDATE multipart_uploads SET status = 'completed' WHERE upload_id = ?1",
             rusqlite::params![&params.upload_id],
@@ -826,7 +826,7 @@ async fn handle_abort_multipart(
 
     // Get part paths for cleanup
     let part_paths: Vec<String> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let mut stmt = db.prepare(
             "SELECT backend_path FROM multipart_parts WHERE upload_id = ?1"
         ).unwrap();
@@ -841,7 +841,7 @@ async fn handle_abort_multipart(
 
     // Delete parts and mark upload as aborted
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         db.execute(
             "DELETE FROM multipart_parts WHERE upload_id = ?1",
             rusqlite::params![&params.upload_id],

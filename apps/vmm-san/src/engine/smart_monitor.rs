@@ -29,7 +29,7 @@ pub fn spawn(state: Arc<CoreSanState>) {
 async fn collect_smart_data(state: &CoreSanState) {
     // Get all device paths from discovered disks
     let device_paths: Vec<String> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let disks = crate::storage::disk::discover_disks(&db);
         disks.iter().map(|d| d.device.path.clone()).collect()
     };
@@ -45,7 +45,7 @@ async fn collect_smart_data(state: &CoreSanState) {
     }).await.unwrap_or_default();
 
     // Store results in DB
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
     let mut ok = 0u32;
     let mut warnings = 0u32;
 

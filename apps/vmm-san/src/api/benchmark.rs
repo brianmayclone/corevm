@@ -29,7 +29,7 @@ pub struct BenchmarkMatrix {
 pub async fn results(
     State(state): State<Arc<CoreSanState>>,
 ) -> Json<Vec<BenchmarkResult>> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.read();
 
     let mut stmt = db.prepare(
         "SELECT from_node_id, to_node_id, bandwidth_mbps, latency_us,
@@ -78,7 +78,7 @@ pub async fn run(
 pub async fn matrix(
     State(state): State<Arc<CoreSanState>>,
 ) -> Json<BenchmarkMatrix> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.read();
 
     // Get all node IDs (self + peers)
     let mut node_ids = vec![state.node_id.clone()];

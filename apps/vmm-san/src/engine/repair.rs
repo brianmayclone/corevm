@@ -36,7 +36,7 @@ async fn run_chunk_repair(state: &CoreSanState, client: &PeerClient) {
 
     loop {
         let under_replicated = {
-            let db = state.db.lock().unwrap();
+            let db = state.db.read();
             ChunkService::find_under_replicated(&db, QUERY_BATCH_SIZE)
         };
 
@@ -86,7 +86,7 @@ async fn repair_single_chunk(
     use crate::services::chunk::ChunkService;
 
     let source_node_id = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         ChunkService::find_chunk_source(&db, chunk_id)
     };
 
@@ -99,7 +99,7 @@ async fn repair_single_chunk(
     };
 
     let nodes_with_chunk: Vec<String> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         ChunkService::nodes_with_chunk(&db, chunk_id)
     };
 
@@ -118,7 +118,7 @@ async fn repair_single_chunk(
         match client.pull_chunk(&peer_addr, volume_id, file_id, chunk_index).await {
             Ok(data) => {
                 let expected_sha = {
-                    let db = state.db.lock().unwrap();
+                    let db = state.db.read();
                     ChunkService::get_chunk_sha256(&db, chunk_id)
                 };
 
@@ -135,7 +135,7 @@ async fn repair_single_chunk(
 
                 // Find a local backend to store it
                 let local_backend = {
-                    let db = state.db.lock().unwrap();
+                    let db = state.db.read();
                     let local_raid: String = db.query_row(
                         "SELECT local_raid FROM volumes WHERE id = ?1",
                         rusqlite::params![volume_id], |row| row.get(0),
@@ -157,7 +157,7 @@ async fn repair_single_chunk(
                             f.sync_all().ok();
                         }
                         if std::fs::rename(&tmp, &dst).is_ok() {
-                            let db = state.db.lock().unwrap();
+                            let db = state.db.write();
                             log_err!(ChunkService::set_replica_synced(&db, chunk_id, &backend_id, &state.node_id),
                                 "repair: set_replica_synced");
                             if expected_sha.is_none() {
@@ -182,7 +182,7 @@ async fn repair_single_chunk(
 
     // We have it locally — verify integrity before pushing to peer
     let local_chunk_info = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         ChunkService::find_local_chunk_path(&db, chunk_id, &state.node_id)
     };
 
@@ -193,7 +193,7 @@ async fn repair_single_chunk(
 
     // Check if chunk is deduplicated — read from correct path
     let dedup_sha: Option<String> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         db.query_row(
             "SELECT dedup_sha256 FROM file_chunks WHERE id = ?1",
             rusqlite::params![chunk_id], |row| row.get(0),
@@ -216,7 +216,7 @@ async fn repair_single_chunk(
         if local_sha != expected_sha {
             tracing::warn!("Repair: LOCAL chunk {} is corrupt (expected={}, actual={}) — skipping push",
                 chunk_id, &expected_sha[..8], &local_sha[..8]);
-            let db = state.db.lock().unwrap();
+            let db = state.db.write();
             log_err!(ChunkService::mark_replica_error(&db, chunk_id, &state.node_id),
                 "repair: mark local chunk error");
             return false;
@@ -232,7 +232,7 @@ async fn repair_single_chunk(
     if let Some((target_node_id, target_addr)) = target_peer {
         // Get rel_path so receiver can resolve its local file_id
         let rel_path = {
-            let db = state.db.lock().unwrap();
+            let db = state.db.read();
             db.query_row("SELECT rel_path FROM file_map WHERE id = ?1",
                 rusqlite::params![file_id], |row| row.get::<_, String>(0))
                 .unwrap_or_default()
@@ -241,7 +241,7 @@ async fn repair_single_chunk(
         if client.push_chunk_full(&target_addr, volume_id, file_id, chunk_index, data, &rel_path, &state.node_id).await.is_ok() {
             // Record in our LOCAL DB that this peer now has the chunk.
             // Without this, the repair engine would keep thinking the chunk is under-replicated.
-            let db = state.db.lock().unwrap();
+            let db = state.db.write();
             log_err!(ChunkService::track_remote_replica(&db, chunk_id, &target_node_id),
                 "repair: track remote replica");
 
@@ -258,7 +258,7 @@ async fn repair_single_chunk(
 fn update_protection_status(state: &CoreSanState) {
     use crate::services::file::FileService;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
     let files = FileService::list_files_with_ftt(&db);
 
     for (file_id, _volume_id, ftt) in files {

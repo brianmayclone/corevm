@@ -44,7 +44,7 @@ async fn sync_metadata_to_peers(
     last_sync_at: &str,
 ) -> String {
     let files: Vec<serde_json::Value> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
 
         // Only sync files changed since last cycle (or all on first run)
         let time_filter = if last_sync_at.is_empty() {

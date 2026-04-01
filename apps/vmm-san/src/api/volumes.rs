@@ -147,7 +147,7 @@ pub async fn create(
 
     // Validate claimed disks and RAID requirements
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let claimed_count: i64 = db.query_row(
             "SELECT COUNT(*) FROM backends WHERE node_id = ?1 AND status = 'online' AND claimed_disk_id != ''",
             rusqlite::params![&state.node_id], |row| row.get(0),
@@ -191,7 +191,7 @@ pub async fn create(
     }
 
     let id = Uuid::new_v4().to_string();
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
 
     // Check available capacity on local claimed disks (RAID-corrected)
     let (usable_total, usable_free) = usable_capacity_for_raid(&db, &state.node_id, &body.local_raid);
@@ -315,7 +315,7 @@ pub async fn create(
 pub async fn list(
     State(state): State<Arc<CoreSanState>>,
 ) -> Json<Vec<VolumeResponse>> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.read();
 
     let backend_count: u32 = db.query_row(
         "SELECT COUNT(*) FROM backends WHERE status = 'online' AND claimed_disk_id != ''",
@@ -362,7 +362,7 @@ pub async fn get(
     State(state): State<Arc<CoreSanState>>,
     Path(id): Path<String>,
 ) -> Result<Json<VolumeResponse>, StatusCode> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.read();
 
     let total_bytes: u64 = db.query_row(
         "SELECT COALESCE(SUM(total_bytes), 0) FROM backends WHERE status = 'online'",
@@ -415,7 +415,7 @@ pub async fn update(
     Path(id): Path<String>,
     Json(body): Json<UpdateVolumeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
 
     // Verify volume exists
     let exists: bool = db.query_row(
@@ -485,7 +485,7 @@ pub async fn delete(
     Path(id): Path<String>,
     Query(query): Query<DeleteVolumeQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
 
     // Get volume name for FUSE cleanup
     let name: Option<String> = db.query_row(
@@ -613,7 +613,7 @@ pub async fn sync(
     State(state): State<Arc<CoreSanState>>,
     Json(body): Json<SyncVolumeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
 
     // Check if volume already exists
     let exists: bool = db.query_row(
@@ -737,7 +737,7 @@ pub async fn health(
     State(state): State<Arc<CoreSanState>>,
     Path(id): Path<String>,
 ) -> Result<Json<VolumeHealthResponse>, (StatusCode, String)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.read();
 
     // Verify volume exists
     let exists: bool = db.query_row(
@@ -876,7 +876,7 @@ pub async fn trigger_repair(
 ) -> Result<Json<RepairResponse>, (StatusCode, String)> {
     // Verify volume exists
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let exists: bool = db.query_row(
             "SELECT COUNT(*) FROM volumes WHERE id = ?1",
             rusqlite::params![&id], |row| row.get::<_, i64>(0),
@@ -892,7 +892,7 @@ pub async fn trigger_repair(
 
     // Query under-replicated chunks for THIS volume specifically
     let under_replicated = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let mut stmt = db.prepare(
             "SELECT fc.id, fc.file_id, fc.chunk_index, fm.volume_id, v.ftt,
                     (SELECT COUNT(DISTINCT cr.node_id) FROM chunk_replicas cr
@@ -948,7 +948,7 @@ async fn repair_single_chunk_inline(
     volume_id: &str,
 ) -> Result<bool, String> {
     let source_node_id = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         ChunkService::find_chunk_source(&db, chunk_id)
     };
 
@@ -958,7 +958,7 @@ async fn repair_single_chunk_inline(
     };
 
     let nodes_with_chunk: Vec<String> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         ChunkService::nodes_with_chunk(&db, chunk_id)
     };
 
@@ -977,7 +977,7 @@ async fn repair_single_chunk_inline(
             .map_err(|e| format!("pull from {}: {}", source_node_id, e))?;
 
         let expected_sha = {
-            let db = state.db.lock().unwrap();
+            let db = state.db.read();
             ChunkService::get_chunk_sha256(&db, chunk_id)
         };
 
@@ -991,7 +991,7 @@ async fn repair_single_chunk_inline(
         }
 
         let local_backend = {
-            let db = state.db.lock().unwrap();
+            let db = state.db.read();
             let local_raid: String = db.query_row(
                 "SELECT local_raid FROM volumes WHERE id = ?1",
                 rusqlite::params![volume_id], |row| row.get(0),
@@ -1016,7 +1016,7 @@ async fn repair_single_chunk_inline(
                 format!("rename: {}", e)
             })?;
 
-            let db = state.db.lock().unwrap();
+            let db = state.db.write();
             ChunkService::set_replica_synced(&db, chunk_id, &backend_id, &state.node_id)
                 .map_err(|e| format!("set_replica_synced: {}", e))?;
             if expected_sha.is_none() {
@@ -1034,7 +1034,7 @@ async fn repair_single_chunk_inline(
 
     // We have it locally — push to a peer that doesn't
     let local_chunk_info = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         ChunkService::find_local_chunk_path(&db, chunk_id, &state.node_id)
     };
 
@@ -1061,7 +1061,7 @@ async fn repair_single_chunk_inline(
 
     if let Some((target_node_id, target_addr)) = target_peer {
         let rel_path = {
-            let db = state.db.lock().unwrap();
+            let db = state.db.read();
             db.query_row("SELECT rel_path FROM file_map WHERE id = ?1",
                 rusqlite::params![file_id], |row| row.get::<_, String>(0))
                 .unwrap_or_default()
@@ -1070,7 +1070,7 @@ async fn repair_single_chunk_inline(
         client.push_chunk_full(&target_addr, volume_id, file_id, chunk_index, data, &rel_path, &state.node_id).await
             .map_err(|e| format!("push to {}: {}", target_node_id, e))?;
 
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         ChunkService::track_remote_replica(&db, chunk_id, &target_node_id)
             .map_err(|e| format!("track_remote_replica: {}", e))?;
 
@@ -1104,7 +1104,7 @@ pub async fn remove_host_from_volume(
     Path(id): Path<String>,
     Json(body): Json<RemoveHostRequest>,
 ) -> Result<Json<RemoveHostResponse>, (StatusCode, String)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
 
     // Verify volume exists and get FTT
     let ftt: u32 = db.query_row(

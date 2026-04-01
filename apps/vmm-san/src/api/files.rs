@@ -24,7 +24,7 @@ pub async fn list(
     State(state): State<Arc<CoreSanState>>,
     Path(volume_id): Path<String>,
 ) -> Result<Json<Vec<FileEntry>>, StatusCode> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.read();
 
     let mut stmt = db.prepare(
         "SELECT fm.rel_path, fm.size_bytes, fm.sha256, fm.created_at, fm.updated_at,
@@ -68,7 +68,7 @@ pub async fn read(
 
     // 1. Look up file in file_map
     let file_info = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         db.query_row(
             "SELECT fm.id, fm.size_bytes, v.chunk_size_bytes FROM file_map fm
              JOIN volumes v ON v.id = fm.volume_id
@@ -95,7 +95,7 @@ pub async fn read(
 
     // 2. Try to read all chunks locally
     let local_result = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         crate::storage::chunk::read_chunk_data(
             &db, file_id, 0, file_size,
             &volume_id, &state.node_id, chunk_size,
@@ -106,7 +106,7 @@ pub async fn read(
     if let Ok(data) = local_result {
         // Verify we have local chunk replicas (not just zero-filled)
         let has_local_chunks = {
-            let db = state.db.lock().unwrap();
+            let db = state.db.read();
             let count: i64 = db.query_row(
                 "SELECT COUNT(*) FROM chunk_replicas cr
                  JOIN file_chunks fc ON fc.id = cr.chunk_id
@@ -180,7 +180,7 @@ pub async fn write(
 
     // Check volume sync_mode — 'quorum' mode not yet implemented
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let sync_mode: String = db.query_row(
             "SELECT sync_mode FROM volumes WHERE id = ?1",
             rusqlite::params![&volume_id],
@@ -194,7 +194,7 @@ pub async fn write(
 
     // Verify at least one local backend exists
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         db.query_row(
             "SELECT id FROM backends WHERE node_id = ?1 AND status = 'online' LIMIT 1",
             rusqlite::params![&state.node_id],
@@ -205,7 +205,7 @@ pub async fn write(
 
     // Chunk-based atomic write: lease → chunk split → write to backends → DB update → write_log
     let new_version = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         crate::engine::write_lease::atomic_write(
             &db, &volume_id, &rel_path, &state.node_id,
             "", "", &body, None, quorum,
@@ -221,7 +221,7 @@ pub async fn write(
     if !is_peer_write {
         // Get file_id and chunk info for replication
         let file_id = {
-            let db = state.db.lock().unwrap();
+            let db = state.db.read();
             db.query_row(
                 "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
                 rusqlite::params![&volume_id, &rel_path], |row| row.get::<_, i64>(0),
@@ -264,7 +264,7 @@ pub async fn delete(
 
     // 1. Delete local chunk files from disk
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
 
         let file_id: Option<i64> = db.query_row(
             "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
@@ -356,7 +356,7 @@ pub async fn mkdir(
     // Create a .dir marker entry in file_map so the directory is visible
     // even when empty (files with this prefix would also make it visible)
     let marker_path = format!("{}/.keep", body.path.trim_end_matches('/'));
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
     let now = chrono::Utc::now().to_rfc3339();
     let file_id = deterministic_file_id(&volume_id, &marker_path);
     db.execute(
@@ -398,7 +398,7 @@ pub async fn allocate_disk(
 
     // Verify backend exists and check capacity
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         db.query_row(
             "SELECT id FROM backends WHERE node_id = ?1 AND status = 'online' AND claimed_disk_id != '' LIMIT 1",
             rusqlite::params![&state.node_id], |row| row.get::<_, String>(0),
@@ -451,7 +451,7 @@ pub async fn allocate_disk(
     // Reads to unwritten chunks return zeros (sparse/thin provisioning at chunk level).
     // This is instant regardless of disk size and doesn't waste storage space.
     let file_id = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
 
         let chunk_size: u64 = db.query_row(
             "SELECT chunk_size_bytes FROM volumes WHERE id = ?1",
@@ -484,7 +484,7 @@ pub async fn allocate_disk(
 
     // Trigger metadata replication to peers (no chunk data to push — thin provisioned)
     let version = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         db.query_row("SELECT version FROM file_map WHERE id = ?1",
             rusqlite::params![file_id], |row| row.get::<_, i64>(0)).unwrap_or(1)
     };
@@ -508,7 +508,7 @@ pub async fn browse(
     State(state): State<Arc<CoreSanState>>,
     Path((volume_id, dir_path)): Path<(String, String)>,
 ) -> Result<Json<Vec<BrowseEntry>>, (StatusCode, String)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.read();
 
     // List files in file_map that are direct children of dir_path
     let prefix = if dir_path.is_empty() || dir_path == "/" {
@@ -637,7 +637,7 @@ pub async fn chunk_map(
     State(state): State<Arc<CoreSanState>>,
     Path(volume_id): Path<String>,
 ) -> Result<Json<ChunkMapResponse>, (StatusCode, String)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.read();
 
     // Volume info
     let (vol_name, chunk_size, total_cap, free_cap): (String, u64, u64, u64) = db.query_row(

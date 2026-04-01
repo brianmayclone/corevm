@@ -37,7 +37,7 @@ pub struct CredentialResponse {
 pub async fn list(
     State(state): State<Arc<CoreSanState>>,
 ) -> Result<Json<Vec<CredentialResponse>>, (StatusCode, String)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.read();
     let mut stmt = db.prepare(
         "SELECT id, access_key, user_id, display_name, status, created_at, expires_at FROM s3_credentials"
     ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -86,7 +86,7 @@ pub async fn create(
     let secret_key_enc = crate::engine::mgmt_server::base64_encode(&encrypted);
 
     let id = uuid::Uuid::new_v4().to_string();
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
     db.execute(
         "INSERT INTO s3_credentials (id, access_key, secret_key_enc, user_id, display_name)
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -103,7 +103,7 @@ pub async fn delete(
     State(state): State<Arc<CoreSanState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
     let deleted = db.execute("DELETE FROM s3_credentials WHERE id = ?1", rusqlite::params![&id])
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

@@ -119,7 +119,7 @@ impl CoreSanFS {
         let (chunk_size, _, local_raid) = self.volume_config();
         let offset = chunk_index as u64 * chunk_size;
         tracing::info!("FLUSH chunk to disk: file_id={} idx={} size={}", file_id, chunk_index, data.len());
-        let db = self.state.db.lock().unwrap();
+        let db = self.state.db.write();
         match crate::storage::chunk::write_chunk_data(
             &db, file_id, offset, data,
             &self.volume_id, &self.state.node_id, chunk_size, &local_raid,
@@ -217,7 +217,7 @@ impl CoreSanFS {
 
     /// Get file_id from file_map for a given rel_path.
     fn get_file_id(&self, rel_path: &str) -> Option<i64> {
-        let db = self.state.db.lock().unwrap();
+        let db = self.state.db.read();
         db.query_row(
             "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
             rusqlite::params![&self.volume_id, rel_path],
@@ -227,7 +227,7 @@ impl CoreSanFS {
 
     /// Get volume config (chunk_size, ftt, local_raid).
     fn volume_config(&self) -> (u64, u32, String) {
-        let db = self.state.db.lock().unwrap();
+        let db = self.state.db.read();
         db.query_row(
             "SELECT chunk_size_bytes, ftt, local_raid FROM volumes WHERE id = ?1",
             rusqlite::params![&self.volume_id],
@@ -239,7 +239,7 @@ impl CoreSanFS {
     /// Returns true if at least one chunk replica is synced locally.
     /// Used by lookup/getattr to determine if the file is accessible.
     fn has_local_chunks(&self, rel_path: &str) -> bool {
-        let db = self.state.db.lock().unwrap();
+        let db = self.state.db.read();
         let count: i64 = db.query_row(
             "SELECT COUNT(*) FROM chunk_replicas cr
              JOIN file_chunks fc ON fc.id = cr.chunk_id
@@ -254,7 +254,7 @@ impl CoreSanFS {
 
     /// Check if a file exists (in file_map or has remote chunks).
     fn file_exists(&self, rel_path: &str) -> bool {
-        let db = self.state.db.lock().unwrap();
+        let db = self.state.db.read();
         let count: i64 = db.query_row(
             "SELECT COUNT(*) FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
             rusqlite::params![&self.volume_id, rel_path], |row| row.get(0),
@@ -266,7 +266,7 @@ impl CoreSanFS {
     /// Used when FUSE needs data that isn't available locally.
     fn fetch_chunks_from_peer(&self, rel_path: &str) -> bool {
         let file_info = {
-            let db = self.state.db.lock().unwrap();
+            let db = self.state.db.read();
             db.query_row(
                 "SELECT fm.id, fm.size_bytes, v.chunk_size_bytes, v.local_raid
                  FROM file_map fm
@@ -291,7 +291,7 @@ impl CoreSanFS {
 
         // Find peers that have chunks for this file
         let peer_sources: Vec<(u32, String)> = {
-            let db = self.state.db.lock().unwrap();
+            let db = self.state.db.read();
             let mut stmt = db.prepare(
                 "SELECT fc.chunk_index, cr.node_id FROM chunk_replicas cr
                  JOIN file_chunks fc ON fc.id = cr.chunk_id
@@ -324,7 +324,7 @@ impl CoreSanFS {
 
             if let Some(data) = data {
                 // Store chunk locally
-                let db = self.state.db.lock().unwrap();
+                let db = self.state.db.write();
                 let placements = crate::storage::chunk::place_chunk(
                     &db, &volume_id, &self.state.node_id, ci, &local_raid,
                 );
@@ -376,7 +376,7 @@ impl CoreSanFS {
 
     /// Find a local backend that holds chunk replicas for an existing file.
     fn backend_for_existing_file(&self, rel_path: &str) -> Option<(String, String)> {
-        let db = self.state.db.lock().unwrap();
+        let db = self.state.db.read();
         db.query_row(
             "SELECT b.id, b.path FROM chunk_replicas cr
              JOIN backends b ON b.id = cr.backend_id
@@ -392,7 +392,7 @@ impl CoreSanFS {
 
     /// Find the best local backend for writing new files (most free space).
     fn local_backend_for_write(&self) -> Option<(String, String)> {
-        let db = self.state.db.lock().unwrap();
+        let db = self.state.db.read();
         db.query_row(
             "SELECT id, path FROM backends
              WHERE node_id = ?1 AND status = 'online'
@@ -437,7 +437,7 @@ impl CoreSanFS {
     fn attr_from_db(&self, ino: u64, is_dir: bool) -> FileAttr {
         let entry = self.inodes.lock().unwrap().get(ino).cloned();
         let (size, mtime_str) = if let Some(ref e) = entry {
-            let db = self.state.db.lock().unwrap();
+            let db = self.state.db.read();
             db.query_row(
                 "SELECT size_bytes, updated_at FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
                 rusqlite::params![&e.volume_id, &e.rel_path],
@@ -486,7 +486,7 @@ impl Filesystem for CoreSanFS {
 
         // Check if it's a directory (exists on any backend)
         let is_dir = {
-            let db = self.state.db.lock().unwrap();
+            let db = self.state.db.read();
             // Check if there are files with this prefix (it's a directory)
             let count: i64 = db.query_row(
                 "SELECT COUNT(*) FROM file_map WHERE volume_id = ?1 AND rel_path LIKE ?2",
@@ -498,7 +498,7 @@ impl Filesystem for CoreSanFS {
 
         // Check if it's a file
         let is_file = {
-            let db = self.state.db.lock().unwrap();
+            let db = self.state.db.read();
             let count: i64 = db.query_row(
                 "SELECT COUNT(*) FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
                 rusqlite::params![&self.volume_id, &rel_path],
@@ -551,7 +551,7 @@ impl Filesystem for CoreSanFS {
         if let Some(new_size) = size {
             tracing::info!("FUSE setattr: '{}' size={} -> {}", entry.rel_path, 0, new_size);
             if !entry.is_dir {
-                let db = self.state.db.lock().unwrap();
+                let db = self.state.db.write();
                 let now = chrono::Utc::now().to_rfc3339();
                 // Use UPSERT — the file_map row may not exist yet if create() hasn't committed
                 let file_id = deterministic_file_id(&self.volume_id, &entry.rel_path);
@@ -588,7 +588,7 @@ impl Filesystem for CoreSanFS {
 
                     // Trigger replication after flush
                     let version = {
-                        let db = self.state.db.lock().unwrap();
+                        let db = self.state.db.read();
                         db.query_row("SELECT version FROM file_map WHERE id = ?1",
                             rusqlite::params![file_id], |row| row.get::<_, i64>(0)).unwrap_or(0)
                     };
@@ -615,7 +615,7 @@ impl Filesystem for CoreSanFS {
                 if let Some(file_id) = self.get_file_id(&entry.rel_path) {
                     self.flush_file_chunks(file_id);
                 }
-                let db = self.state.db.lock().unwrap();
+                let db = self.state.db.write();
                 crate::engine::write_lease::release_lease(
                     &db, &self.volume_id, &entry.rel_path, &self.state.node_id,
                 );
@@ -679,7 +679,7 @@ impl Filesystem for CoreSanFS {
                 } else {
                     // Read this chunk from disk
                     drop(cache);
-                    let db = self.state.db.lock().unwrap();
+                    let db = self.state.db.read();
                     match crate::storage::chunk::read_chunk_data(
                         &db, file_id, range.chunk_index as u64 * chunk_size + range.local_offset,
                         range.size, &self.volume_id, &self.state.node_id, chunk_size,
@@ -699,7 +699,7 @@ impl Filesystem for CoreSanFS {
                 // Fallback: read rest from disk
                 let remaining_offset = offset as u64 + result.len() as u64;
                 let remaining_size = size as u64 - result.len() as u64;
-                let db = self.state.db.lock().unwrap();
+                let db = self.state.db.read();
                 if let Ok(d) = crate::storage::chunk::read_chunk_data(
                     &db, file_id, remaining_offset, remaining_size,
                     &self.volume_id, &self.state.node_id, chunk_size,
@@ -710,7 +710,7 @@ impl Filesystem for CoreSanFS {
             reply.data(&result);
         } else {
             // Fast path: no cached chunks, read directly from disk
-            let db = self.state.db.lock().unwrap();
+            let db = self.state.db.read();
             match crate::storage::chunk::read_chunk_data(
                 &db, file_id, offset as u64, size as u64,
                 &self.volume_id, &self.state.node_id, chunk_size,
@@ -745,7 +745,7 @@ impl Filesystem for CoreSanFS {
 
         // Ensure file exists in file_map + acquire write lease
         let file_id = {
-            let db = self.state.db.lock().unwrap();
+            let db = self.state.db.write();
 
             let quorum = *self.state.quorum_status.read().unwrap();
             match crate::engine::write_lease::acquire_lease(
@@ -792,7 +792,7 @@ impl Filesystem for CoreSanFS {
                 if needs_load {
                     // Load or create the chunk buffer WITHOUT holding the cache lock
                     let has_data = {
-                        let db = self.state.db.lock().unwrap();
+                        let db = self.state.db.read();
                         db.query_row(
                             "SELECT COUNT(*) FROM chunk_replicas cr
                              JOIN file_chunks fc ON fc.id = cr.chunk_id
@@ -804,7 +804,7 @@ impl Filesystem for CoreSanFS {
                     };
 
                     let chunk_data = if has_data {
-                        let db = self.state.db.lock().unwrap();
+                        let db = self.state.db.read();
                         crate::storage::chunk::read_chunk_data(
                             &db, file_id, range.chunk_index as u64 * chunk_size, chunk_size,
                             &self.volume_id, &self.state.node_id, chunk_size,
@@ -868,7 +868,7 @@ impl Filesystem for CoreSanFS {
         // Register in file_map only — chunks are created on first write
         let now = chrono::Utc::now().to_rfc3339();
         let file_id = deterministic_file_id(&self.volume_id, &rel_path);
-        let db = self.state.db.lock().unwrap();
+        let db = self.state.db.write();
         db.execute(
             "INSERT OR IGNORE INTO file_map (id, volume_id, rel_path, size_bytes, version, created_at, updated_at)
              VALUES (?1, ?2, ?3, 0, 0, ?4, ?4)",
@@ -899,7 +899,7 @@ impl Filesystem for CoreSanFS {
 
         // Create directory on all local backends for this volume
         let backends: Vec<String> = {
-            let db = self.state.db.lock().unwrap();
+            let db = self.state.db.read();
             let mut stmt = db.prepare(
                 "SELECT path FROM backends WHERE node_id = ?1 AND status = 'online'"
             ).unwrap();
@@ -965,7 +965,7 @@ impl Filesystem for CoreSanFS {
 
         // Remove from DB and delete chunk files
         {
-            let db = self.state.db.lock().unwrap();
+            let db = self.state.db.write();
 
             let file_id: Option<i64> = db.query_row(
                 "SELECT id FROM file_map WHERE volume_id = ?1 AND rel_path = ?2",
@@ -1043,7 +1043,7 @@ impl Filesystem for CoreSanFS {
         };
 
         let children: Vec<(String, bool)> = {
-            let db = self.state.db.lock().unwrap();
+            let db = self.state.db.read();
 
             // Get direct children files
             let pattern = if prefix.is_empty() {
@@ -1127,7 +1127,7 @@ struct FuseSession {
 /// Spawn FUSE mounts for all online volumes.
 pub fn spawn_all(state: Arc<CoreSanState>) {
     let volumes: Vec<(String, String)> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let mut stmt = db.prepare(
             "SELECT id, name FROM volumes WHERE status = 'online'"
         ).unwrap();
@@ -1202,7 +1202,7 @@ pub fn spawn_all(state: Arc<CoreSanState>) {
 /// Unmount all FUSE filesystems (called during graceful shutdown).
 pub fn unmount_all(state: &CoreSanState) {
     let names: Vec<String> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let mut stmt = db.prepare(
             "SELECT name FROM volumes WHERE status = 'online'"
         ).unwrap();

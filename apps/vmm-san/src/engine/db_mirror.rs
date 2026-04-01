@@ -36,7 +36,7 @@ fn mirror_db(state: &CoreSanState) {
 
     // Get all mounted claimed disk paths
     let mount_paths: Vec<String> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let mut stmt = db.prepare(
             "SELECT mount_path FROM claimed_disks WHERE status = 'mounted'"
         ).unwrap();

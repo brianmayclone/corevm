@@ -152,7 +152,7 @@ async fn handle_list_volumes(
     stream: &mut UnixStream,
 ) {
     let volumes: Vec<serde_json::Value> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let mut stmt = db.prepare(
             "SELECT id, name, status, access_protocols, max_size_bytes FROM volumes
              WHERE status = 'online' AND access_protocols LIKE '%s3%'"
@@ -182,7 +182,7 @@ async fn handle_resolve_volume(
     stream: &mut UnixStream,
 ) {
     let vol_info = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         db.query_row(
             "SELECT id, name, status FROM volumes WHERE name = ?1",
             rusqlite::params![volume_name],
@@ -237,7 +237,7 @@ async fn handle_create_credential(
     let encrypted_b64 = base64_encode(&encrypted);
 
     let db_result = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         db.execute(
             "INSERT INTO s3_credentials (id, access_key, secret_key_enc, user_id, display_name, status)
              VALUES (?1, ?2, ?3, ?4, ?5, 'active')",
@@ -289,7 +289,7 @@ async fn handle_validate_credential(
 
     // Look up credential
     let cred_info = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         db.query_row(
             "SELECT secret_key_enc, user_id FROM s3_credentials WHERE access_key = ?1 AND status = 'active'",
             rusqlite::params![&params.access_key],
@@ -332,7 +332,7 @@ async fn handle_list_credentials(
     stream: &mut UnixStream,
 ) {
     let creds: Vec<serde_json::Value> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let mut stmt = db.prepare(
             "SELECT id, access_key, user_id, display_name, status, created_at FROM s3_credentials ORDER BY created_at"
         ).unwrap();
@@ -361,7 +361,7 @@ async fn handle_delete_credential(
     stream: &mut UnixStream,
 ) {
     let deleted = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         db.execute(
             "DELETE FROM s3_credentials WHERE id = ?1",
             rusqlite::params![credential_id],
@@ -382,7 +382,7 @@ async fn handle_list_iscsi_volumes(
     stream: &mut UnixStream,
 ) {
     let volumes: Vec<serde_json::Value> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let mut stmt = db.prepare(
             "SELECT id, name, status, max_size_bytes, access_protocols FROM volumes \
              WHERE access_protocols LIKE '%iscsi%' AND status != 'deleted'"
@@ -410,7 +410,7 @@ async fn handle_list_iscsi_acls(
     stream: &mut UnixStream,
 ) {
     let acls: Vec<serde_json::Value> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let mut stmt = db.prepare(
             "SELECT id, volume_id, initiator_iqn, comment, created_at FROM iscsi_acls WHERE volume_id = ?1"
         ).unwrap();
@@ -449,7 +449,7 @@ async fn handle_create_iscsi_acl(
     let id = uuid::Uuid::new_v4().to_string();
 
     let db_result = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         db.execute(
             "INSERT INTO iscsi_acls (id, volume_id, initiator_iqn, comment) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![&id, volume_id, iqn, comment],
@@ -476,7 +476,7 @@ async fn handle_delete_iscsi_acl(
     stream: &mut UnixStream,
 ) {
     let deleted = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         db.execute("DELETE FROM iscsi_acls WHERE id = ?1", rusqlite::params![acl_id]).unwrap_or(0)
     };
 

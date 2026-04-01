@@ -67,7 +67,7 @@ pub struct DashboardResponse {
 pub async fn status(
     State(state): State<Arc<CoreSanState>>,
 ) -> Json<StatusResponse> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.read();
     let volumes = query_volume_summaries(&db);
     let peer_count = state.peers.len() as u32;
     let benchmark_summary = query_benchmark_summary(&db);
@@ -124,7 +124,7 @@ pub async fn health() -> StatusCode {
 pub async fn dashboard(
     State(state): State<Arc<CoreSanState>>,
 ) -> Json<DashboardResponse> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.read();
     let volumes = query_volume_summaries(&db);
     let benchmark_summary = query_benchmark_summary(&db);
 

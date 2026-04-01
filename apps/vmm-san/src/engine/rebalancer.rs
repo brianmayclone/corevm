@@ -43,7 +43,7 @@ pub fn spawn(state: Arc<CoreSanState>) {
 fn run_rebalance(state: &CoreSanState) {
     use crate::services::chunk::ChunkService;
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
 
     // Phase 1: Repair missing local mirror copies
     repair_local_mirrors(&db, state);

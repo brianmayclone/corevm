@@ -45,7 +45,7 @@ pub fn spawn(state: Arc<CoreSanState>) {
 /// Handle a disk that was removed while running.
 fn handle_disk_removed(state: &CoreSanState, disk_name: &str) {
     let device_path = format!("/dev/{}", disk_name);
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
 
     // Find the claimed disk entry
     let claimed = db.query_row(

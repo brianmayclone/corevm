@@ -34,7 +34,7 @@ pub fn spawn(state: Arc<CoreSanState>) {
 /// Run one dedup cycle across all dedup-enabled volumes.
 async fn run_dedup_cycle(state: &CoreSanState) {
     let volumes: Vec<(String, String)> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let mut stmt = db.prepare(
             "SELECT id, name FROM volumes WHERE dedup = 1 AND status = 'online'"
         ).unwrap();
@@ -58,7 +58,7 @@ async fn dedup_volume(state: &CoreSanState, volume_id: &str, volume_name: &str) 
     // Find duplicate SHA256 hashes among non-deduplicated chunks.
     // Skip files with active write leases to avoid conflicts.
     let duplicates: Vec<(String, i64)> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let mut stmt = db.prepare(
             "SELECT fc.sha256, COUNT(*) as cnt
              FROM file_chunks fc
@@ -114,7 +114,7 @@ async fn dedup_volume(state: &CoreSanState, volume_id: &str, volume_name: &str) 
 async fn consolidate_sha256(state: &CoreSanState, volume_id: &str, sha256: &str) -> Result<u64, String> {
     // Find all chunks for this SHA256
     let chunks: Vec<(i64, i64, u32, u64)> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let mut stmt = db.prepare(
             "SELECT fc.id, fc.file_id, fc.chunk_index, fc.size_bytes
              FROM file_chunks fc
@@ -135,7 +135,7 @@ async fn consolidate_sha256(state: &CoreSanState, volume_id: &str, sha256: &str)
 
     // Get all backends that hold replicas of these chunks on this node
     let backend_ids: Vec<(String, String)> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let chunk_ids: Vec<i64> = chunks.iter().map(|(id, _, _, _)| *id).collect();
         let n = chunk_ids.len();
         let placeholders: String = (1..=n).map(|i| format!("?{}", i)).collect::<Vec<_>>().join(",");
@@ -194,7 +194,7 @@ async fn consolidate_sha256(state: &CoreSanState, volume_id: &str, sha256: &str)
 
         // Insert/update dedup_store
         {
-            let db = state.db.lock().unwrap();
+            let db = state.db.write();
             let ref_count = chunks.len() as i64;
             db.execute(
                 "INSERT INTO dedup_store (sha256, volume_id, backend_id, size_bytes, ref_count)
@@ -207,7 +207,7 @@ async fn consolidate_sha256(state: &CoreSanState, volume_id: &str, sha256: &str)
 
     // Update all file_chunks to point to the dedup store
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         db.execute(
             "UPDATE file_chunks SET dedup_sha256 = ?1
              WHERE sha256 = ?1 AND dedup_sha256 IS NULL
@@ -240,7 +240,7 @@ fn find_source_chunk(
     chunks: &[(i64, i64, u32, u64)],
     backend_id: &str,
 ) -> Option<std::path::PathBuf> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.read();
     for (chunk_id, file_id, chunk_index, _) in chunks {
         let has_replica: bool = db.query_row(
             "SELECT COUNT(*) FROM chunk_replicas WHERE chunk_id = ?1 AND backend_id = ?2 AND state = 'synced'",
@@ -267,7 +267,7 @@ fn find_source_chunk(
 /// Remove dedup_store entries with ref_count = 0 and delete orphaned .dedup files.
 fn cleanup_orphaned(state: &CoreSanState, volume_id: &str) {
     let orphans: Vec<(String, String, String)> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
 
         // Recount refs
         db.execute(
@@ -297,7 +297,7 @@ fn cleanup_orphaned(state: &CoreSanState, volume_id: &str) {
     }
 
     if !orphans.is_empty() {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         db.execute(
             "DELETE FROM dedup_store WHERE volume_id = ?1 AND ref_count = 0",
             rusqlite::params![volume_id],

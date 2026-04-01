@@ -18,7 +18,7 @@ pub fn spawn(state: Arc<CoreSanState>) {
 
 fn refresh_all_backends(state: &CoreSanState) {
     let backends: Vec<(String, String)> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let mut stmt = db.prepare(
             "SELECT id, path FROM backends WHERE node_id = ?1 AND status != 'offline'"
         ).unwrap();
@@ -28,7 +28,7 @@ fn refresh_all_backends(state: &CoreSanState) {
         ).unwrap().filter_map(|r| r.ok()).collect()
     };
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
     let now = chrono::Utc::now().to_rfc3339();
 
     for (id, path) in backends {

@@ -45,7 +45,7 @@ fn send_beacon(state: &CoreSanState, socket: &UdpSocket, addr: &str) {
     let address = format!("http://{}:{}", local_ip, port);
 
     let vol_count = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         db.query_row("SELECT COUNT(*) FROM volumes", [], |row| row.get::<_, u32>(0))
             .unwrap_or(0)
     };

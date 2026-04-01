@@ -49,7 +49,7 @@ pub async fn add(
     let (total_bytes, free_bytes) = get_fs_stats(&body.path);
 
     let id = Uuid::new_v4().to_string();
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
 
     // Verify volume exists
     let exists: bool = db.query_row(
@@ -90,7 +90,7 @@ pub async fn list(
     State(state): State<Arc<CoreSanState>>,
     Path(_volume_id): Path<String>,
 ) -> Json<Vec<BackendResponse>> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.read();
 
     let mut stmt = db.prepare(
         "SELECT id, node_id, path, total_bytes, free_bytes, status, last_check, claimed_disk_id
@@ -118,7 +118,7 @@ pub async fn remove(
     State(state): State<Arc<CoreSanState>>,
     Path((volume_id, backend_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
 
     // Check if backend has files that need to be replicated elsewhere
     let replica_count: i64 = db.query_row(

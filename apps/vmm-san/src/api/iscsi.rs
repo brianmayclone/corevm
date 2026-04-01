@@ -46,7 +46,7 @@ pub async fn list_acls(
     State(state): State<Arc<CoreSanState>>,
     Query(query): Query<AclQuery>,
 ) -> Result<Json<Vec<AclResponse>>, (StatusCode, String)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.read();
     let acls: Vec<AclResponse> = if let Some(ref vid) = query.volume_id {
         let mut stmt = db.prepare(
             "SELECT a.id, a.volume_id, v.name, a.initiator_iqn, a.comment, a.created_at
@@ -83,7 +83,7 @@ pub async fn create_acl(
         return Err((StatusCode::BAD_REQUEST, "initiator_iqn must start with 'iqn.'".into()));
     }
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
 
     // Verify volume exists and has iscsi protocol
     let vol_name: String = db.query_row(
@@ -119,7 +119,7 @@ pub async fn delete_acl(
     State(state): State<Arc<CoreSanState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
     let deleted = db.execute("DELETE FROM iscsi_acls WHERE id = ?1", rusqlite::params![&id])
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -135,7 +135,7 @@ pub async fn delete_acl(
 pub async fn list_targets(
     State(state): State<Arc<CoreSanState>>,
 ) -> Result<Json<Vec<TargetResponse>>, (StatusCode, String)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.read();
     let mut stmt = db.prepare(
         "SELECT id, name, status FROM volumes WHERE access_protocols LIKE '%iscsi%' AND status != 'deleted'"
     ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

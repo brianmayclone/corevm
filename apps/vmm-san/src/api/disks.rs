@@ -13,7 +13,7 @@ use crate::storage::{disk, disk_ops};
 pub async fn list(
     State(state): State<Arc<CoreSanState>>,
 ) -> Json<Vec<disk::DiscoveredDisk>> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.read();
     Json(disk::discover_disks(&db))
 }
 
@@ -26,7 +26,7 @@ pub async fn smart_detail(
 
     // Try DB first (cached data from smart_monitor)
     let cached = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         db.query_row(
             "SELECT device_path, supported, health_passed, transport, power_on_hours, temperature_c,
                     reallocated_sectors, pending_sectors, uncorrectable_sectors, wear_leveling_pct,
@@ -92,7 +92,7 @@ pub async fn claim(
 
     // Discover disks and find the requested one
     let disk_info = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let disks = disk::discover_disks(&db);
         disks.into_iter().find(|d| d.device.path == body.device_path)
     };
@@ -135,7 +135,7 @@ pub async fn claim(
 
     // Remove any old released/error entry for this device_path so re-claim works
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         db.execute(
             "DELETE FROM claimed_disks WHERE device_path = ?1 AND status IN ('released', 'error')",
             rusqlite::params![&body.device_path],
@@ -144,7 +144,7 @@ pub async fn claim(
 
     // Record claim in DB (status: formatting)
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         db.execute(
             "INSERT INTO claimed_disks (id, device_path, mount_path, fs_type, model, serial, size_bytes, status)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'formatting')",
@@ -172,7 +172,7 @@ pub async fn claim(
         Ok(uuid) => uuid,
         Err(e) => {
             // Mark as error in DB
-            let db = state.db.lock().unwrap();
+            let db = state.db.write();
             db.execute("UPDATE claimed_disks SET status = 'error' WHERE id = ?1",
                 rusqlite::params![&disk_id]).ok();
             return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Format failed: {}", e)));
@@ -186,7 +186,7 @@ pub async fn claim(
     let (total_bytes, free_bytes) = crate::storage::backend::refresh_stats(&mount_path);
 
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
 
         // Update claimed_disks with UUID and status
         db.execute(
@@ -253,7 +253,7 @@ pub async fn create_file(
 
     // Record in DB as formatting
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         db.execute(
             "INSERT INTO claimed_disks (id, device_path, mount_path, fs_type, model, serial, size_bytes, status)
              VALUES (?1, ?2, ?3, ?4, 'file-disk', ?5, ?6, 'formatting')",
@@ -279,7 +279,7 @@ pub async fn create_file(
     let (loop_device, device_uuid) = match result {
         Ok(r) => r,
         Err(e) => {
-            let db = state.db.lock().unwrap();
+            let db = state.db.write();
             db.execute("UPDATE claimed_disks SET status = 'error' WHERE id = ?1",
                 rusqlite::params![&disk_id]).ok();
             return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Failed: {}", e)));
@@ -292,7 +292,7 @@ pub async fn create_file(
     let (total_bytes, free_bytes) = crate::storage::backend::refresh_stats(&mount_path);
 
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
 
         db.execute(
             "UPDATE claimed_disks SET device_uuid = ?1, status = 'mounted', backend_id = ?2, device_path = ?3 WHERE id = ?4",
@@ -337,7 +337,7 @@ pub async fn release(
     Json(body): Json<ReleaseDiskRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let (disk_id, mount_path, backend_id) = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         db.query_row(
             "SELECT id, mount_path, backend_id FROM claimed_disks WHERE device_path = ?1 AND status = 'mounted'",
             rusqlite::params![&body.device_path],
@@ -347,7 +347,7 @@ pub async fn release(
 
     // Remove backend (triggers drain if it has files)
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         // Delete chunk replicas on this backend
         db.execute(
             "DELETE FROM chunk_replicas WHERE backend_id = ?1",
@@ -381,7 +381,7 @@ pub async fn release(
 
     // Update DB
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         db.execute(
             "UPDATE claimed_disks SET status = 'released' WHERE id = ?1",
             rusqlite::params![&disk_id],
@@ -405,7 +405,7 @@ pub async fn reset(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     // Check disk status
     let disk_info = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let disks = disk::discover_disks(&db);
         disks.into_iter().find(|d| d.device.path == body.device_path)
     };

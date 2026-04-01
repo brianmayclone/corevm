@@ -29,7 +29,7 @@ pub async fn write_chunk(
     // 0. Resolve local file_id — the sender's file_id may differ from ours
     //    (each node has its own auto-increment IDs in file_map)
     let file_id = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         // First try: sender file_id matches locally (same node wrote it)
         let local_exists: bool = db.query_row(
             "SELECT COUNT(*) FROM file_map WHERE id = ?1 AND volume_id = ?2",
@@ -70,7 +70,7 @@ pub async fn write_chunk(
 
     // 2. Find ALL local backends for this chunk (respects mirror/stripe policy)
     let (placements, vol_chunk_size) = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let local_raid: String = db.query_row(
             "SELECT local_raid FROM volumes WHERE id = ?1",
             rusqlite::params![&volume_id], |row| row.get(0),
@@ -125,7 +125,7 @@ pub async fn write_chunk(
 
     // 5. Update DB — register replica on each placement backend
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         for (backend_id, _) in &placements {
             if let Err(e) = ChunkService::receive_chunk(
                 &db, file_id, chunk_index, body.len() as u64,
@@ -158,7 +158,7 @@ pub async fn read_chunk(
     Path((volume_id, file_id, chunk_index)): Path<(String, i64, u32)>,
 ) -> Result<Vec<u8>, (StatusCode, String)> {
     let replicas: Vec<(String, String, String)> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let mut stmt = db.prepare(
             "SELECT b.path, cr.backend_id, COALESCE(fc.sha256, '') FROM chunk_replicas cr
              JOIN backends b ON b.id = cr.backend_id
@@ -181,7 +181,7 @@ pub async fn read_chunk(
                 let actual = format!("{:x}", Sha256::digest(&data));
                 if actual != *expected_sha256 {
                     tracing::warn!("read_chunk: SHA256 mismatch on {}, marking error", path.display());
-                    let db = state.db.lock().unwrap();
+                    let db = state.db.write();
                     log_err!(ChunkService::mark_replica_error_by_backend(&db, file_id, chunk_index, backend_id),
                         "read_chunk: mark error");
                     continue;
@@ -210,7 +210,7 @@ pub async fn sync_file_meta(
     let chunk_size_bytes = meta["chunk_size_bytes"].as_u64()
         .unwrap_or(chunk::DEFAULT_CHUNK_SIZE);
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
 
     FileService::sync_metadata(
         &db, volume_id, rel_path, size_bytes, sha256, version, chunk_count, chunk_size_bytes,

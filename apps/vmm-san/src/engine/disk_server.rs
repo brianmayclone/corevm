@@ -33,7 +33,7 @@ struct DiskSession {
 /// Spawn UDS listeners for all online volumes.
 pub fn spawn_all(state: Arc<CoreSanState>) {
     let volumes: Vec<(String, String)> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let mut stmt = db.prepare(
             "SELECT id, name FROM volumes WHERE status = 'online'"
         ).unwrap();
@@ -134,7 +134,7 @@ async fn handle_connection(
                 let rel_path = String::from_utf8_lossy(&path_buf).to_string();
 
                 let result = {
-                    let db = state.db.lock().unwrap();
+                    let db = state.db.read();
 
                     // Deterministic file_id — same on every node, no AUTOINCREMENT
                     let file_id = crate::storage::chunk::deterministic_file_id(&volume_id, &rel_path);
@@ -166,7 +166,7 @@ async fn handle_connection(
                     Ok((file_id, chunk_size, local_raid)) => {
                         // Acquire write lease
                         let lease_ok = {
-                            let db = state.db.lock().unwrap();
+                            let db = state.db.write();
                             let quorum = *state.quorum_status.read().unwrap();
                             crate::engine::write_lease::acquire_lease(
                                 &db, &volume_id, &rel_path, &state.node_id, quorum,
@@ -229,7 +229,7 @@ async fn handle_connection(
                 } else {
                     // Cache miss — read from chunk system
                     let data = {
-                        let db = state.db.lock().unwrap();
+                        let db = state.db.read();
                         crate::storage::chunk::read_chunk_data(
                             &db, sess.file_id, offset, size,
                             &sess.volume_id, &state.node_id, sess.chunk_size,
@@ -270,7 +270,7 @@ async fn handle_connection(
                 let buf = sess.cache.entry(chunk_idx).or_insert_with(|| {
                     // Check if chunk exists on disk
                     let has_data = {
-                        let db = state.db.lock().unwrap();
+                        let db = state.db.read();
                         db.query_row(
                             "SELECT COUNT(*) FROM chunk_replicas cr
                              JOIN file_chunks fc ON fc.id = cr.chunk_id
@@ -282,7 +282,7 @@ async fn handle_connection(
                     };
 
                     let chunk_data = if has_data {
-                        let db = state.db.lock().unwrap();
+                        let db = state.db.read();
                         crate::storage::chunk::read_chunk_data(
                             &db, sess.file_id, chunk_idx as u64 * sess.chunk_size,
                             sess.chunk_size, &sess.volume_id, &state.node_id, sess.chunk_size,
@@ -327,7 +327,7 @@ async fn handle_connection(
                         .map(|(idx, buf)| *idx as u64 * sess.chunk_size + buf.data.len() as u64)
                         .max().unwrap_or(0);
                     if max_size > 0 {
-                        let db = state.db.lock().unwrap();
+                        let db = state.db.write();
                         db.execute(
                             "UPDATE file_map SET size_bytes = MAX(size_bytes, ?1) WHERE id = ?2",
                             rusqlite::params![max_size as i64, sess.file_id],
@@ -341,7 +341,7 @@ async fn handle_connection(
                 if let Some(mut sess) = session.take() {
                     flush_all(&state, &mut sess);
                     // Release write lease
-                    let db = state.db.lock().unwrap();
+                    let db = state.db.write();
                     crate::engine::write_lease::release_lease(
                         &db, &sess.volume_id, &sess.rel_path, &state.node_id,
                     );
@@ -352,7 +352,7 @@ async fn handle_connection(
 
             SanCommand::GetSize => {
                 let size = if let Some(sess) = &session {
-                    let db = state.db.lock().unwrap();
+                    let db = state.db.read();
                     db.query_row(
                         "SELECT size_bytes FROM file_map WHERE id = ?1",
                         rusqlite::params![sess.file_id], |row| row.get::<_, u64>(0),
@@ -368,7 +368,7 @@ async fn handle_connection(
     // Connection closed — flush remaining data
     if let Some(mut sess) = session.take() {
         flush_all(&state, &mut sess);
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         crate::engine::write_lease::release_lease(
             &db, &sess.volume_id, &sess.rel_path, &state.node_id,
         );
@@ -432,7 +432,7 @@ fn flush_all(state: &CoreSanState, sess: &mut DiskSession) {
 
         // Trigger push replication
         let version = {
-            let db = state.db.lock().unwrap();
+            let db = state.db.write();
             db.execute(
                 "UPDATE file_map SET version = version + 1, updated_at = datetime('now') WHERE id = ?1",
                 rusqlite::params![sess.file_id],
@@ -468,7 +468,7 @@ fn evict_oldest(state: &CoreSanState, sess: &mut DiskSession) {
 /// Write a chunk to disk via the chunk system.
 fn write_chunk(state: &CoreSanState, sess: &DiskSession, chunk_index: u32, data: &[u8]) {
     let offset = chunk_index as u64 * sess.chunk_size;
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
     match crate::storage::chunk::write_chunk_data(
         &db, sess.file_id, offset, data,
         &sess.volume_id, &state.node_id, sess.chunk_size, &sess.local_raid,

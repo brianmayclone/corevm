@@ -30,7 +30,7 @@ pub fn spawn(state: Arc<CoreSanState>) {
 async fn run_integrity_check(state: &CoreSanState) {
     // Get all local synced chunk replicas with expected checksums
     let chunks: Vec<(i64, i64, String, u32, String, String, Option<String>)> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let mut stmt = db.prepare(
             "SELECT fc.id, fc.file_id, fc.sha256, fc.chunk_index, cr.backend_id, b.path, fc.dedup_sha256
              FROM chunk_replicas cr
@@ -57,7 +57,7 @@ async fn run_integrity_check(state: &CoreSanState) {
     for (chunk_id, file_id, expected_sha256, chunk_index, backend_id, backend_path, dedup_sha256) in chunks {
         // Get volume_id for chunk path
         let volume_id: String = {
-            let db = state.db.lock().unwrap();
+            let db = state.db.read();
             db.query_row(
                 "SELECT volume_id FROM file_map WHERE id = ?1",
                 rusqlite::params![file_id], |row| row.get(0),
@@ -91,7 +91,7 @@ async fn run_integrity_check(state: &CoreSanState) {
 
         // Log result
         {
-            let db = state.db.lock().unwrap();
+            let db = state.db.write();
             // Reuse integrity_log for chunk-level too (file_id for backwards compat)
             db.execute(
                 "INSERT INTO integrity_log (file_id, backend_id, expected_sha256, actual_sha256, passed)
@@ -106,7 +106,7 @@ async fn run_integrity_check(state: &CoreSanState) {
 }
 
 fn mark_chunk_error(state: &CoreSanState, chunk_id: i64, backend_id: &str, _expected: &str, _actual: &str) {
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
     db.execute(
         "UPDATE chunk_replicas SET state = 'error'
          WHERE chunk_id = ?1 AND backend_id = ?2",

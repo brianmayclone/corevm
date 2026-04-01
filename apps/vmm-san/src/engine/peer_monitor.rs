@@ -187,7 +187,7 @@ async fn heartbeat_all_peers(state: &CoreSanState, client: &PeerClient) {
                     peer.missed_heartbeats = 0;
                 }
                 // Update DB
-                let db = state.db.lock().unwrap();
+                let db = state.db.write();
                 let now = chrono::Utc::now().to_rfc3339();
                 db.execute(
                     "UPDATE peers SET status = 'online', last_heartbeat = ?1 WHERE node_id = ?2",
@@ -211,7 +211,7 @@ async fn heartbeat_all_peers(state: &CoreSanState, client: &PeerClient) {
                         peer.status = PeerStatus::Offline;
 
                         // Update DB
-                        let db = state.db.lock().unwrap();
+                        let db = state.db.write();
                         db.execute(
                             "UPDATE peers SET status = 'offline' WHERE node_id = ?1",
                             rusqlite::params![&peer_id],

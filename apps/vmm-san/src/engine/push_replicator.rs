@@ -65,7 +65,7 @@ async fn run_push_replicator(
 
         // Gather file metadata and chunk info for this file
         let (file_meta, chunks) = {
-            let db = state.db.lock().unwrap();
+            let db = state.db.read();
             let meta = db.query_row(
                 "SELECT fm.size_bytes, fm.sha256, fm.version, fm.chunk_count,
                         v.chunk_size_bytes, v.ftt, v.local_raid
@@ -143,7 +143,7 @@ async fn run_push_replicator(
                 ).await {
                     Ok(_) => {
                         // Record in our local DB that this peer now has the chunk
-                        let db = state.db.lock().unwrap();
+                        let db = state.db.write();
                         if let Ok(chunk_id) = crate::services::chunk::ChunkService::get_chunk_id(
                             &db, event.file_id, *chunk_index,
                         ) {
@@ -182,7 +182,7 @@ pub fn spawn_log_cleanup(state: Arc<CoreSanState>) {
         let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(300));
         loop {
             tick.tick().await;
-            let db = state.db.lock().unwrap();
+            let db = state.db.write();
 
             // Delete write_log entries older than 1 hour ONLY IF the file's chunks
             // have at least one synced replica on another node.

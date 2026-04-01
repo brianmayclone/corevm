@@ -104,7 +104,7 @@ pub async fn run_benchmarks(state: &CoreSanState) {
         }
 
         // Store results
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         db.execute(
             "INSERT INTO benchmark_results (from_node_id, to_node_id, bandwidth_mbps,
                 latency_us, jitter_us, packet_loss_pct, test_size_bytes)
@@ -121,7 +121,7 @@ pub async fn run_benchmarks(state: &CoreSanState) {
     }
 
     // Cleanup old results (keep last 24 hours)
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
     db.execute(
         "DELETE FROM benchmark_results WHERE measured_at < datetime('now', '-24 hours')",
         [],

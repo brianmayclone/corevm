@@ -36,7 +36,7 @@ struct BlockSession {
 /// Spawn UDS listeners for all iSCSI-enabled online volumes.
 pub fn spawn_all(state: Arc<CoreSanState>) {
     let volumes: Vec<(String, String)> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let mut stmt = db.prepare(
             "SELECT id, name FROM volumes WHERE status = 'online' AND access_protocols LIKE '%iscsi%'"
         ).unwrap();
@@ -99,7 +99,7 @@ async fn handle_connection(
 ) -> Result<(), String> {
     // Load volume metadata and set up block session
     let (max_size_bytes, chunk_size, local_raid) = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         db.query_row(
             "SELECT max_size_bytes, chunk_size_bytes, local_raid FROM volumes WHERE id = ?1",
             rusqlite::params![&volume_id],
@@ -113,7 +113,7 @@ async fn handle_connection(
 
     // Ensure file_map entry exists for the virtual block file
     {
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         db.execute(
             "INSERT OR IGNORE INTO file_map (id, volume_id, rel_path, size_bytes, sha256, chunk_count)
              VALUES (?1, ?2, ?3, ?4, '', 0)",
@@ -238,14 +238,14 @@ fn read_blocks(state: &CoreSanState, sess: &mut BlockSession, offset: u64, size:
         }
 
         // Cache miss — read from chunk system
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         crate::storage::chunk::read_chunk_data(
             &db, sess.file_id, offset, size,
             &sess.volume_id, &state.node_id, sess.chunk_size,
         ).unwrap_or_else(|_| vec![0u8; size as usize])
     } else {
         // Cross-chunk read — delegate to chunk system (handles spanning)
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         crate::storage::chunk::read_chunk_data(
             &db, sess.file_id, offset, size,
             &sess.volume_id, &state.node_id, sess.chunk_size,
@@ -261,7 +261,7 @@ fn write_blocks(state: &CoreSanState, sess: &mut BlockSession, offset: u64, data
     if local_offset + data.len() <= sess.chunk_size as usize {
         let buf = sess.cache.entry(chunk_idx).or_insert_with(|| {
             let has_data = {
-                let db = state.db.lock().unwrap();
+                let db = state.db.read();
                 db.query_row(
                     "SELECT COUNT(*) FROM chunk_replicas cr
                      JOIN file_chunks fc ON fc.id = cr.chunk_id
@@ -273,7 +273,7 @@ fn write_blocks(state: &CoreSanState, sess: &mut BlockSession, offset: u64, data
             };
 
             let chunk_data = if has_data {
-                let db = state.db.lock().unwrap();
+                let db = state.db.read();
                 crate::storage::chunk::read_chunk_data(
                     &db, sess.file_id, chunk_idx as u64 * sess.chunk_size,
                     sess.chunk_size, &sess.volume_id, &state.node_id, sess.chunk_size,
@@ -298,7 +298,7 @@ fn write_blocks(state: &CoreSanState, sess: &mut BlockSession, offset: u64, data
         buf.last_write = std::time::Instant::now();
     } else {
         // Cross-chunk write — write directly without cache
-        let db = state.db.lock().unwrap();
+        let db = state.db.write();
         let _ = crate::storage::chunk::write_chunk_data(
             &db, sess.file_id, offset, data,
             &sess.volume_id, &state.node_id, sess.chunk_size, &sess.local_raid,
@@ -370,7 +370,7 @@ fn evict_oldest(state: &CoreSanState, sess: &mut BlockSession) {
 /// Write a chunk to disk via the chunk system.
 fn write_chunk(state: &CoreSanState, sess: &BlockSession, chunk_index: u32, data: &[u8]) {
     let offset = chunk_index as u64 * sess.chunk_size;
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
     if let Err(e) = crate::storage::chunk::write_chunk_data(
         &db, sess.file_id, offset, data,
         &sess.volume_id, &state.node_id, sess.chunk_size, &sess.local_raid,

@@ -42,7 +42,7 @@ struct StaleChunkReplica {
 /// Process all stale chunk replicas — re-sync them from a healthy source.
 async fn process_stale_chunk_replicas(state: &CoreSanState, client: &PeerClient) {
     let stale = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         let mut stmt = db.prepare(
             "SELECT cr.chunk_id, fc.file_id, fc.chunk_index, fm.volume_id,
                     cr.backend_id, b.path, cr.node_id
@@ -88,7 +88,7 @@ async fn sync_local_chunk(
 ) {
     // Find a peer that has a synced copy of this chunk
     let source_node_id = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         db.query_row(
             "SELECT cr.node_id FROM chunk_replicas cr
              WHERE cr.chunk_id = ?1 AND cr.state = 'synced' AND cr.node_id != ?2
@@ -127,7 +127,7 @@ async fn sync_local_chunk(
                     f.sync_all().ok();
                 }
                 if std::fs::rename(&tmp, &path).is_ok() {
-                    let db = state.db.lock().unwrap();
+                    let db = state.db.write();
                     let now = chrono::Utc::now().to_rfc3339();
                     db.execute(
                         "UPDATE chunk_replicas SET state = 'synced', synced_at = ?1
@@ -165,7 +165,7 @@ async fn sync_remote_chunk(
 ) {
     // Find local synced replica of this chunk to use as source
     let local_source = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         db.query_row(
             "SELECT b.path FROM chunk_replicas cr
              JOIN backends b ON b.id = cr.backend_id
@@ -183,7 +183,7 @@ async fn sync_remote_chunk(
 
     // Check if chunk is deduplicated — read from correct path
     let dedup_sha: Option<String> = {
-        let db = state.db.lock().unwrap();
+        let db = state.db.read();
         db.query_row(
             "SELECT dedup_sha256 FROM file_chunks WHERE id = ?1",
             rusqlite::params![replica.chunk_id], |row| row.get(0),

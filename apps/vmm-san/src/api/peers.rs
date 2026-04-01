@@ -62,7 +62,7 @@ pub async fn join(
         return Err((StatusCode::BAD_REQUEST, "Cannot add self as peer".into()));
     }
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
     let now = chrono::Utc::now().to_rfc3339();
 
     db.execute(
@@ -126,7 +126,7 @@ pub async fn join(
 pub async fn list(
     State(state): State<Arc<CoreSanState>>,
 ) -> Json<Vec<PeerResponse>> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.read();
 
     let mut stmt = db.prepare(
         "SELECT node_id, address, peer_port, hostname, status, last_heartbeat
@@ -152,7 +152,7 @@ pub async fn remove(
     State(state): State<Arc<CoreSanState>>,
     Path(node_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
 
     db.execute("DELETE FROM peers WHERE node_id = ?1", rusqlite::params![&node_id])
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
@@ -181,7 +181,7 @@ pub async fn heartbeat(
         peer.missed_heartbeats = 0;
     }
 
-    let db = state.db.lock().unwrap();
+    let db = state.db.write();
     let now = chrono::Utc::now().to_rfc3339();
     if let Some(ref addr) = body.address {
         if !addr.is_empty() {
