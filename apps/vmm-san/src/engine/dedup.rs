@@ -19,6 +19,10 @@ pub fn spawn(state: Arc<CoreSanState>) {
 
     let check_interval = state.config.dedup.interval_secs;
     tokio::spawn(async move {
+        // Short initial delay to let volumes and backends finish loading
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        run_dedup_cycle(&state).await;
+
         let mut tick = interval(Duration::from_secs(check_interval));
         loop {
             tick.tick().await;
@@ -39,8 +43,11 @@ async fn run_dedup_cycle(state: &CoreSanState) {
     };
 
     if volumes.is_empty() {
+        tracing::trace!("Dedup: no dedup-enabled volumes");
         return;
     }
+
+    tracing::debug!("Dedup: scanning {} volume(s)", volumes.len());
 
     for (volume_id, volume_name) in &volumes {
         dedup_volume(state, volume_id, volume_name).await;
@@ -72,6 +79,7 @@ async fn dedup_volume(state: &CoreSanState, volume_id: &str, volume_name: &str) 
     };
 
     if duplicates.is_empty() {
+        tracing::debug!("Dedup: volume '{}' — no duplicates found", volume_name);
         return;
     }
 
