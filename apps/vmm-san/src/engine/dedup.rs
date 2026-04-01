@@ -66,7 +66,7 @@ async fn dedup_volume(state: &CoreSanState, volume_id: &str, volume_name: &str) 
              WHERE fm.volume_id = ?1
                AND fc.dedup_sha256 IS NULL
                AND fc.sha256 != ''
-               AND (fm.write_owner = '' OR fm.write_lease_until < datetime('now'))
+               AND fm.updated_at < datetime('now', '-60 seconds')
              GROUP BY fc.sha256
              HAVING cnt > 1
              LIMIT 100"

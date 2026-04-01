@@ -191,7 +191,19 @@ async fn repair_single_chunk(
         None => return false,
     };
 
-    let src = chunk::chunk_path(&backend_path, volume_id, file_id, chunk_index);
+    // Check if chunk is deduplicated — read from correct path
+    let dedup_sha: Option<String> = {
+        let db = state.db.lock().unwrap();
+        db.query_row(
+            "SELECT dedup_sha256 FROM file_chunks WHERE id = ?1",
+            rusqlite::params![chunk_id], |row| row.get(0),
+        ).ok().flatten()
+    };
+    let src = if let Some(ref dsha) = dedup_sha {
+        chunk::dedup_chunk_path(&backend_path, volume_id, dsha)
+    } else {
+        chunk::chunk_path(&backend_path, volume_id, file_id, chunk_index)
+    };
     let data = match std::fs::read(&src) {
         Ok(d) => d,
         Err(_) => return false,

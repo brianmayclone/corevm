@@ -181,9 +181,22 @@ async fn sync_remote_chunk(
         None => return,
     };
 
-    let chunk_path = chunk::chunk_path(
-        &source_backend_path, &replica.volume_id, replica.file_id, replica.chunk_index,
-    );
+    // Check if chunk is deduplicated — read from correct path
+    let dedup_sha: Option<String> = {
+        let db = state.db.lock().unwrap();
+        db.query_row(
+            "SELECT dedup_sha256 FROM file_chunks WHERE id = ?1",
+            rusqlite::params![replica.chunk_id], |row| row.get(0),
+        ).ok().flatten()
+    };
+
+    let chunk_path = if let Some(ref dsha) = dedup_sha {
+        chunk::dedup_chunk_path(&source_backend_path, &replica.volume_id, dsha)
+    } else {
+        chunk::chunk_path(
+            &source_backend_path, &replica.volume_id, replica.file_id, replica.chunk_index,
+        )
+    };
     let data = match std::fs::read(&chunk_path) {
         Ok(d) => d,
         Err(_) => return,

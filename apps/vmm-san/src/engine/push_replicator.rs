@@ -94,16 +94,16 @@ async fn run_push_replicator(
 
             // Get all local synced chunk replicas for this file
             let mut stmt = db.prepare(
-                "SELECT fc.chunk_index, fc.size_bytes, fc.sha256, b.path
+                "SELECT fc.chunk_index, fc.size_bytes, fc.sha256, b.path, fc.dedup_sha256
                  FROM file_chunks fc
                  JOIN chunk_replicas cr ON cr.chunk_id = fc.id
                  JOIN backends b ON b.id = cr.backend_id
                  WHERE fc.file_id = ?1 AND cr.node_id = ?2 AND cr.state = 'synced'
                  GROUP BY fc.chunk_index"
             ).unwrap();
-            let chunks: Vec<(u32, u64, String, String)> = stmt.query_map(
+            let chunks: Vec<(u32, u64, String, String, Option<String>)> = stmt.query_map(
                 rusqlite::params![event.file_id, &state.node_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             ).unwrap().filter_map(|r| r.ok()).collect();
 
             (meta, chunks)
@@ -119,10 +119,14 @@ async fn run_push_replicator(
 
             // 2. Push each chunk
             let mut all_ok = true;
-            for (chunk_index, _size, _sha256, backend_path) in &chunks {
-                let chunk_path = crate::storage::chunk::chunk_path(
-                    backend_path, &event.volume_id, event.file_id, *chunk_index,
-                );
+            for (chunk_index, _size, _sha256, backend_path, dedup_sha) in &chunks {
+                let chunk_path = if let Some(ref dsha) = dedup_sha {
+                    crate::storage::chunk::dedup_chunk_path(backend_path, &event.volume_id, dsha)
+                } else {
+                    crate::storage::chunk::chunk_path(
+                        backend_path, &event.volume_id, event.file_id, *chunk_index,
+                    )
+                };
                 let data = match std::fs::read(&chunk_path) {
                     Ok(d) => d,
                     Err(e) => {

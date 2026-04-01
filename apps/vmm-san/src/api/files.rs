@@ -272,22 +272,39 @@ pub async fn delete(
         ).ok();
 
         if let Some(fid) = file_id {
-            let chunk_files: Vec<(u32, String)> = {
+            let chunk_files: Vec<(u32, String, Option<String>)> = {
                 let mut stmt = db.prepare(
-                    "SELECT fc.chunk_index, b.path FROM chunk_replicas cr
+                    "SELECT fc.chunk_index, b.path, fc.dedup_sha256 FROM chunk_replicas cr
                      JOIN file_chunks fc ON fc.id = cr.chunk_id
                      JOIN backends b ON b.id = cr.backend_id
                      WHERE fc.file_id = ?1 AND cr.node_id = ?2"
                 ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
                 let rows = stmt.query_map(
                     rusqlite::params![fid, &state.node_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
                 rows.filter_map(|r| r.ok()).collect()
             };
 
-            for (chunk_index, backend_path) in &chunk_files {
-                let path = crate::storage::chunk::chunk_path(backend_path, &volume_id, fid, *chunk_index);
+            for (chunk_index, backend_path, dedup_sha) in &chunk_files {
+                let path = if let Some(ref dsha) = dedup_sha {
+                    // Decrement ref_count; only delete the dedup file if ref_count reaches 0
+                    db.execute(
+                        "UPDATE dedup_store SET ref_count = ref_count - 1 WHERE sha256 = ?1 AND volume_id = ?2",
+                        rusqlite::params![dsha, &volume_id],
+                    ).ok();
+                    let rc: i64 = db.query_row(
+                        "SELECT COALESCE(MIN(ref_count), 0) FROM dedup_store WHERE sha256 = ?1 AND volume_id = ?2",
+                        rusqlite::params![dsha, &volume_id], |row| row.get(0),
+                    ).unwrap_or(1);
+                    if rc <= 0 {
+                        crate::storage::chunk::dedup_chunk_path(backend_path, &volume_id, dsha)
+                    } else {
+                        continue; // Other files still reference this dedup chunk
+                    }
+                } else {
+                    crate::storage::chunk::chunk_path(backend_path, &volume_id, fid, *chunk_index)
+                };
                 let _ = std::fs::remove_file(&path);
                 if let Some(parent) = path.parent() {
                     let _ = std::fs::remove_dir(parent); // only succeeds if empty

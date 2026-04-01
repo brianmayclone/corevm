@@ -396,6 +396,45 @@ pub fn write_chunk_data(
         let chunk_data_slice = &data[data_offset..data_offset + range.size as usize];
         data_offset += range.size as usize;
 
+        // Copy-on-Write for deduplicated chunks: if this chunk lives in the
+        // content-addressed store, copy it back to the positional path first,
+        // then clear dedup_sha256 and decrement ref_count.
+        if let Some((chunk_id, _, _)) = chunk_backends.first() {
+            let dedup_sha: Option<String> = db.query_row(
+                "SELECT dedup_sha256 FROM file_chunks WHERE id = ?1",
+                rusqlite::params![chunk_id], |row| row.get(0),
+            ).ok().flatten();
+
+            if let Some(ref dsha) = dedup_sha {
+                // Copy dedup data back to positional paths on all backends
+                for (_cid, backend_id, backend_path) in &chunk_backends {
+                    let dedup_src = dedup_chunk_path(backend_path, volume_id, dsha);
+                    let pos_dst = chunk_path(backend_path, volume_id, file_id, range.chunk_index);
+
+                    if dedup_src.exists() {
+                        if let Some(parent) = pos_dst.parent() {
+                            std::fs::create_dir_all(parent).ok();
+                        }
+                        std::fs::copy(&dedup_src, &pos_dst).ok();
+                    }
+                }
+
+                // Clear dedup status and decrement ref_count
+                db.execute(
+                    "UPDATE file_chunks SET dedup_sha256 = NULL WHERE id = ?1",
+                    rusqlite::params![chunk_id],
+                ).ok();
+                db.execute(
+                    "UPDATE dedup_store SET ref_count = ref_count - 1
+                     WHERE sha256 = ?1 AND volume_id = ?2",
+                    rusqlite::params![dsha, volume_id],
+                ).ok();
+
+                tracing::debug!("CoW: un-deduplicated chunk file_id={} idx={} (sha256={})",
+                    file_id, range.chunk_index, &dsha[..16.min(dsha.len())]);
+            }
+        }
+
         // Write to each backend replica (mirror writes).
         // If a backend fails, mark it as error and try to write to a fallback backend.
         let mut chunk_sha = String::new();
