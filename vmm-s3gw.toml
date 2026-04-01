@@ -1,0 +1,10 @@
+[server]
+listen = "0.0.0.0:9000"
+region = "us-east-1"
+
+[san]
+mgmt_socket = "/run/vmm-san/mgmt.sock"
+object_socket_dir = "/run/vmm-san"
+
+[logging]
+level = "info"
