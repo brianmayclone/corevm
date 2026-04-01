@@ -167,9 +167,17 @@ export default function HostDetail() {
           <h3 className="text-sm font-semibold text-vmm-text mb-3">VMs on this Host</h3>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {hostVms.map(vm => (
-              <VmPriorityCard key={vm.id} vm={vm}
-                onStart={() => startVm(vm.id)} onStop={() => stopVm(vm.id)}
-                onClick={() => navigate(`/vms/${vm.id}`)} />
+              <VmPriorityCard key={vm.id}
+                name={vm.name}
+                guestOs={vm.guest_os}
+                state={vm.state}
+                tag={vm.id.slice(0, 8)}
+                cpuPercent={0}
+                ramPercent={vm.ram_mb > 0 && host.total_ram_mb > 0 ? Math.round(vm.ram_mb / host.total_ram_mb * 100) : 0}
+                onClick={() => navigate(`/vms/${vm.id}`)}
+                onPower={() => vm.state === 'running' ? stopVm(vm.id) : startVm(vm.id)}
+                onConsole={vm.state === 'running' ? () => navigate(`/vms/${vm.id}/console`) : undefined}
+              />
             ))}
           </div>
         </div>
