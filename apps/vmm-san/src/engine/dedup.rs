@@ -43,11 +43,10 @@ async fn run_dedup_cycle(state: &CoreSanState) {
     };
 
     if volumes.is_empty() {
-        tracing::trace!("Dedup: no dedup-enabled volumes");
         return;
     }
 
-    tracing::debug!("Dedup: scanning {} volume(s)", volumes.len());
+    tracing::info!("Dedup: scanning {} volume(s)", volumes.len());
 
     for (volume_id, volume_name) in &volumes {
         dedup_volume(state, volume_id, volume_name).await;
@@ -79,7 +78,7 @@ async fn dedup_volume(state: &CoreSanState, volume_id: &str, volume_name: &str) 
     };
 
     if duplicates.is_empty() {
-        tracing::debug!("Dedup: volume '{}' — no duplicates found", volume_name);
+        tracing::info!("Dedup: volume '{}' — no duplicates found", volume_name);
         return;
     }
 
