@@ -10,6 +10,7 @@ pub struct FirewallConfig {
     pub vmm_san_port: Option<u16>,
     pub vmm_san_peer_port: Option<u16>,
     pub discovery_port: Option<u16>,
+    pub vmm_s3gw_port: Option<u16>,
 }
 
 pub fn write_nftables_config(target: &Path, config: &FirewallConfig) -> Result<()> {
@@ -38,6 +39,11 @@ pub fn write_nftables_config(target: &Path, config: &FirewallConfig) -> Result<(
 
     // VMM SAN peer port
     if let Some(port) = config.vmm_san_peer_port {
+        accept_rules.push_str(&format!("        tcp dport {} accept\n", port));
+    }
+
+    // VMM S3 Gateway port
+    if let Some(port) = config.vmm_s3gw_port {
         accept_rules.push_str(&format!("        tcp dport {} accept\n", port));
     }
 
@@ -99,6 +105,7 @@ mod tests {
             vmm_san_port: Some(7443),
             vmm_san_peer_port: Some(7444),
             discovery_port: Some(7445),
+            vmm_s3gw_port: Some(9000),
         };
         write_nftables_config(&dir, &config).unwrap();
 
@@ -108,6 +115,7 @@ mod tests {
         assert!(content.contains("tcp dport 7443 accept"), "missing san port");
         assert!(content.contains("tcp dport 7444 accept"), "missing san peer port");
         assert!(content.contains("udp dport 7445 accept"), "missing discovery port");
+        assert!(content.contains("tcp dport 9000 accept"), "missing s3gw port");
         assert!(!content.contains("tcp dport 9443"), "unexpected cluster port");
     }
 
@@ -121,6 +129,7 @@ mod tests {
             vmm_san_port: Some(7443),
             vmm_san_peer_port: Some(7444),
             discovery_port: Some(7445),
+            vmm_s3gw_port: Some(9000),
         };
         write_nftables_config(&dir, &config).unwrap();
 
@@ -131,6 +140,7 @@ mod tests {
         assert!(content.contains("tcp dport 7443 accept"), "missing san port");
         assert!(content.contains("tcp dport 7444 accept"), "missing san peer port");
         assert!(content.contains("udp dport 7445 accept"), "missing discovery port");
+        assert!(content.contains("tcp dport 9000 accept"), "missing s3gw port");
     }
 
     #[test]
@@ -143,6 +153,7 @@ mod tests {
             vmm_san_port: None,
             vmm_san_peer_port: None,
             discovery_port: None,
+            vmm_s3gw_port: None,
         };
         write_nftables_config(&dir, &config).unwrap();
 

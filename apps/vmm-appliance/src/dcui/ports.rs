@@ -68,6 +68,7 @@ impl Dialog {
             vmm_san_port: Some(7443),
             vmm_san_peer_port: Some(7444),
             discovery_port: Some(7445),
+            vmm_s3gw_port: Some(9000),
         };
         let _ = write_nftables_config(Path::new("/"), &fw_config);
         let _ = apply_nftables();

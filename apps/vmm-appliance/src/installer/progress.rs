@@ -305,7 +305,7 @@ impl ProgressState {
 
             // 10b. Enable services
             // vmm-server and vmm-san always run (every node is a hypervisor + storage node)
-            for svc in &["vmm-server.service", "vmm-san.service"] {
+            for svc in &["vmm-server.service", "vmm-san.service", "vmm-s3gw.service"] {
                 if let Err(e) = enable_service(target, svc) {
                     send(ProgressMsg::Error(format!("enable_service({}) failed: {}", svc, e)));
                     return;
@@ -328,6 +328,7 @@ impl ProgressState {
                 vmm_san_port: Some(7443),
                 vmm_san_peer_port: Some(7444),
                 discovery_port: Some(7445),
+                vmm_s3gw_port: Some(9000),
             };
             if let Err(e) = write_nftables_config(target, &fw_config) {
                 send(ProgressMsg::Error(format!("write_nftables_config failed: {}", e)));

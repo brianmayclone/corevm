@@ -180,12 +180,12 @@ chroot "$ROOTFS_DIR" bash -c '
     source /root/.cargo/env
 
     cd /build
-    cargo build --release -p vmm-appliance -p vmm-server -p vmm-cluster -p vmm-san
+    cargo build --release -p vmm-appliance -p vmm-server -p vmm-cluster -p vmm-san -p vmm-s3gw
 '
 
 # Copy chroot-built binaries to where the rest of the script expects them
 mkdir -p "$ROOT/target/release"
-for bin in vmm-appliance vmm-server vmm-cluster vmm-san; do
+for bin in vmm-appliance vmm-server vmm-cluster vmm-san vmm-s3gw; do
     cp "$CHROOT_TARGET_DIR/release/$bin" "$ROOT/target/release/"
 done
 
@@ -204,6 +204,7 @@ cp "$ROOT/target/release/vmm-appliance" "$ROOTFS_DIR/opt/vmm/"
 cp "$ROOT/target/release/vmm-server" "$ROOTFS_DIR/opt/vmm/"
 cp "$ROOT/target/release/vmm-cluster" "$ROOTFS_DIR/opt/vmm/"
 cp "$ROOT/target/release/vmm-san" "$ROOTFS_DIR/opt/vmm/"
+cp "$ROOT/target/release/vmm-s3gw" "$ROOTFS_DIR/opt/vmm/"
 # Clean old UI build and copy fresh (hashed filenames change between builds)
 rm -rf "$ROOTFS_DIR/opt/vmm/ui"
 cp -r "$ROOT/apps/vmm-ui/dist" "$ROOTFS_DIR/opt/vmm/ui"
@@ -333,6 +334,22 @@ RestartSec=5
 WantedBy=multi-user.target
 SAN_SVC
 
+tee "$ROOTFS_DIR/etc/systemd/system/vmm-s3gw.service" > /dev/null <<'S3GW_SVC'
+[Unit]
+Description=CoreVM S3 Gateway — S3-compatible object storage
+After=network.target vmm-san.service
+Requires=vmm-san.service
+
+[Service]
+Type=simple
+ExecStart=/opt/vmm/vmm-s3gw --config /etc/vmm/vmm-s3gw.toml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+S3GW_SVC
+
 # Configure FUSE for CoreSAN (allow_other needed for VM access to FUSE mounts)
 echo "user_allow_other" > "$ROOTFS_DIR/etc/fuse.conf"
 chmod 644 "$ROOTFS_DIR/etc/fuse.conf"
@@ -372,6 +389,20 @@ repair_interval_secs = 60
 level = "info"
 log_file = "/var/log/vmm/vmm-san.log"
 SAN_CONF
+
+# Create default vmm-s3gw config
+tee "$ROOTFS_DIR/etc/vmm/vmm-s3gw.toml" > /dev/null <<'S3GW_CONF'
+[server]
+listen = "0.0.0.0:9000"
+region = "us-east-1"
+
+[san]
+mgmt_socket = "/run/vmm-san/mgmt.sock"
+object_socket_dir = "/run/vmm-san"
+
+[logging]
+level = "info"
+S3GW_CONF
 
 # Create default vmm-server config
 tee "$ROOTFS_DIR/etc/vmm/vmm-server.toml" > /dev/null <<'SERVER_CONF'

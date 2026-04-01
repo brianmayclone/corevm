@@ -12,6 +12,7 @@ const SERVICES: &[(&str, &str)] = &[
     ("vmm-server",  "VMM Server — VM management API"),
     ("vmm-cluster", "VMM Cluster — Central authority"),
     ("vmm-san",     "CoreSAN — Software-Defined Storage"),
+    ("vmm-s3gw",    "S3 Gateway — S3-compatible object storage"),
 ];
 
 pub enum DialogResult {
