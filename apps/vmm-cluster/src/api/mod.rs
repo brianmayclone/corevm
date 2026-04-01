@@ -55,7 +55,7 @@ pub fn router() -> Router<Arc<ClusterState>> {
 
         // ── VMs (cluster authority) ─────────────────────
         .route("/api/vms", get(vms::list).post(vms::create))
-        .route("/api/vms/{id}", get(vms::get).delete(vms::delete))
+        .route("/api/vms/{id}", get(vms::get).put(vms::update).delete(vms::delete))
         .route("/api/vms/{id}/start", post(vms::start))
         .route("/api/vms/{id}/stop", post(vms::stop))
         .route("/api/vms/{id}/force-stop", post(vms::force_stop))

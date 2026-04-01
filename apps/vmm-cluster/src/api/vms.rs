@@ -340,6 +340,45 @@ pub async fn force_stop(
     Ok(Json(serde_json::json!({"ok": true, "state": "stopped"})))
 }
 
+/// PUT /api/vms/{id} — update VM config
+pub async fn update(
+    State(state): State<Arc<ClusterState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_operator(&user)?;
+
+    let db = state.db.lock().map_err(|_| AppError(StatusCode::INTERNAL_SERVER_ERROR, "DB lock error".into()))?;
+
+    // Verify VM exists
+    let vm = VmService::get(&db, &id).map_err(|e| AppError(StatusCode::NOT_FOUND, e))?;
+
+    // VM must be stopped to update config
+    if vm.state != "stopped" {
+        return Err(AppError(StatusCode::CONFLICT, "VM must be stopped to update config".into()));
+    }
+
+    // Store updated config
+    let config_json = serde_json::to_string(&body)
+        .map_err(|e| AppError(StatusCode::BAD_REQUEST, format!("Invalid config: {}", e)))?;
+    VmService::update_config(&db, &id, &config_json)
+        .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    // Update name if present in config
+    if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
+        db.execute(
+            "UPDATE vms SET name = ?1, updated_at = datetime('now') WHERE id = ?2",
+            rusqlite::params![name, &id],
+        ).ok();
+    }
+
+    AuditService::log(&db, user.id, "vm.update", "vm", &id, None);
+    EventService::log(&db, "info", "vm", &format!("VM '{}' config updated", id), Some("vm"), Some(&id), vm.host_id.as_deref());
+
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
 pub async fn delete(
     State(state): State<Arc<ClusterState>>,
     user: AuthUser,
