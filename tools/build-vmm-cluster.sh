@@ -74,6 +74,13 @@ if [ -d "$BIOS_SRC" ]; then
     echo -e "${GREEN}✓ BIOS files copied${NC}"
 fi
 
+# ── Build vmm-s3gw (S3 Gateway) ──────────────────────────────────────────
+
+echo ""
+echo -e "${CYAN}=== Building vmm-s3gw / S3 Gateway (Rust) ===${NC}"
+cargo build --release -p vmm-s3gw
+echo -e "${GREEN}✓ vmm-s3gw built${NC}"
+
 # ── Build vmm-ui ─────────────────────────────────────────────────────────
 
 echo ""
@@ -89,6 +96,7 @@ for arg in "$@"; do
     if [ "$arg" = "--reset" ]; then
         echo -e "${YELLOW}=== Resetting all data ===${NC}"
         # Kill running services first
+        pkill -f "vmm-s3gw" 2>/dev/null || true
         pkill -f "vmm-san" 2>/dev/null || true
         pkill -f "vmm-server.*config" 2>/dev/null || true
         pkill -f "vmm-cluster.*config" 2>/dev/null || true
@@ -109,7 +117,7 @@ for arg in "$@"; do
             umount -l /tmp/vmm-san/mnt/* 2>/dev/null || true
             rm -rf /tmp/vmm-san 2>/dev/null || true
         fi
-        rm -f "$ROOT/vmm-cluster.toml" "$ROOT/vmm-server.toml" "$ROOT/vmm-san.toml"
+        rm -f "$ROOT/vmm-cluster.toml" "$ROOT/vmm-server.toml" "$ROOT/vmm-san.toml" "$ROOT/vmm-s3gw.toml"
         echo -e "${GREEN}All configs, data, and running services removed.${NC}"
     fi
 done
@@ -216,6 +224,25 @@ EOF
         echo -e "Created CoreSAN config: ${SAN_CONFIG}"
     fi
 
+    # ── Create S3 Gateway config if missing ─────────────────────────
+
+    S3GW_CONFIG="$ROOT/vmm-s3gw.toml"
+    if [ ! -f "$S3GW_CONFIG" ]; then
+        cat > "$S3GW_CONFIG" << 'EOF'
+[server]
+listen = "0.0.0.0:9000"
+region = "us-east-1"
+
+[san]
+mgmt_socket = "/run/vmm-san/mgmt.sock"
+object_socket_dir = "/run/vmm-san"
+
+[logging]
+level = "info"
+EOF
+        echo -e "Created S3 gateway config: ${S3GW_CONFIG}"
+    fi
+
     # ── Create data directories ──────────────────────────────────────
 
     mkdir -p /tmp/vmm-cluster /tmp/vmm/images /tmp/vmm/isos /tmp/vmm/vms /tmp/vmm-san /tmp/vmm-san/mnt
@@ -228,6 +255,12 @@ EOF
         "$ROOT/target/release/vmm-san" --config "$SAN_CONFIG" &
         PIDS+=($!)
         sleep 1
+
+        # ── Start vmm-s3gw (S3 Gateway — depends on vmm-san sockets) ──
+
+        echo -e "${CYAN}Starting vmm-s3gw (S3 Gateway) on :9000...${NC}"
+        "$ROOT/target/release/vmm-s3gw" --config "$S3GW_CONFIG" &
+        PIDS+=($!)
     fi
 
     # ── Start vmm-cluster ────────────────────────────────────────────
@@ -259,6 +292,7 @@ EOF
     echo ""
     if [ "${HAS_SAN:-0}" = "1" ]; then
     echo -e "  ${CYAN}vmm-san${NC}      : http://localhost:7443   (CoreSAN storage)"
+    echo -e "  ${CYAN}vmm-s3gw${NC}     : http://localhost:9000   (S3 gateway)"
     fi
     echo -e "  ${CYAN}vmm-cluster${NC}  : http://localhost:9443   (central authority)"
     echo -e "  ${CYAN}vmm-server${NC}   : http://localhost:8443   (host agent)"
