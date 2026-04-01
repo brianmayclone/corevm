@@ -212,6 +212,34 @@ pub fn discover_disks(db: &Connection) -> Vec<DiscoveredDisk> {
         result.push(DiscoveredDisk { device, status, smart });
     }
 
+    // Append file-backed virtual disks from claimed_disks (not visible via lsblk)
+    let file_disks: Vec<(String, String, String, String, i64, String)> = db.prepare(
+        "SELECT id, device_path, mount_path, COALESCE(backend_id, ''), size_bytes, serial
+         FROM claimed_disks WHERE model = 'file-disk' AND status = 'mounted'"
+    ).and_then(|mut stmt| {
+        stmt.query_map([], |row| Ok((
+            row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?,
+        ))).map(|rows| rows.filter_map(|r| r.ok()).collect())
+    }).unwrap_or_default();
+
+    for (disk_id, device_path, mount_path, backend_id, size_bytes, label) in file_disks {
+        result.push(DiscoveredDisk {
+            device: BlockDevice {
+                name: label.clone(),
+                path: device_path.clone(),
+                size_bytes: size_bytes as u64,
+                model: "file-disk".into(),
+                serial: label,
+                fs_type: Some("ext4".into()),
+                mountpoint: Some(mount_path),
+                has_partitions: false,
+                is_os_disk: false,
+            },
+            status: DiskStatus::Claimed { disk_id, backend_id },
+            smart: None,
+        });
+    }
+
     result
 }
 
