@@ -175,9 +175,16 @@ async fn main() {
     // Start in Sanitizing state — node is not yet available
     let initial_quorum = crate::state::QuorumStatus::Sanitizing;
 
+    // Create read/write DB pool for concurrent access
+    drop(conn); // Close the init connection — DbPool creates its own
+    let db_pool = crate::state::DbPool::new(&db_path).unwrap_or_else(|e| {
+        eprintln!("Database pool init failed: {}", e);
+        std::process::exit(1);
+    });
+
     let state = Arc::new(CoreSanState {
         peers,
-        db: Mutex::new(conn),
+        db: db_pool,
         config,
         config_path: Some(std::path::PathBuf::from(&config_path)),
         node_id,
