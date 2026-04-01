@@ -7,6 +7,7 @@
 pub mod cluster;
 pub mod config;
 pub mod san_disk;
+pub mod san_iscsi;
 pub mod san_mgmt;
 pub mod san_object;
 pub mod snapshot;
