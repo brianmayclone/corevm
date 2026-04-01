@@ -220,10 +220,6 @@ CREATE INDEX IF NOT EXISTS idx_file_chunks_file ON file_chunks(file_id);
 CREATE INDEX IF NOT EXISTS idx_chunk_replicas_chunk ON chunk_replicas(chunk_id);
 CREATE INDEX IF NOT EXISTS idx_chunk_replicas_backend ON chunk_replicas(backend_id);
 CREATE INDEX IF NOT EXISTS idx_chunk_replicas_node ON chunk_replicas(node_id);
-CREATE INDEX IF NOT EXISTS idx_s3_credentials_access_key ON s3_credentials(access_key);
-CREATE INDEX IF NOT EXISTS idx_s3_credentials_user ON s3_credentials(user_id);
-CREATE INDEX IF NOT EXISTS idx_multipart_uploads_volume ON multipart_uploads(volume_id);
-CREATE INDEX IF NOT EXISTS idx_multipart_uploads_status ON multipart_uploads(status);
 
 -- ═══════════════════════════════════════════════════════════════
 -- S3_CREDENTIALS: access keys for S3-compatible API access
@@ -262,6 +258,11 @@ CREATE TABLE IF NOT EXISTS multipart_parts (
     backend_path    TEXT NOT NULL,          -- temp chunk path on disk
     PRIMARY KEY (upload_id, part_number)
 );
+
+CREATE INDEX IF NOT EXISTS idx_s3_credentials_access_key ON s3_credentials(access_key);
+CREATE INDEX IF NOT EXISTS idx_s3_credentials_user ON s3_credentials(user_id);
+CREATE INDEX IF NOT EXISTS idx_multipart_uploads_volume ON multipart_uploads(volume_id);
+CREATE INDEX IF NOT EXISTS idx_multipart_uploads_status ON multipart_uploads(status);
 
 -- ═══════════════════════════════════════════════════════════════
 -- SMART_DATA: S.M.A.R.T. disk health metrics per physical device
