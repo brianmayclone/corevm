@@ -5,11 +5,12 @@
 //! and aggregated. All mutating operations are logged to the event log.
 
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::auth::middleware::{AuthUser, AppError};
@@ -745,4 +746,61 @@ pub async fn delete_s3_credential(
         Some("s3_credential"), Some(&id), Some(&host_id));
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── iSCSI ACLs ───────────────────────────────────────────
+
+/// GET /api/san/iscsi/acls
+pub async fn list_iscsi_acls(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, AppError> {
+    let (client, _) = any_san_client(&state)?;
+    let volume_id = query.get("volume_id").map(|s| s.as_str());
+    client.list_iscsi_acls(volume_id).await.map(Json).map_err(san_err)
+}
+
+/// POST /api/san/iscsi/acls
+pub async fn create_iscsi_acl(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Json(body): Json<Value>,
+) -> Result<(StatusCode, Json<Value>), AppError> {
+    let (client, host_id) = any_san_client(&state)?;
+    let iqn = body.get("initiator_iqn").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let result = client.create_iscsi_acl(&body).await.map_err(san_err)?;
+
+    let db = state.db.lock().map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    EventService::log(&db, "info", "san",
+        &format!("iSCSI ACL created for initiator '{}'", iqn),
+        Some("iscsi_acl"), None, Some(&host_id));
+
+    Ok((StatusCode::CREATED, Json(result)))
+}
+
+/// DELETE /api/san/iscsi/acls/{id}
+pub async fn delete_iscsi_acl(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    let (client, host_id) = any_san_client(&state)?;
+    client.delete_iscsi_acl(&id).await.map_err(san_err)?;
+
+    let db = state.db.lock().map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    EventService::log(&db, "info", "san",
+        &format!("iSCSI ACL deleted (id={})", id),
+        Some("iscsi_acl"), Some(&id), Some(&host_id));
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// GET /api/san/iscsi/targets
+pub async fn list_iscsi_targets(
+    State(state): State<Arc<ClusterState>>,
+    _user: AuthUser,
+) -> Result<Json<Value>, AppError> {
+    let (client, _) = any_san_client(&state)?;
+    client.list_iscsi_targets().await.map(Json).map_err(san_err)
 }

@@ -208,6 +208,30 @@ impl SanClient {
         if resp.status().is_success() { Ok(()) } else { Err(format!("Delete failed: {}", resp.status())) }
     }
 
+    // ── iSCSI ACLs ───────────────────────────────────────────
+
+    pub async fn list_iscsi_acls(&self, volume_id: Option<&str>) -> Result<Value, String> {
+        let path = match volume_id {
+            Some(vid) => format!("/api/iscsi/acls?volume_id={}", vid),
+            None => "/api/iscsi/acls".to_string(),
+        };
+        self.get(&path).await
+    }
+
+    pub async fn create_iscsi_acl(&self, body: &Value) -> Result<Value, String> {
+        self.post("/api/iscsi/acls", body).await
+    }
+
+    pub async fn delete_iscsi_acl(&self, id: &str) -> Result<(), String> {
+        let url = format!("{}/api/iscsi/acls/{}", self.base_url, id);
+        let resp = self.http.delete(&url).send().await.map_err(|e| format!("SAN request failed ({}): {}", url, e))?;
+        if resp.status().is_success() { Ok(()) } else { Err(format!("Delete failed: {}", resp.status())) }
+    }
+
+    pub async fn list_iscsi_targets(&self) -> Result<Value, String> {
+        self.get("/api/iscsi/targets").await
+    }
+
     // ── Internal HTTP helpers ─────────────────────────────────────
 
     async fn get(&self, path: &str) -> Result<Value, String> {
