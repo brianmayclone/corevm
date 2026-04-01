@@ -292,6 +292,9 @@ async fn main() {
     engine::discovery::spawn(Arc::clone(&state));
     tracing::info!("Discovery beacon started");
 
+    engine::dedup::spawn(Arc::clone(&state));
+    tracing::info!("Dedup engine started ({}s interval)", state.config.dedup.interval_secs);
+
     // ── Build router ────────────────────────────────────────────────
     let app = api::router()
         .layer(CorsLayer::permissive())

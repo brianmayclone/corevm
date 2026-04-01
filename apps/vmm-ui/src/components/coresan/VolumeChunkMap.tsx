@@ -8,7 +8,7 @@ import Card from '../Card'
 import { formatBytes } from '../../utils/format'
 
 /** Health of a logical chunk based on how many nodes have it */
-type ChunkHealth = 'protected' | 'degraded' | 'lost' | 'empty'
+type ChunkHealth = 'protected' | 'degraded' | 'lost' | 'empty' | 'dedup_protected' | 'dedup_degraded'
 
 interface ConsolidatedChunk {
   file_id: number
@@ -18,13 +18,17 @@ interface ConsolidatedChunk {
   sha256: string
   health: ChunkHealth
   nodes: { node_id: string; hostname: string; state: string }[]
+  deduplicated: boolean
+  dedup_sha256: string | null
 }
 
 const healthColor: Record<ChunkHealth, string> = {
-  protected: '#22c55e', // green — on enough nodes
-  degraded: '#eab308',  // yellow — exists but under-replicated
-  lost: '#ef4444',      // red — zero synced copies
-  empty: '#1e293b',     // dark — unallocated space
+  protected: '#22c55e',
+  degraded: '#eab308',
+  lost: '#ef4444',
+  empty: '#1e293b',
+  dedup_protected: '#a855f7',
+  dedup_degraded: '#d97706',
 }
 
 const healthBorder: Record<ChunkHealth, string> = {
@@ -32,6 +36,8 @@ const healthBorder: Record<ChunkHealth, string> = {
   degraded: '#ca8a04',
   lost: '#dc2626',
   empty: '#334155',
+  dedup_protected: '#9333ea',
+  dedup_degraded: '#b45309',
 }
 
 const healthLabels: Record<ChunkHealth, string> = {
@@ -39,6 +45,8 @@ const healthLabels: Record<ChunkHealth, string> = {
   degraded: 'Degraded',
   lost: 'Lost',
   empty: 'Free',
+  dedup_protected: 'Dedup (Protected)',
+  dedup_degraded: 'Dedup (Degraded)',
 }
 
 export default function VolumeChunkMap() {
@@ -122,6 +130,8 @@ export default function VolumeChunkMap() {
           sha256: c.sha256,
           health: 'lost',
           nodes: [],
+          deduplicated: c.deduplicated || false,
+          dedup_sha256: c.dedup_sha256 || null,
         })
       }
       const entry = map.get(key)!
@@ -141,9 +151,9 @@ export default function VolumeChunkMap() {
       const syncedNodes = chunk.nodes.filter(n => n.state === 'synced').length
       const syncingNodes = chunk.nodes.filter(n => n.state === 'syncing').length
       if (syncedNodes >= required) {
-        chunk.health = 'protected'
+        chunk.health = chunk.deduplicated ? 'dedup_protected' : 'protected'
       } else if (syncedNodes > 0 || syncingNodes > 0) {
-        chunk.health = 'degraded'
+        chunk.health = chunk.deduplicated ? 'dedup_degraded' : 'degraded'
       } else {
         chunk.health = 'lost'
       }
@@ -166,7 +176,7 @@ export default function VolumeChunkMap() {
 
   // Stats
   const stats = useMemo(() => {
-    const s = { protected: 0, degraded: 0, lost: 0, empty: emptySlots }
+    const s: Record<ChunkHealth, number> = { protected: 0, degraded: 0, lost: 0, empty: emptySlots, dedup_protected: 0, dedup_degraded: 0 }
     for (const c of consolidated) {
       s[c.health]++
     }
@@ -216,7 +226,11 @@ export default function VolumeChunkMap() {
 
       {/* Legend */}
       <div className="flex items-center gap-5 text-xs flex-wrap">
-        {(['protected', 'degraded', 'lost', 'empty'] as ChunkHealth[]).map(h => (
+        {([
+          'protected', 'degraded', 'lost',
+          ...(stats.dedup_protected > 0 || stats.dedup_degraded > 0 ? ['dedup_protected', 'dedup_degraded'] as ChunkHealth[] : []),
+          'empty',
+        ] as ChunkHealth[]).map(h => (
           <span key={h} className="flex items-center gap-1.5">
             <span className="w-3 h-3 rounded-sm" style={{ background: healthColor[h], border: `1px solid ${healthBorder[h]}` }} />
             {healthLabels[h]}: {stats[h]}
@@ -232,6 +246,9 @@ export default function VolumeChunkMap() {
             {consolidated.map((chunk) => {
               const totalBlocks = consolidated.length + emptySlots
               const blockSize = totalBlocks > 5000 ? 4 : totalBlocks > 2000 ? 6 : totalBlocks > 500 ? 8 : 12
+              const isDedup = chunk.deduplicated && hoveredChunk?.deduplicated
+                && hoveredChunk.dedup_sha256 === chunk.dedup_sha256
+                && (hoveredChunk.file_id !== chunk.file_id || hoveredChunk.chunk_index !== chunk.chunk_index)
               return (
               <div
                 key={`${chunk.file_id}-${chunk.chunk_index}`}
@@ -241,8 +258,10 @@ export default function VolumeChunkMap() {
                   height: blockSize,
                   borderRadius: blockSize > 6 ? 2 : 1,
                   background: healthColor[chunk.health],
-                  border: `1px solid ${healthBorder[chunk.health]}`,
-                  opacity: hoveredChunk && hoveredChunk.file_id === chunk.file_id && hoveredChunk.chunk_index !== chunk.chunk_index
+                  border: isDedup
+                    ? '2px solid #e9d5ff'
+                    : `1px solid ${healthBorder[chunk.health]}`,
+                  opacity: hoveredChunk && hoveredChunk.file_id === chunk.file_id && hoveredChunk.chunk_index !== chunk.chunk_index && !isDedup
                     ? 0.4 : 1,
                   transform: hoveredChunk?.file_id === chunk.file_id && hoveredChunk?.chunk_index === chunk.chunk_index
                     ? 'scale(1.6)' : 'scale(1)',
@@ -298,6 +317,14 @@ export default function VolumeChunkMap() {
               <>
                 <span className="text-vmm-text-muted">SHA256:</span>
                 <span className="text-vmm-text font-mono text-[10px]">{hoveredChunk.sha256.slice(0, 16)}...</span>
+              </>
+            )}
+            {hoveredChunk.deduplicated && (
+              <>
+                <span className="text-vmm-text-muted">Dedup:</span>
+                <span style={{ color: '#a855f7' }}>
+                  {consolidated.filter(c => c.dedup_sha256 === hoveredChunk.dedup_sha256).length} references
+                </span>
               </>
             )}
           </div>

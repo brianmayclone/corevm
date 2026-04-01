@@ -26,13 +26,14 @@ pub struct RunningVm {
 
 /// Start a VM from config. Returns RunningVm on success.
 pub fn start_vm(config: &VmConfig, bios_paths: &[std::path::PathBuf]) -> Result<RunningVm, String> {
-    // Validate disk and ISO paths before allocating VM resources
+    // Validate disk and ISO paths before allocating VM resources.
+    // CoreSAN paths (/vmm/san/) are served via UDS, not the filesystem — skip exists() check.
     for (i, path) in config.disk_images.iter().enumerate() {
-        if !path.is_empty() && !std::path::Path::new(path).exists() {
+        if !path.is_empty() && !path.starts_with("/vmm/san/") && !std::path::Path::new(path).exists() {
             return Err(format!("Disk {}: '{}' not found", i, path));
         }
     }
-    if !config.iso_image.is_empty() && !std::path::Path::new(&config.iso_image).exists() {
+    if !config.iso_image.is_empty() && !config.iso_image.starts_with("/vmm/san/") && !std::path::Path::new(&config.iso_image).exists() {
         return Err(format!("ISO image '{}' not found", config.iso_image));
     }
 

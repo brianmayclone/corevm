@@ -11,51 +11,55 @@ pub struct VolumeInfo {
     pub ftt: u32,
     pub local_raid: String,
     pub chunk_size_bytes: u64,
+    pub dedup: bool,
     pub status: String,
     pub created_at: String,
 }
 
 impl VolumeService {
-    pub fn create(db: &Connection, id: &str, name: &str, ftt: u32, chunk_size: u64, local_raid: &str) -> Result<(), String> {
+    pub fn create(db: &Connection, id: &str, name: &str, ftt: u32, chunk_size: u64, local_raid: &str, dedup: bool) -> Result<(), String> {
         db.execute(
-            "INSERT INTO volumes (id, name, ftt, chunk_size_bytes, local_raid, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'online')",
-            rusqlite::params![id, name, ftt, chunk_size, local_raid],
+            "INSERT INTO volumes (id, name, ftt, chunk_size_bytes, local_raid, dedup, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'online')",
+            rusqlite::params![id, name, ftt, chunk_size, local_raid, dedup as i32],
         ).map_err(|e| format!("Failed to create volume: {}", e))?;
         Ok(())
     }
 
     pub fn get(db: &Connection, id: &str) -> Option<VolumeInfo> {
         db.query_row(
-            "SELECT id, name, ftt, local_raid, chunk_size_bytes, status, created_at FROM volumes WHERE id = ?1",
+            "SELECT id, name, ftt, local_raid, chunk_size_bytes, dedup, status, created_at FROM volumes WHERE id = ?1",
             rusqlite::params![id],
             |row| Ok(VolumeInfo {
                 id: row.get(0)?, name: row.get(1)?, ftt: row.get(2)?,
                 local_raid: row.get(3)?, chunk_size_bytes: row.get(4)?,
-                status: row.get(5)?, created_at: row.get(6)?,
+                dedup: row.get::<_, i32>(5)? != 0,
+                status: row.get(6)?, created_at: row.get(7)?,
             }),
         ).ok()
     }
 
     pub fn list(db: &Connection) -> Vec<VolumeInfo> {
         let mut stmt = db.prepare(
-            "SELECT id, name, ftt, local_raid, chunk_size_bytes, status, created_at FROM volumes ORDER BY name"
+            "SELECT id, name, ftt, local_raid, chunk_size_bytes, dedup, status, created_at FROM volumes ORDER BY name"
         ).unwrap();
         stmt.query_map([], |row| Ok(VolumeInfo {
             id: row.get(0)?, name: row.get(1)?, ftt: row.get(2)?,
             local_raid: row.get(3)?, chunk_size_bytes: row.get(4)?,
-            status: row.get(5)?, created_at: row.get(6)?,
+            dedup: row.get::<_, i32>(5)? != 0,
+            status: row.get(6)?, created_at: row.get(7)?,
         })).unwrap().filter_map(|r| r.ok()).collect()
     }
 
     pub fn list_online(db: &Connection) -> Vec<VolumeInfo> {
         let mut stmt = db.prepare(
-            "SELECT id, name, ftt, local_raid, chunk_size_bytes, status, created_at FROM volumes WHERE status = 'online'"
+            "SELECT id, name, ftt, local_raid, chunk_size_bytes, dedup, status, created_at FROM volumes WHERE status = 'online'"
         ).unwrap();
         stmt.query_map([], |row| Ok(VolumeInfo {
             id: row.get(0)?, name: row.get(1)?, ftt: row.get(2)?,
             local_raid: row.get(3)?, chunk_size_bytes: row.get(4)?,
-            status: row.get(5)?, created_at: row.get(6)?,
+            dedup: row.get::<_, i32>(5)? != 0,
+            status: row.get(6)?, created_at: row.get(7)?,
         })).unwrap().filter_map(|r| r.ok()).collect()
     }
 
@@ -73,6 +77,11 @@ impl VolumeService {
     pub fn update_local_raid(db: &Connection, id: &str, raid: &str) {
         log_err!(db.execute("UPDATE volumes SET local_raid = ?1 WHERE id = ?2", rusqlite::params![raid, id]),
             "VolumeService::update_local_raid");
+    }
+
+    pub fn update_dedup(db: &Connection, id: &str, dedup: bool) {
+        log_err!(db.execute("UPDATE volumes SET dedup = ?1 WHERE id = ?2", rusqlite::params![dedup as i32, id]),
+            "VolumeService::update_dedup");
     }
 
     pub fn update_status(db: &Connection, id: &str, status: &str) {

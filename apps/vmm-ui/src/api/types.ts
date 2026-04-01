@@ -396,6 +396,15 @@ export interface Alarm {
 
 // ── CoreSAN (Software-Defined Storage) ──────────────────────────────────
 
+export interface DedupStats {
+  logical_bytes: number
+  physical_bytes: number
+  saved_bytes: number
+  dedup_ratio: number
+  dedup_chunk_count: number
+  pending_chunk_count: number
+}
+
 export interface CoreSanVolume {
   id: string
   name: string
@@ -409,6 +418,8 @@ export interface CoreSanVolume {
   free_bytes: number
   backend_count: number
   created_at: string
+  dedup: boolean
+  dedup_stats: DedupStats | null
 }
 
 export interface CoreSanBackend {
@@ -528,6 +539,8 @@ export interface ChunkMapEntry {
   backend_path: string
   node_id: string
   node_hostname: string
+  deduplicated: boolean
+  dedup_sha256: string | null
 }
 
 export interface ChunkMapBackend {

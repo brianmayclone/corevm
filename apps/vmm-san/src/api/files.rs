@@ -587,6 +587,8 @@ pub struct ChunkMapEntry {
     pub backend_path: String,
     pub node_id: String,
     pub node_hostname: String,
+    pub deduplicated: bool,
+    pub dedup_sha256: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -681,7 +683,8 @@ pub async fn chunk_map(
                       ELSE 'error' END AS best_state,
                     MIN(cr.backend_id), COALESCE(MIN(b.path), 'remote'),
                     cr.node_id,
-                    COALESCE(MIN(p.hostname), cr.node_id)
+                    COALESCE(MIN(p.hostname), cr.node_id),
+                    fc.dedup_sha256
              FROM chunk_replicas cr
              JOIN file_chunks fc ON fc.id = cr.chunk_id
              JOIN file_map fm ON fm.id = fc.file_id
@@ -698,6 +701,7 @@ pub async fn chunk_map(
             if node_id == state.node_id {
                 hostname = state.hostname.clone();
             }
+            let dedup_sha256: Option<String> = row.get(10).ok().flatten();
             Ok(ChunkMapEntry {
                 chunk_index: row.get(0)?,
                 file_id: row.get(1)?,
@@ -709,6 +713,8 @@ pub async fn chunk_map(
                 backend_path: row.get(7)?,
                 node_id,
                 node_hostname: hostname,
+                deduplicated: dedup_sha256.is_some(),
+                dedup_sha256,
             })
         }).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
         rows.filter_map(|r| r.ok()).collect()

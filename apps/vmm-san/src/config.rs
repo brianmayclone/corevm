@@ -20,6 +20,8 @@ pub struct CoreSanConfig {
     #[serde(default)]
     pub integrity: IntegritySection,
     #[serde(default)]
+    pub dedup: DedupSection,
+    #[serde(default)]
     pub logging: LoggingSection,
     #[serde(default)]
     pub cluster: ClusterSection,
@@ -99,6 +101,14 @@ pub struct IntegritySection {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct DedupSection {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_dedup_interval")]
+    pub interval_secs: u64,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct LoggingSection {
     #[serde(default = "default_log_level")]
     pub level: String,
@@ -132,6 +142,7 @@ fn default_benchmark_interval() -> u64 { 300 }
 fn default_bandwidth_test_size() -> u32 { 64 }
 fn default_integrity_interval() -> u64 { 3600 }
 fn default_repair_interval() -> u64 { 60 }
+fn default_dedup_interval() -> u64 { 300 }
 fn default_log_level() -> String { "info".into() }
 
 impl Default for ServerSection {
@@ -184,6 +195,14 @@ impl Default for IntegritySection {
         }
     }
 }
+impl Default for DedupSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_secs: default_dedup_interval(),
+        }
+    }
+}
 impl Default for LoggingSection {
     fn default() -> Self {
         Self { level: default_log_level(), log_file: None }
@@ -199,6 +218,7 @@ impl Default for CoreSanConfig {
             replication: Default::default(),
             benchmark: Default::default(),
             integrity: Default::default(),
+            dedup: Default::default(),
             logging: Default::default(),
             cluster: Default::default(),
         }

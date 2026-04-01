@@ -67,6 +67,15 @@ pub fn chunk_path(backend_path: &str, volume_id: &str, file_id: i64, chunk_index
         .join(format!("chunk_{:06}", chunk_index))
 }
 
+/// Build the filesystem path for a content-addressed dedup chunk.
+pub fn dedup_chunk_path(backend_path: &str, volume_id: &str, sha256: &str) -> PathBuf {
+    Path::new(backend_path)
+        .join(".coresan")
+        .join(volume_id)
+        .join(".dedup")
+        .join(sha256)
+}
+
 /// Select backend(s) for a new chunk based on local RAID policy.
 /// Returns Vec of (backend_id, backend_path) — 1 for stripe, N for mirror.
 pub fn place_chunk(
@@ -180,10 +189,10 @@ pub fn read_chunk_data(
     let mut result = Vec::with_capacity(size as usize);
 
     for range in ranges {
-        // Find ALL local replicas for this chunk with expected SHA256
-        let replicas: Vec<(String, String, String)> = {
+        // Find ALL local replicas for this chunk with expected SHA256 and dedup status
+        let replicas: Vec<(String, String, String, Option<String>)> = {
             let mut stmt = db.prepare(
-                "SELECT cr.backend_id, b.path, COALESCE(fc.sha256, '') FROM chunk_replicas cr
+                "SELECT cr.backend_id, b.path, COALESCE(fc.sha256, ''), fc.dedup_sha256 FROM chunk_replicas cr
                  JOIN backends b ON b.id = cr.backend_id
                  JOIN file_chunks fc ON fc.id = cr.chunk_id
                  WHERE fc.file_id = ?1 AND fc.chunk_index = ?2
@@ -191,15 +200,19 @@ pub fn read_chunk_data(
             ).unwrap();
             stmt.query_map(
                 rusqlite::params![file_id, range.chunk_index, node_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             ).unwrap().filter_map(|r| r.ok()).collect()
         };
 
         let mut read_ok = false;
 
         // Try each local replica until one succeeds with valid data
-        for (backend_id, bp, expected_sha) in &replicas {
-            let path = chunk_path(bp, volume_id, file_id, range.chunk_index);
+        for (backend_id, bp, expected_sha, dedup_sha) in &replicas {
+            let path = if let Some(ref dsha) = dedup_sha {
+                dedup_chunk_path(bp, volume_id, dsha)
+            } else {
+                chunk_path(bp, volume_id, file_id, range.chunk_index)
+            };
 
             // For full-chunk reads (offset=0, size=full), verify SHA256 before serving.
             // For partial reads within a chunk, skip verification (too expensive for FUSE seeks).

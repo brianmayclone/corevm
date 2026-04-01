@@ -26,6 +26,8 @@ interface Props {
   setNewVolSelectedHosts: (v: string[] | ((prev: string[]) => string[])) => void
   newVolProtocols: string[]
   setNewVolProtocols: (v: string[]) => void
+  newVolDedup: boolean
+  setNewVolDedup: (v: boolean) => void
   newVolError: string
   volumes: CoreSanVolume[]
 }
@@ -33,7 +35,7 @@ interface Props {
 export default function CreateVolumeDialog({
   open, onClose, onSubmit, status, sanHosts, availableHosts,
   newVolName, setNewVolName, newVolSizeGb, setNewVolSizeGb, newVolFtt, setNewVolFtt, newVolRaid, setNewVolRaid,
-  newVolSelectedHosts, setNewVolSelectedHosts, newVolProtocols, setNewVolProtocols, newVolError, volumes,
+  newVolSelectedHosts, setNewVolSelectedHosts, newVolProtocols, setNewVolProtocols, newVolDedup, setNewVolDedup, newVolError, volumes,
 }: Props) {
   // RAID disk requirements
   const claimedDisks = status?.claimed_disks || 0
@@ -113,6 +115,23 @@ export default function CreateVolumeDialog({
               {newVolRaid} requires {raidMinDisks} claimed disks, but only {claimedDisks} available. Claim more disks first.
             </div>
           )}
+        </FormField>
+
+        <FormField label="Deduplication">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-sm text-vmm-text">{newVolDedup ? 'Enabled' : 'Disabled'}</div>
+              <div className="text-xs text-vmm-text-muted">Periodically consolidates identical data blocks to reduce storage usage.</div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setNewVolDedup(!newVolDedup)}
+              className={`relative w-11 h-6 rounded-full transition-colors cursor-pointer
+                ${newVolDedup ? 'bg-vmm-accent' : 'bg-vmm-border-light'}`}>
+              <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform
+                ${newVolDedup ? 'translate-x-5' : 'translate-x-0'}`} />
+            </button>
+          </div>
         </FormField>
 
         {/* Access Protocols */}

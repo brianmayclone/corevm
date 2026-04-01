@@ -82,8 +82,18 @@ fn run_rebalance(state: &CoreSanState) {
             }
         };
 
-        // Read source chunk
-        let src = chunk::chunk_path(old_backend_path, volume_id, file_id, chunk_index);
+        // Check if this chunk is deduplicated
+        let dedup_sha256: Option<String> = db.query_row(
+            "SELECT dedup_sha256 FROM file_chunks WHERE id = ?1",
+            rusqlite::params![chunk_id], |row| row.get(0),
+        ).ok().flatten();
+
+        // Read source chunk (resolve dedup path if applicable)
+        let src = if let Some(ref dsha) = dedup_sha256 {
+            chunk::dedup_chunk_path(old_backend_path, volume_id, dsha)
+        } else {
+            chunk::chunk_path(old_backend_path, volume_id, file_id, chunk_index)
+        };
         let src_data = match std::fs::read(&src) {
             Ok(d) => d,
             Err(e) => {
@@ -99,7 +109,11 @@ fn run_rebalance(state: &CoreSanState) {
         let src_sha = format!("{:x}", Sha256::digest(&src_data));
 
         // Atomic write to target: tmp → fsync → rename
-        let dst = chunk::chunk_path(&target_path, volume_id, file_id, chunk_index);
+        let dst = if let Some(ref dsha) = dedup_sha256 {
+            chunk::dedup_chunk_path(&target_path, volume_id, dsha)
+        } else {
+            chunk::chunk_path(&target_path, volume_id, file_id, chunk_index)
+        };
         if let Some(parent) = dst.parent() {
             if std::fs::create_dir_all(parent).is_err() {
                 failed += 1;
@@ -148,6 +162,21 @@ fn run_rebalance(state: &CoreSanState) {
             // Remove the destination copy since DB wasn't updated
             let _ = std::fs::remove_file(&dst);
             continue;
+        }
+
+        // Update dedup_store if this was a deduplicated chunk
+        if let Some(ref dsha) = dedup_sha256 {
+            db.execute(
+                "INSERT INTO dedup_store (sha256, volume_id, backend_id, size_bytes, ref_count)
+                 SELECT ?1, ?2, ?3, size_bytes, ref_count FROM dedup_store
+                 WHERE sha256 = ?1 AND volume_id = ?2 AND backend_id = ?4
+                 ON CONFLICT(sha256, volume_id, backend_id) DO UPDATE SET ref_count = excluded.ref_count",
+                rusqlite::params![dsha, volume_id, &target_id, old_backend_id],
+            ).ok();
+            db.execute(
+                "DELETE FROM dedup_store WHERE sha256 = ?1 AND volume_id = ?2 AND backend_id = ?3",
+                rusqlite::params![dsha, volume_id, old_backend_id],
+            ).ok();
         }
 
         // Only NOW remove the old file — DB already points to the new location
@@ -265,9 +294,23 @@ fn repair_local_mirrors(db: &rusqlite::Connection, state: &CoreSanState) {
                     None => continue,
                 };
 
+                // Check dedup status for path resolution
+                let dedup_sha: Option<String> = db.query_row(
+                    "SELECT dedup_sha256 FROM file_chunks WHERE id = ?1",
+                    rusqlite::params![chunk_id], |row| row.get(0),
+                ).ok().flatten();
+
                 // Copy chunk from source to missing backend
-                let src = chunk::chunk_path(source_path, volume_id, *file_id, *chunk_index);
-                let dst = chunk::chunk_path(backend_path, volume_id, *file_id, *chunk_index);
+                let src = if let Some(ref dsha) = dedup_sha {
+                    chunk::dedup_chunk_path(source_path, volume_id, dsha)
+                } else {
+                    chunk::chunk_path(source_path, volume_id, *file_id, *chunk_index)
+                };
+                let dst = if let Some(ref dsha) = dedup_sha {
+                    chunk::dedup_chunk_path(backend_path, volume_id, dsha)
+                } else {
+                    chunk::chunk_path(backend_path, volume_id, *file_id, *chunk_index)
+                };
 
                 if !src.exists() {
                     continue;

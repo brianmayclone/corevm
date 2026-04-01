@@ -78,6 +78,7 @@ export default function StorageCoresan() {
   const [editVolumeOpen, setEditVolumeOpen] = useState(false)
   const [editFtt, setEditFtt] = useState(0)
   const [editRaid, setEditRaid] = useState('stripe')
+  const [editDedup, setEditDedup] = useState(false)
   const [editError, setEditError] = useState('')
   const [editSaving, setEditSaving] = useState(false)
 
@@ -91,6 +92,7 @@ export default function StorageCoresan() {
   const [newVolRaid, setNewVolRaid] = useState('stripe')
   const [newVolSelectedHosts, setNewVolSelectedHosts] = useState<string[]>([])
   const [newVolProtocols, setNewVolProtocols] = useState<string[]>(['fuse'])
+  const [newVolDedup, setNewVolDedup] = useState(false)
   const [newVolError, setNewVolError] = useState('')
 
   // Add host form
@@ -175,7 +177,7 @@ export default function StorageCoresan() {
     const resp = await sanFetch(sanApi('/api/volumes'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: newVolName, max_size_bytes: newVolSizeGb * 1024 * 1024 * 1024, ftt: newVolFtt, local_raid: newVolRaid, access_protocols: newVolProtocols }),
+      body: JSON.stringify({ name: newVolName, max_size_bytes: newVolSizeGb * 1024 * 1024 * 1024, ftt: newVolFtt, local_raid: newVolRaid, access_protocols: newVolProtocols, dedup: newVolDedup }),
     })
     if (!resp.ok) { setNewVolError(await resp.text() || 'Failed to create volume'); return }
     setCreateVolumeOpen(false)
@@ -256,6 +258,7 @@ export default function StorageCoresan() {
     if (!sel) return
     setEditFtt(sel.ftt)
     setEditRaid(sel.local_raid)
+    setEditDedup(sel.dedup || false)
     setEditError('')
     setEditVolumeOpen(true)
   }
@@ -268,7 +271,7 @@ export default function StorageCoresan() {
       const resp = await sanFetch(sanApi(`/api/volumes/${sel.id}`), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ftt: editFtt, local_raid: editRaid }),
+        body: JSON.stringify({ ftt: editFtt, local_raid: editRaid, dedup: editDedup }),
       })
       if (!resp.ok) {
         const data = await resp.text()
@@ -796,6 +799,11 @@ export default function StorageCoresan() {
                         <span>{vol.backend_count} backend{vol.backend_count !== 1 ? 's' : ''}</span>
                         <span>Effective: {formatBytes(effectiveCapacity)}</span>
                       </div>
+                      {vol.dedup && vol.dedup_stats && vol.dedup_stats.saved_bytes > 0 && (
+                        <div className="flex items-center gap-1.5 mt-1 text-xs" style={{ color: '#a855f7' }}>
+                          <span>Dedup: {formatBytes(vol.dedup_stats.saved_bytes)} saved ({vol.dedup_stats.dedup_ratio.toFixed(1)}x)</span>
+                        </div>
+                      )}
                     </>
                   )}
                 </div>
@@ -851,6 +859,18 @@ export default function StorageCoresan() {
                   <SpecRow label="Chunk Size" value={`${sel.chunk_size_bytes / (1024 * 1024)} MB`} icon={<Zap size={14} />} />
                   <SpecRow label="Backends" value={`${sel.backend_count}`} icon={<HardDrive size={14} />} />
                 </div>
+                {sel.dedup && sel.dedup_stats && (
+                  <div className="mt-3 pt-3 border-t border-vmm-border">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      <SpecRow label="Deduplication" value={`Enabled \u00b7 ${sel.dedup_stats.dedup_ratio.toFixed(2)}x ratio`} />
+                      <SpecRow label="Saved" value={formatBytes(sel.dedup_stats.saved_bytes)} />
+                      <SpecRow label="Dedup Chunks" value={`${sel.dedup_stats.dedup_chunk_count}`} />
+                      {sel.dedup_stats.pending_chunk_count > 0 && (
+                        <SpecRow label="Pending" value={`${sel.dedup_stats.pending_chunk_count} chunks`} />
+                      )}
+                    </div>
+                  </div>
+                )}
               </Card>
 
               {/* Repair Result */}
@@ -1072,6 +1092,7 @@ export default function StorageCoresan() {
         newVolRaid={newVolRaid} setNewVolRaid={setNewVolRaid}
         newVolSelectedHosts={newVolSelectedHosts} setNewVolSelectedHosts={setNewVolSelectedHosts}
         newVolProtocols={newVolProtocols} setNewVolProtocols={setNewVolProtocols}
+        newVolDedup={newVolDedup} setNewVolDedup={setNewVolDedup}
         newVolError={newVolError}
         volumes={volumes}
       />
@@ -1188,7 +1209,7 @@ export default function StorageCoresan() {
       {/* Edit Volume Dialog */}
       {editVolumeOpen && sel && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setEditVolumeOpen(false)}>
-          <div className="bg-vmm-card border border-vmm-border rounded-xl shadow-xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
+          <div className="bg-vmm-surface border border-vmm-border rounded-xl shadow-xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-base font-bold text-vmm-text">Edit Volume: {sel.name}</h3>
               <button onClick={() => setEditVolumeOpen(false)} className="p-1 rounded hover:bg-vmm-bg text-vmm-text-muted cursor-pointer">
@@ -1217,6 +1238,23 @@ export default function StorageCoresan() {
                   <option value="mirror">Mirror — Mirror across disks</option>
                   <option value="stripe_mirror">Stripe+Mirror — Striped mirrors</option>
                 </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-vmm-text-muted mb-1">Deduplication</label>
+                <div className="flex items-center justify-between px-3 py-2 rounded-lg bg-vmm-bg border border-vmm-border">
+                  <div>
+                    <div className="text-sm text-vmm-text">{editDedup ? 'Enabled' : 'Disabled'}</div>
+                    <div className="text-xs text-vmm-text-muted">Consolidates identical data blocks to save space.</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setEditDedup(!editDedup)}
+                    className={`relative w-11 h-6 rounded-full transition-colors cursor-pointer shrink-0 ml-3
+                      ${editDedup ? 'bg-vmm-accent' : 'bg-vmm-border-light'}`}>
+                    <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform
+                      ${editDedup ? 'translate-x-5' : 'translate-x-0'}`} />
+                  </button>
+                </div>
               </div>
               {editError && (
                 <div className="text-sm text-vmm-danger bg-vmm-danger/10 border border-vmm-danger/30 rounded-lg px-3 py-2">{editError}</div>

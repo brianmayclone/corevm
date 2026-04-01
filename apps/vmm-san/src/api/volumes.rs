@@ -23,6 +23,8 @@ pub struct CreateVolumeRequest {
     pub chunk_size_bytes: u64,
     #[serde(default = "default_access_protocols")]
     pub access_protocols: Vec<String>,
+    #[serde(default)]
+    pub dedup: bool,
 }
 
 fn default_ftt() -> u32 { 1 }
@@ -35,6 +37,7 @@ pub struct UpdateVolumeRequest {
     pub ftt: Option<u32>,
     pub local_raid: Option<String>,
     pub access_protocols: Option<Vec<String>>,
+    pub dedup: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -51,6 +54,68 @@ pub struct VolumeResponse {
     pub backend_count: u32,
     pub created_at: String,
     pub access_protocols: Vec<String>,
+    pub dedup: bool,
+    pub dedup_stats: Option<DedupStats>,
+}
+
+#[derive(Serialize)]
+pub struct DedupStats {
+    pub logical_bytes: u64,
+    pub physical_bytes: u64,
+    pub saved_bytes: u64,
+    pub dedup_ratio: f64,
+    pub dedup_chunk_count: u64,
+    pub pending_chunk_count: u64,
+}
+
+fn query_dedup_stats(db: &rusqlite::Connection, volume_id: &str, dedup: bool) -> Option<DedupStats> {
+    if !dedup {
+        return None;
+    }
+
+    let logical_bytes: u64 = db.query_row(
+        "SELECT COALESCE(SUM(fc.size_bytes), 0)
+         FROM file_chunks fc
+         JOIN file_map fm ON fm.id = fc.file_id
+         WHERE fm.volume_id = ?1 AND fc.dedup_sha256 IS NOT NULL",
+        rusqlite::params![volume_id], |row| row.get(0),
+    ).unwrap_or(0);
+
+    let physical_bytes: u64 = db.query_row(
+        "SELECT COALESCE(SUM(size_bytes), 0) FROM dedup_store WHERE volume_id = ?1",
+        rusqlite::params![volume_id], |row| row.get(0),
+    ).unwrap_or(0);
+
+    let dedup_chunk_count: u64 = db.query_row(
+        "SELECT COUNT(*) FROM dedup_store WHERE volume_id = ?1",
+        rusqlite::params![volume_id], |row| row.get(0),
+    ).unwrap_or(0);
+
+    let pending_chunk_count: u64 = db.query_row(
+        "SELECT COUNT(*) FROM (
+            SELECT fc.sha256 FROM file_chunks fc
+            JOIN file_map fm ON fm.id = fc.file_id
+            WHERE fm.volume_id = ?1 AND fc.dedup_sha256 IS NULL AND fc.sha256 != ''
+            GROUP BY fc.sha256 HAVING COUNT(*) > 1
+        )",
+        rusqlite::params![volume_id], |row| row.get(0),
+    ).unwrap_or(0);
+
+    let saved_bytes = logical_bytes.saturating_sub(physical_bytes);
+    let dedup_ratio = if physical_bytes > 0 {
+        logical_bytes as f64 / physical_bytes as f64
+    } else {
+        1.0
+    };
+
+    Some(DedupStats {
+        logical_bytes,
+        physical_bytes,
+        saved_bytes,
+        dedup_ratio,
+        dedup_chunk_count,
+        pending_chunk_count,
+    })
 }
 
 /// POST /api/volumes — create a new volume with resilience policy.
@@ -141,9 +206,9 @@ pub async fn create(
     let protocols_json = serde_json::to_string(&body.access_protocols).unwrap_or_else(|_| "[\"fuse\"]".into());
 
     db.execute(
-        "INSERT INTO volumes (id, name, ftt, chunk_size_bytes, local_raid, max_size_bytes, access_protocols, status)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'online')",
-        rusqlite::params![&id, &body.name, body.ftt, body.chunk_size_bytes, &body.local_raid, body.max_size_bytes, &protocols_json],
+        "INSERT INTO volumes (id, name, ftt, chunk_size_bytes, local_raid, max_size_bytes, access_protocols, dedup, status)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'online')",
+        rusqlite::params![&id, &body.name, body.ftt, body.chunk_size_bytes, &body.local_raid, body.max_size_bytes, &protocols_json, body.dedup as i32],
     ).map_err(|e| (StatusCode::CONFLICT, format!("Failed to create volume: {}", e)))?;
 
     // Create FUSE mount point for this volume (only if FUSE protocol enabled)
@@ -204,6 +269,7 @@ pub async fn create(
         "chunk_size_bytes": body.chunk_size_bytes, "local_raid": &body.local_raid,
         "max_size_bytes": body.max_size_bytes,
         "access_protocols": &body.access_protocols,
+        "dedup": body.dedup,
     });
     let peers: Vec<String> = state.peers.iter()
         .filter(|p| p.status == crate::state::PeerStatus::Online)
@@ -240,6 +306,8 @@ pub async fn create(
         backend_count: 0,
         created_at: chrono::Utc::now().to_rfc3339(),
         access_protocols: body.access_protocols,
+        dedup: body.dedup,
+        dedup_stats: None,
     })))
 }
 
@@ -255,18 +323,21 @@ pub async fn list(
     ).unwrap_or(0);
 
     let mut stmt = db.prepare(
-        "SELECT id, name, ftt, local_raid, chunk_size_bytes, status, created_at, max_size_bytes, access_protocols
+        "SELECT id, name, ftt, local_raid, chunk_size_bytes, status, created_at, max_size_bytes, access_protocols, dedup
          FROM volumes ORDER BY name"
     ).unwrap();
 
     let volumes = stmt.query_map([], |row| {
+        let vol_id: String = row.get(0)?;
         let local_raid: String = row.get(3)?;
         // Calculate RAID-corrected capacity from claimed disks only
         let (total_bytes, free_bytes) = usable_capacity_for_raid_static(&db, &local_raid);
         let protocols_json: String = row.get::<_, String>(8).unwrap_or_else(|_| "[\"fuse\"]".into());
         let access_protocols: Vec<String> = serde_json::from_str(&protocols_json).unwrap_or_else(|_| vec!["fuse".into()]);
+        let dedup = row.get::<_, i32>(9).unwrap_or(0) != 0;
+        let dedup_stats = query_dedup_stats(&db, &vol_id, dedup);
         Ok(VolumeResponse {
-            id: row.get(0)?,
+            id: vol_id,
             name: row.get(1)?,
             ftt: row.get(2)?,
             local_raid,
@@ -278,6 +349,8 @@ pub async fn list(
             free_bytes,
             backend_count,
             access_protocols,
+            dedup,
+            dedup_stats,
         })
     }).unwrap().filter_map(|r| r.ok()).collect();
 
@@ -305,14 +378,17 @@ pub async fn get(
     ).unwrap_or(0);
 
     let vol = db.query_row(
-        "SELECT id, name, ftt, local_raid, chunk_size_bytes, status, created_at, max_size_bytes, access_protocols
+        "SELECT id, name, ftt, local_raid, chunk_size_bytes, status, created_at, max_size_bytes, access_protocols, dedup
          FROM volumes WHERE id = ?1",
         rusqlite::params![&id],
         |row| {
+            let vol_id: String = row.get(0)?;
             let protocols_json: String = row.get::<_, String>(8).unwrap_or_else(|_| "[\"fuse\"]".into());
             let access_protocols: Vec<String> = serde_json::from_str(&protocols_json).unwrap_or_else(|_| vec!["fuse".into()]);
+            let dedup = row.get::<_, i32>(9).unwrap_or(0) != 0;
+            let dedup_stats = query_dedup_stats(&db, &vol_id, dedup);
             Ok(VolumeResponse {
-                id: row.get(0)?,
+                id: vol_id,
                 name: row.get(1)?,
                 ftt: row.get(2)?,
                 local_raid: row.get(3)?,
@@ -324,6 +400,8 @@ pub async fn get(
                 free_bytes,
                 backend_count,
                 access_protocols,
+                dedup,
+                dedup_stats,
             })
         },
     ).map_err(|_| StatusCode::NOT_FOUND)?;
@@ -379,6 +457,11 @@ pub async fn update(
         let protocols_json = serde_json::to_string(protocols).unwrap_or_else(|_| "[\"fuse\"]".into());
         db.execute("UPDATE volumes SET access_protocols = ?1 WHERE id = ?2",
             rusqlite::params![&protocols_json, &id]).ok();
+    }
+
+    if let Some(dedup) = body.dedup {
+        db.execute("UPDATE volumes SET dedup = ?1 WHERE id = ?2",
+            rusqlite::params![dedup as i32, &id]).ok();
     }
 
     tracing::info!("Updated volume {} policy", id);

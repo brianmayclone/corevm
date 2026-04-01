@@ -29,10 +29,10 @@ pub fn spawn(state: Arc<CoreSanState>) {
 /// Run one full integrity check cycle — verifies all local chunk replicas.
 async fn run_integrity_check(state: &CoreSanState) {
     // Get all local synced chunk replicas with expected checksums
-    let chunks: Vec<(i64, i64, String, u32, String, String)> = {
+    let chunks: Vec<(i64, i64, String, u32, String, String, Option<String>)> = {
         let db = state.db.lock().unwrap();
         let mut stmt = db.prepare(
-            "SELECT fc.id, fc.file_id, fc.sha256, fc.chunk_index, cr.backend_id, b.path
+            "SELECT fc.id, fc.file_id, fc.sha256, fc.chunk_index, cr.backend_id, b.path, fc.dedup_sha256
              FROM chunk_replicas cr
              JOIN file_chunks fc ON fc.id = cr.chunk_id
              JOIN backends b ON b.id = cr.backend_id
@@ -41,7 +41,7 @@ async fn run_integrity_check(state: &CoreSanState) {
         ).unwrap();
         stmt.query_map(
             rusqlite::params![&state.node_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
         ).unwrap().filter_map(|r| r.ok()).collect()
     };
 
@@ -54,7 +54,7 @@ async fn run_integrity_check(state: &CoreSanState) {
     let mut passed = 0u64;
     let mut failed = 0u64;
 
-    for (chunk_id, file_id, expected_sha256, chunk_index, backend_id, backend_path) in chunks {
+    for (chunk_id, file_id, expected_sha256, chunk_index, backend_id, backend_path, dedup_sha256) in chunks {
         // Get volume_id for chunk path
         let volume_id: String = {
             let db = state.db.lock().unwrap();
@@ -64,7 +64,11 @@ async fn run_integrity_check(state: &CoreSanState) {
             ).unwrap_or_default()
         };
 
-        let path = chunk::chunk_path(&backend_path, &volume_id, file_id, chunk_index);
+        let path = if let Some(ref dsha) = dedup_sha256 {
+            chunk::dedup_chunk_path(&backend_path, &volume_id, dsha)
+        } else {
+            chunk::chunk_path(&backend_path, &volume_id, file_id, chunk_index)
+        };
 
         let actual_sha256 = match tokio::fs::read(&path).await {
             Ok(data) => format!("{:x}", Sha256::digest(&data)),

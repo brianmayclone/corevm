@@ -85,6 +85,8 @@ export default function Storage() {
   const sanTotalBytes = sanStatus?.volumes?.reduce((s: number, v: any) => s + (v.total_bytes || 0), 0) || 0
   const sanFreeBytes = sanStatus?.volumes?.reduce((s: number, v: any) => s + (v.free_bytes || 0), 0) || 0
   const sanUsedBytes = sanTotalBytes - sanFreeBytes
+  const sanDedupSavedBytes = sanStatus?.volumes?.reduce((s: number, v: any) =>
+    s + (v.dedup_stats?.saved_bytes || 0), 0) || 0
 
   // Aggregate: local pools + CoreSAN
   const poolUsedBytes = stats?.used_bytes || 0
@@ -179,6 +181,9 @@ export default function Storage() {
             {sanUsedBytes > 0 && (
               <div className="h-full" style={{ width: `${Math.round((sanUsedBytes / totalBytes) * 100)}%`, background: '#8b5cf6' }} />
             )}
+            {sanDedupSavedBytes > 0 && (
+              <div className="h-full" style={{ width: `${Math.round((sanDedupSavedBytes / totalBytes) * 100)}%`, background: '#a855f7', opacity: 0.3 }} />
+            )}
           </div>
           <div className="flex items-center gap-5 text-xs text-vmm-text-muted flex-wrap">
             <span className="flex items-center gap-1.5">
@@ -192,6 +197,11 @@ export default function Storage() {
             {sanUsedBytes > 0 && (
               <span className="flex items-center gap-1.5">
                 <span className="w-2.5 h-2.5 rounded-full" style={{ background: '#8b5cf6' }} /> CoreSAN ({formatBytes(sanUsedBytes)})
+              </span>
+            )}
+            {sanDedupSavedBytes > 0 && (
+              <span className="flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-full" style={{ background: '#a855f7', opacity: 0.3 }} /> Dedup Saved ({formatBytes(sanDedupSavedBytes)})
               </span>
             )}
             <span className="flex items-center gap-1.5">

@@ -288,6 +288,24 @@ CREATE TABLE IF NOT EXISTS smart_data (
     raw_json            TEXT,
     collected_at        TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- ═══════════════════════════════════════════════════════════════
+-- DEDUP_STORE: content-addressed chunks for volume deduplication
+-- Each row is a unique physical chunk in .dedup/<sha256> on a backend
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS dedup_store (
+    sha256       TEXT NOT NULL,
+    volume_id    TEXT NOT NULL,
+    backend_id   TEXT NOT NULL,
+    size_bytes   INTEGER NOT NULL,
+    ref_count    INTEGER NOT NULL DEFAULT 1,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (sha256, volume_id, backend_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dedup_store_volume ON dedup_store(volume_id);
+CREATE INDEX IF NOT EXISTS idx_dedup_store_ref ON dedup_store(volume_id, ref_count);
 "#;
 
 /// Initialize the database: create tables and indexes.
@@ -343,6 +361,11 @@ fn migrate(db: &Connection) {
     db.execute_batch("ALTER TABLE volumes ADD COLUMN sync_mode TEXT NOT NULL DEFAULT 'async';").ok();
     // Volume size limit
     db.execute_batch("ALTER TABLE volumes ADD COLUMN max_size_bytes INTEGER NOT NULL DEFAULT 0;").ok();
+
+    // Dedup opt-in per volume
+    db.execute_batch("ALTER TABLE volumes ADD COLUMN dedup INTEGER NOT NULL DEFAULT 0;").ok();
+    // Dedup: tracks whether a chunk has been moved to the content-addressed store
+    db.execute_batch("ALTER TABLE file_chunks ADD COLUMN dedup_sha256 TEXT DEFAULT NULL;").ok();
 
     // Migrate chunk_replicas: remove FK on backend_id, change PK to (chunk_id, node_id)
     // SQLite can't ALTER constraints, so we recreate the table if the old schema has
