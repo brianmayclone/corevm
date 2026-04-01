@@ -265,6 +265,23 @@ CREATE INDEX IF NOT EXISTS idx_multipart_uploads_volume ON multipart_uploads(vol
 CREATE INDEX IF NOT EXISTS idx_multipart_uploads_status ON multipart_uploads(status);
 
 -- ═══════════════════════════════════════════════════════════════
+-- ISCSI_ACLS: initiator IQN access control per volume
+-- Only initiators with a matching ACL entry can log in to a target
+-- ═══════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS iscsi_acls (
+    id              TEXT PRIMARY KEY,
+    volume_id       TEXT NOT NULL REFERENCES volumes(id) ON DELETE CASCADE,
+    initiator_iqn   TEXT NOT NULL,
+    comment         TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(volume_id, initiator_iqn)
+);
+
+CREATE INDEX IF NOT EXISTS idx_iscsi_acls_volume ON iscsi_acls(volume_id);
+CREATE INDEX IF NOT EXISTS idx_iscsi_acls_iqn ON iscsi_acls(initiator_iqn);
+
+-- ═══════════════════════════════════════════════════════════════
 -- SMART_DATA: S.M.A.R.T. disk health metrics per physical device
 -- Collected every 5 minutes by the smart_monitor engine
 -- ═══════════════════════════════════════════════════════════════

@@ -124,7 +124,7 @@ pub async fn create(
     Json(body): Json<CreateVolumeRequest>,
 ) -> Result<(StatusCode, Json<VolumeResponse>), (StatusCode, String)> {
     // Validate access_protocols
-    let valid_protocols = ["fuse", "s3"];
+    let valid_protocols = ["fuse", "s3", "iscsi"];
     for proto in &body.access_protocols {
         if !valid_protocols.contains(&proto.as_str()) {
             return Err((StatusCode::BAD_REQUEST,
@@ -443,7 +443,7 @@ pub async fn update(
             rusqlite::params![raid, &id]).ok();
     }
     if let Some(ref protocols) = body.access_protocols {
-        let valid_protocols = ["fuse", "s3"];
+        let valid_protocols = ["fuse", "s3", "iscsi"];
         for proto in protocols {
             if !valid_protocols.contains(&proto.as_str()) {
                 return Err((StatusCode::BAD_REQUEST,

@@ -13,6 +13,7 @@ pub mod status;
 pub mod benchmark;
 pub mod disks;
 pub mod s3;
+pub mod iscsi;
 
 pub fn router() -> Router<Arc<CoreSanState>> {
     Router::new()
@@ -66,6 +67,11 @@ pub fn router() -> Router<Arc<CoreSanState>> {
         // ── S3 Credential Management ─────────────────────
         .route("/api/s3/credentials", get(s3::list).post(s3::create))
         .route("/api/s3/credentials/{id}", delete(s3::delete))
+
+        // ── iSCSI ACL Management ─────────────────────────────
+        .route("/api/iscsi/acls", get(iscsi::list_acls).post(iscsi::create_acl))
+        .route("/api/iscsi/acls/{id}", delete(iscsi::delete_acl))
+        .route("/api/iscsi/targets", get(iscsi::list_targets))
 
         // ── Benchmark ─────────────────────────────────────
         .route("/api/benchmark/results", get(benchmark::results))
