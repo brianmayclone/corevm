@@ -419,16 +419,19 @@ pub fn write_chunk_data(
                     }
                 }
 
-                // Clear dedup status and decrement ref_count
+                // Clear dedup status
                 db.execute(
                     "UPDATE file_chunks SET dedup_sha256 = NULL WHERE id = ?1",
                     rusqlite::params![chunk_id],
                 ).ok();
-                db.execute(
-                    "UPDATE dedup_store SET ref_count = ref_count - 1
-                     WHERE sha256 = ?1 AND volume_id = ?2",
-                    rusqlite::params![dsha, volume_id],
-                ).ok();
+                // Decrement ref_count per backend (each backend has its own dedup_store entry)
+                for (_cid, bid, _bp) in &chunk_backends {
+                    db.execute(
+                        "UPDATE dedup_store SET ref_count = ref_count - 1
+                         WHERE sha256 = ?1 AND volume_id = ?2 AND backend_id = ?3",
+                        rusqlite::params![dsha, volume_id, bid],
+                    ).ok();
+                }
 
                 tracing::debug!("CoW: un-deduplicated chunk file_id={} idx={} (sha256={})",
                     file_id, range.chunk_index, &dsha[..16.min(dsha.len())]);
@@ -459,12 +462,17 @@ pub fn write_chunk_data(
                 }
             }
 
-            // Read-modify-write: read existing chunk, patch, write back
+            // Read-modify-write: read existing chunk, patch, write back.
+            // IMPORTANT: Always ensure the buffer is full chunk_size so that
+            // partial writes don't produce undersized chunk files on disk.
+            // Undersized chunks corrupt data: subsequent writes read back the
+            // short file and zero-fill gaps that should contain real data.
+            let full = chunk_size as usize;
             let mut existing = std::fs::read(&path).unwrap_or_default();
-            let end = range.local_offset as usize + chunk_data_slice.len();
-            if existing.len() < end {
-                existing.resize(end, 0);
+            if existing.len() < full {
+                existing.resize(full, 0);
             }
+            let end = range.local_offset as usize + chunk_data_slice.len();
             existing[range.local_offset as usize..end].copy_from_slice(chunk_data_slice);
 
             // Atomic write: temp + fsync + rename
@@ -531,9 +539,14 @@ pub fn write_chunk_data(
                     if let Some(parent) = path.parent() {
                         std::fs::create_dir_all(parent).ok();
                     }
-                    let mut existing = Vec::new();
+                    // Fallback write: also read existing data if available,
+                    // and always produce a full-size chunk.
+                    let full = chunk_size as usize;
+                    let mut existing = std::fs::read(&path).unwrap_or_default();
+                    if existing.len() < full {
+                        existing.resize(full, 0);
+                    }
                     let end = range.local_offset as usize + chunk_data_slice.len();
-                    existing.resize(end, 0);
                     existing[range.local_offset as usize..end].copy_from_slice(chunk_data_slice);
 
                     if std::fs::write(&path, &existing).is_ok() {
