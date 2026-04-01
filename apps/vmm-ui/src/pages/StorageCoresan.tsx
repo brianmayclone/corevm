@@ -436,10 +436,10 @@ export default function StorageCoresan() {
         </div>
         <div className="flex items-center gap-2">
           <Button variant="ghost" onClick={refresh}><RefreshCw size={14} /></Button>
-          <Button variant="outline" onClick={openAutoClaim}>
+          <Button variant="outline" onClick={openAutoClaim} disabled={!sanAvailable}>
             <Disc size={14} /> Auto-Claim
           </Button>
-          <Button variant="primary" onClick={() => setCreateVolumeOpen(true)}>
+          <Button variant="primary" onClick={() => setCreateVolumeOpen(true)} disabled={!sanAvailable}>
             <Plus size={14} /> New Volume
           </Button>
         </div>
