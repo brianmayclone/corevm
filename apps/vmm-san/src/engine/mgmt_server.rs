@@ -110,6 +110,12 @@ async fn handle_connection(
                 // Not handled via mgmt socket — use REST API
                 send_response(&mut stream, MgmtResponseHeader::err(MgmtStatus::InvalidRequest), &[], &[]).await;
             }
+            MgmtCommand::ListIscsiVolumes => handle_list_iscsi_volumes(&state, &mut stream).await,
+            MgmtCommand::ListIscsiAcls => handle_list_iscsi_acls(&state, &key, &mut stream).await,
+            MgmtCommand::CreateIscsiAcl => handle_create_iscsi_acl(&state, &body, &mut stream).await,
+            MgmtCommand::DeleteIscsiAcl => handle_delete_iscsi_acl(&state, &key, &mut stream).await,
+            MgmtCommand::GetAluaState => handle_get_alua_state(&state, &key, &mut stream).await,
+            MgmtCommand::GetTargetPortGroups => handle_get_target_port_groups(&state, &key, &mut stream).await,
         }
     }
 
@@ -367,6 +373,146 @@ async fn handle_delete_credential(
     } else {
         send_response(stream, MgmtResponseHeader::err(MgmtStatus::NotFound), &[], &[]).await;
     }
+}
+
+// ── ListIscsiVolumes ────────────────────────────────────────────
+
+async fn handle_list_iscsi_volumes(
+    state: &CoreSanState,
+    stream: &mut UnixStream,
+) {
+    let volumes: Vec<serde_json::Value> = {
+        let db = state.db.lock().unwrap();
+        let mut stmt = db.prepare(
+            "SELECT id, name, status, max_size_bytes, access_protocols FROM volumes \
+             WHERE access_protocols LIKE '%iscsi%' AND status != 'deleted'"
+        ).unwrap();
+        stmt.query_map([], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "name": row.get::<_, String>(1)?,
+                "status": row.get::<_, String>(2)?,
+                "max_size_bytes": row.get::<_, u64>(3)?,
+                "access_protocols": row.get::<_, String>(4)?,
+            }))
+        }).unwrap().filter_map(|r| r.ok()).collect()
+    };
+
+    let body = serde_json::to_vec(&volumes).unwrap_or_default();
+    send_response(stream, MgmtResponseHeader::ok(body.len() as u64, 0), &[], &body).await;
+}
+
+// ── ListIscsiAcls ───────────────────────────────────────────────
+
+async fn handle_list_iscsi_acls(
+    state: &CoreSanState,
+    volume_id: &str,
+    stream: &mut UnixStream,
+) {
+    let acls: Vec<serde_json::Value> = {
+        let db = state.db.lock().unwrap();
+        let mut stmt = db.prepare(
+            "SELECT id, volume_id, initiator_iqn, comment, created_at FROM iscsi_acls WHERE volume_id = ?1"
+        ).unwrap();
+        stmt.query_map(rusqlite::params![volume_id], |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "volume_id": row.get::<_, String>(1)?,
+                "initiator_iqn": row.get::<_, String>(2)?,
+                "comment": row.get::<_, String>(3)?,
+                "created_at": row.get::<_, String>(4)?,
+            }))
+        }).unwrap().filter_map(|r| r.ok()).collect()
+    };
+
+    let body = serde_json::to_vec(&acls).unwrap_or_default();
+    send_response(stream, MgmtResponseHeader::ok(body.len() as u64, 0), &[], &body).await;
+}
+
+// ── CreateIscsiAcl ──────────────────────────────────────────────
+
+async fn handle_create_iscsi_acl(
+    state: &CoreSanState,
+    body: &[u8],
+    stream: &mut UnixStream,
+) {
+    let body_json: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => {
+            send_response(stream, MgmtResponseHeader::err(MgmtStatus::InvalidRequest), &[], &[]).await;
+            return;
+        }
+    };
+    let volume_id = body_json["volume_id"].as_str().unwrap_or("");
+    let iqn = body_json["initiator_iqn"].as_str().unwrap_or("");
+    let comment = body_json["comment"].as_str().unwrap_or("");
+    let id = uuid::Uuid::new_v4().to_string();
+
+    let db_result = {
+        let db = state.db.lock().unwrap();
+        db.execute(
+            "INSERT INTO iscsi_acls (id, volume_id, initiator_iqn, comment) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![&id, volume_id, iqn, comment],
+        )
+    };
+
+    match db_result {
+        Ok(_) => {
+            let resp = serde_json::json!({"id": id}).to_string();
+            let resp_bytes = resp.as_bytes().to_vec();
+            send_response(stream, MgmtResponseHeader::ok(resp_bytes.len() as u64, 0), &[], &resp_bytes).await;
+        }
+        Err(_) => {
+            send_response(stream, MgmtResponseHeader::err(MgmtStatus::AlreadyExists), &[], &[]).await;
+        }
+    }
+}
+
+// ── DeleteIscsiAcl ──────────────────────────────────────────────
+
+async fn handle_delete_iscsi_acl(
+    state: &CoreSanState,
+    acl_id: &str,
+    stream: &mut UnixStream,
+) {
+    let deleted = {
+        let db = state.db.lock().unwrap();
+        db.execute("DELETE FROM iscsi_acls WHERE id = ?1", rusqlite::params![acl_id]).unwrap_or(0)
+    };
+
+    if deleted > 0 {
+        send_response(stream, MgmtResponseHeader::ok(0, 0), &[], &[]).await;
+    } else {
+        send_response(stream, MgmtResponseHeader::err(MgmtStatus::NotFound), &[], &[]).await;
+    }
+}
+
+// ── GetAluaState ────────────────────────────────────────────────
+
+async fn handle_get_alua_state(
+    state: &CoreSanState,
+    _volume_id: &str,
+    stream: &mut UnixStream,
+) {
+    // For now, always report active_optimized (leader tracking TBD)
+    let body = serde_json::json!({"state": "active_optimized", "tpg_id": &state.node_id}).to_string();
+    let body_bytes = body.as_bytes().to_vec();
+    send_response(stream, MgmtResponseHeader::ok(body_bytes.len() as u64, 0), &[], &body_bytes).await;
+}
+
+// ── GetTargetPortGroups ─────────────────────────────────────────
+
+async fn handle_get_target_port_groups(
+    state: &CoreSanState,
+    _volume_id: &str,
+    stream: &mut UnixStream,
+) {
+    // Report this node as a single TPG for now
+    let tpgs = serde_json::json!([
+        {"tpg_id": &state.node_id, "state": "active_optimized"}
+    ]);
+    let body = serde_json::to_vec(&tpgs).unwrap_or_default();
+    send_response(stream, MgmtResponseHeader::ok(body.len() as u64, 0), &[], &body).await;
 }
 
 // ── Crypto Helpers ──────────────────────────────────────────────

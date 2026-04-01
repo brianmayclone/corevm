@@ -32,6 +32,20 @@ pub enum MgmtCommand {
     DeleteCredential = 23,
     /// Resolve volume name to id. Key = volume_name. Response metadata = JSON {id, name, status}.
     ResolveVolume = 30,
+
+    // ── iSCSI ────────────────────────────────────────────
+    /// List volumes with "iscsi" in access_protocols. Response body = JSON array.
+    ListIscsiVolumes = 40,
+    /// List iSCSI ACLs for a volume. Key = volume_id. Response body = JSON array.
+    ListIscsiAcls = 41,
+    /// Create iSCSI ACL. Body = JSON {volume_id, initiator_iqn, comment}.
+    CreateIscsiAcl = 42,
+    /// Delete iSCSI ACL. Key = acl_id.
+    DeleteIscsiAcl = 43,
+    /// Get ALUA state for a volume on this node. Key = volume_id. Response body = JSON.
+    GetAluaState = 44,
+    /// Get all target port groups for a volume. Key = volume_id. Response body = JSON array.
+    GetTargetPortGroups = 45,
 }
 
 impl MgmtCommand {
@@ -45,6 +59,12 @@ impl MgmtCommand {
             22 => Some(Self::ListCredentials),
             23 => Some(Self::DeleteCredential),
             30 => Some(Self::ResolveVolume),
+            40 => Some(Self::ListIscsiVolumes),
+            41 => Some(Self::ListIscsiAcls),
+            42 => Some(Self::CreateIscsiAcl),
+            43 => Some(Self::DeleteIscsiAcl),
+            44 => Some(Self::GetAluaState),
+            45 => Some(Self::GetTargetPortGroups),
             _ => None,
         }
     }
