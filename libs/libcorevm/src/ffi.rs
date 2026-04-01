@@ -300,14 +300,21 @@ pub extern "C" fn corevm_create(ram_mb: u32) -> u64 {
     clear_last_error();
     match Vm::new(ram_mb) {
         Ok(vm) => {
-            let handle = NEXT_HANDLE.fetch_add(1, Ordering::SeqCst);
-            let idx = (handle - 1) as usize;
             let list = vm_list();
-            while list.len() <= idx {
-                list.push(None);
+            // Reuse a previously destroyed slot (None) to avoid unbounded vector growth.
+            // This prevents handle/index accumulation after many start/stop cycles.
+            if let Some(idx) = list.iter().position(|slot| slot.is_none()) {
+                list[idx] = Some(vm);
+                (idx + 1) as u64
+            } else {
+                let handle = NEXT_HANDLE.fetch_add(1, Ordering::SeqCst);
+                let idx = (handle - 1) as usize;
+                while list.len() <= idx {
+                    list.push(None);
+                }
+                list[idx] = Some(vm);
+                handle
             }
-            list[idx] = Some(vm);
-            handle
         }
         Err(e) => {
             set_last_error(format!("{}", e));

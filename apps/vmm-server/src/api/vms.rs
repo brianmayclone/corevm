@@ -152,7 +152,7 @@ pub async fn start(auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_i
         }
     };
 
-    let control_for_watcher = running.control.clone();
+    let mut control_for_watcher = running.control.clone();
 
     if let Some(mut vm) = state.vms.get_mut(&vm_id) {
         vm.state = VmState::Running;
@@ -167,55 +167,112 @@ pub async fn start(auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_i
     tracing::info!("VM {} started", vm_id);
     crate::services::event_reporter::vm_event(&state, "info", &format!("VM {} started", vm_id), &vm_id);
 
-    // Spawn a watcher task that detects when the VM thread exits,
-    // waits for the VM thread to finish cleanup (flush caches + corevm_destroy),
-    // and then updates the state back to Stopped.
+    // Spawn a watcher task that detects when the VM exits or requests a reboot.
+    // On normal exit/shutdown: waits for thread cleanup, then sets state to Stopped.
+    // On reboot: waits for thread cleanup, then automatically restarts the VM.
     let watcher_state = state.clone();
     let watcher_vm_id = vm_id.clone();
     tokio::spawn(async move {
-        // Poll the control handle until the VM signals exit
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            if control_for_watcher.is_exited() {
-                break;
+            // Poll the control handle until the VM signals exit
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                if control_for_watcher.is_exited() {
+                    break;
+                }
             }
-        }
-        let reason = control_for_watcher.exit_reason();
-        let reason_str = if reason.is_empty() { "normal" } else { &reason };
-        tracing::info!("VM {} exited: {}", watcher_vm_id, reason_str);
-        crate::services::event_reporter::vm_event(&watcher_state, "info", &format!("VM {} stopped ({})", watcher_vm_id, reason_str), &watcher_vm_id);
 
-        // Extract the VM thread JoinHandle so we can wait for the thread to
-        // finish its cleanup (corevm_ahci_flush_caches + corevm_destroy).
-        let vm_thread = watcher_state.vms.get_mut(&watcher_vm_id)
-            .and_then(|mut vm| vm.vm_thread.take());
+            let wants_reboot = control_for_watcher.reboot_requested();
+            let reason = control_for_watcher.exit_reason();
+            let reason_str = if wants_reboot { "reboot" } else if reason.is_empty() { "shutdown" } else { &reason };
+            tracing::info!("VM {} exited: {}", watcher_vm_id, reason_str);
+            crate::services::event_reporter::vm_event(&watcher_state, "info", &format!("VM {} stopped ({})", watcher_vm_id, reason_str), &watcher_vm_id);
 
-        if let Some(thread) = vm_thread {
-            // Join the VM thread on a blocking task to avoid blocking the async runtime.
-            // The thread should be finishing up (flush + destroy) since exited is set.
-            let join_result = tokio::task::spawn_blocking(move || {
-                thread.join()
-            }).await;
-            match &join_result {
-                Ok(Ok(())) => tracing::info!("VM {} thread joined, resources freed", watcher_vm_id),
-                Ok(Err(_)) => tracing::warn!("VM {} thread panicked during cleanup", watcher_vm_id),
-                Err(e) => tracing::warn!("VM {} thread join task failed: {}", watcher_vm_id, e),
+            // Wait for the VM thread to finish cleanup (flush caches + corevm_destroy = frees RAM).
+            let vm_thread = watcher_state.vms.get_mut(&watcher_vm_id)
+                .and_then(|mut vm| vm.vm_thread.take());
+
+            if let Some(thread) = vm_thread {
+                let join_result = tokio::task::spawn_blocking(move || {
+                    thread.join()
+                }).await;
+                match &join_result {
+                    Ok(Ok(())) => tracing::info!("VM {} thread joined, resources freed", watcher_vm_id),
+                    Ok(Err(_)) => tracing::warn!("VM {} thread panicked during cleanup", watcher_vm_id),
+                    Err(e) => tracing::warn!("VM {} thread join task failed: {}", watcher_vm_id, e),
+                }
             }
-        }
 
-        // Now that the thread has terminated and corevm_destroy has been called,
-        // clear all handles from the VM instance.
-        if let Some(mut vm) = watcher_state.vms.get_mut(&watcher_vm_id) {
-            vm.state = VmState::Stopped;
-            vm.vm_handle = None;
-            vm.control = None;
-            vm.framebuffer = None;
-            vm.serial_tx = None;
-            vm.vm_thread = None;
-        }
-        {
-            let db = watcher_state.db.lock().unwrap();
-            AuditService::log(&db, 0, "vm.exited", "vm", &watcher_vm_id, Some(&reason));
+            // Clear all handles — RAM is now freed by corevm_destroy.
+            if let Some(mut vm) = watcher_state.vms.get_mut(&watcher_vm_id) {
+                vm.vm_handle = None;
+                vm.control = None;
+                vm.framebuffer = None;
+                vm.serial_tx = None;
+                vm.vm_thread = None;
+            }
+            {
+                let db = watcher_state.db.lock().unwrap();
+                AuditService::log(&db, 0, "vm.exited", "vm", &watcher_vm_id, Some(reason_str));
+            }
+
+            // If the guest requested a reboot, restart the VM automatically.
+            if wants_reboot {
+                tracing::info!("VM {} reboot requested — restarting", watcher_vm_id);
+                crate::services::event_reporter::vm_event(&watcher_state, "info", &format!("VM {} rebooting", watcher_vm_id), &watcher_vm_id);
+
+                let config = match watcher_state.vms.get(&watcher_vm_id) {
+                    Some(vm) => vm.config.clone(),
+                    None => {
+                        tracing::error!("VM {} config not found for reboot", watcher_vm_id);
+                        break;
+                    }
+                };
+
+                // Set state to Stopped briefly, then start again
+                if let Some(mut vm) = watcher_state.vms.get_mut(&watcher_vm_id) {
+                    vm.state = VmState::Stopped;
+                }
+
+                let bios_paths = watcher_state.config.vms.bios_search_paths.clone();
+                let restarted = tokio::task::spawn_blocking(move || {
+                    crate::vm::manager::start_vm(&config, &bios_paths)
+                }).await;
+
+                match restarted {
+                    Ok(Ok(running)) => {
+                        // Update the control handle for the next iteration of this watcher loop
+                        control_for_watcher = running.control.clone();
+
+                        if let Some(mut vm) = watcher_state.vms.get_mut(&watcher_vm_id) {
+                            vm.state = VmState::Running;
+                            vm.vm_handle = Some(running.handle);
+                            vm.control = Some(running.control);
+                            vm.framebuffer = Some(running.framebuffer);
+                            vm.serial_tx = Some(running.serial_tx);
+                            vm.vm_thread = Some(running.thread);
+                            vm.started_at = Some(std::time::Instant::now());
+                        }
+                        tracing::info!("VM {} restarted successfully", watcher_vm_id);
+                        crate::services::event_reporter::vm_event(&watcher_state, "info", &format!("VM {} restarted", watcher_vm_id), &watcher_vm_id);
+                        // Continue the watcher loop for the new VM instance
+                        continue;
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!("VM {} reboot failed: {}", watcher_vm_id, e);
+                        crate::services::event_reporter::vm_event(&watcher_state, "critical", &format!("VM {} reboot failed: {}", watcher_vm_id, e), &watcher_vm_id);
+                    }
+                    Err(e) => {
+                        tracing::error!("VM {} reboot spawn error: {}", watcher_vm_id, e);
+                    }
+                }
+            }
+
+            // Normal shutdown (no reboot) — set state to Stopped and exit watcher.
+            if let Some(mut vm) = watcher_state.vms.get_mut(&watcher_vm_id) {
+                vm.state = VmState::Stopped;
+            }
+            break;
         }
     });
 
