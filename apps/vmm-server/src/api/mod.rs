@@ -38,6 +38,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/vms/{id}/start", post(vms::start))
         .route("/api/vms/{id}/stop", post(vms::stop))
         .route("/api/vms/{id}/force-stop", post(vms::force_stop))
+        .route("/api/vms/{id}/pause", post(vms::pause))
+        .route("/api/vms/{id}/resume", post(vms::resume))
         .route("/api/vms/{id}/screenshot", get(vms::screenshot))
         // Storage pools
         .route("/api/storage/pools", get(storage::list_pools).post(storage::create_pool))

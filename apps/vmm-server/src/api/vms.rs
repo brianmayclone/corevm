@@ -292,6 +292,32 @@ pub async fn stop(auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_id
     Ok(Json(serde_json::json!({"ok": true, "state": "stopping"})))
 }
 
+/// POST /api/vms/:id/pause
+pub async fn pause(auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
+    require_operator(&auth)?;
+    let vm = state.vms.get(&vm_id).ok_or_else(|| AppError(StatusCode::NOT_FOUND, "VM not found".into()))?;
+    if vm.state != VmState::Running { return Err(AppError(StatusCode::CONFLICT, "VM is not running".into())); }
+    if let Some(ref control) = vm.control { control.request_pause(); }
+    drop(vm);
+    if let Some(mut vm) = state.vms.get_mut(&vm_id) { vm.state = VmState::Paused; }
+    { let db = state.db.lock().unwrap(); AuditService::log(&db, auth.id, "vm.paused", "vm", &vm_id, None); }
+    tracing::info!("VM {} paused", vm_id);
+    Ok(Json(serde_json::json!({"ok": true, "state": "paused"})))
+}
+
+/// POST /api/vms/:id/resume
+pub async fn resume(auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
+    require_operator(&auth)?;
+    let vm = state.vms.get(&vm_id).ok_or_else(|| AppError(StatusCode::NOT_FOUND, "VM not found".into()))?;
+    if vm.state != VmState::Paused { return Err(AppError(StatusCode::CONFLICT, "VM is not paused".into())); }
+    if let Some(ref control) = vm.control { control.request_resume(); }
+    drop(vm);
+    if let Some(mut vm) = state.vms.get_mut(&vm_id) { vm.state = VmState::Running; }
+    { let db = state.db.lock().unwrap(); AuditService::log(&db, auth.id, "vm.resumed", "vm", &vm_id, None); }
+    tracing::info!("VM {} resumed", vm_id);
+    Ok(Json(serde_json::json!({"ok": true, "state": "running"})))
+}
+
 /// POST /api/vms/:id/force-stop
 pub async fn force_stop(auth: AuthUser, State(state): State<Arc<AppState>>, Path(vm_id): Path<String>) -> Result<Json<serde_json::Value>, AppError> {
     require_operator(&auth)?;

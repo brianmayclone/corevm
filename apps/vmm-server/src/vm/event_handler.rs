@@ -64,7 +64,14 @@ impl EventHandler for ServerEventHandler {
             VmEvent::SerialOutput(data) => {
                 let _ = self.serial_tx.send(data);
             }
-            VmEvent::DebugOutput(_) => {}
+            VmEvent::DebugOutput(data) => {
+                if let Ok(s) = std::str::from_utf8(&data) {
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        tracing::debug!("VM debug (handle={}): {}", self.handle, trimmed);
+                    }
+                }
+            }
             VmEvent::Shutdown => {
                 tracing::info!("VM shutdown (handle={})", self.handle);
                 self.control.set_exit_reason("Shutdown".into());
@@ -227,37 +234,77 @@ fn update_framebuffer(handle: u64, fb: &Arc<Mutex<FrameBufferData>>) {
     }
 }
 
-/// Convert BGR/BGRA raw pixels to RGBA32.
+/// Convert raw framebuffer pixels to RGBA32. Supports 4/8/16/24/32 bpp.
 fn bgr_to_rgba(src: &[u8], dst: &mut [u8], w: usize, h: usize, bpp: u8) {
-    let bpp_bytes = (bpp as usize + 7) / 8;
-    for y in 0..h {
-        for x in 0..w {
-            let si = (y * w + x) * bpp_bytes;
-            let di = (y * w + x) * 4;
-            if si + bpp_bytes <= src.len() && di + 4 <= dst.len() {
-                match bpp {
-                    32 => {
-                        dst[di]     = src[si + 2]; // R
-                        dst[di + 1] = src[si + 1]; // G
-                        dst[di + 2] = src[si];     // B
-                        dst[di + 3] = 255;
-                    }
-                    24 => {
-                        dst[di]     = src[si + 2];
-                        dst[di + 1] = src[si + 1];
-                        dst[di + 2] = src[si];
-                        dst[di + 3] = 255;
-                    }
-                    16 => {
-                        let pixel = (src[si] as u16) | ((src[si + 1] as u16) << 8);
-                        dst[di]     = ((pixel >> 11) as u8) << 3;
-                        dst[di + 1] = (((pixel >> 5) & 0x3F) as u8) << 2;
-                        dst[di + 2] = ((pixel & 0x1F) as u8) << 3;
-                        dst[di + 3] = 255;
-                    }
-                    _ => {
-                        dst[di..di+4].fill(0);
-                    }
+    let npixels = w * h;
+    match bpp {
+        4 => {
+            // 4bpp: each byte = 2 pixels, index into 16-color VGA palette
+            for i in 0..npixels {
+                let byte_idx = i / 2;
+                let nibble = if byte_idx < src.len() {
+                    if i % 2 == 0 { (src[byte_idx] >> 4) & 0x0F } else { src[byte_idx] & 0x0F }
+                } else { 0 };
+                let c = &VGA_PALETTE[nibble as usize];
+                let o = i * 4;
+                if o + 3 < dst.len() {
+                    dst[o] = c[0]; dst[o + 1] = c[1]; dst[o + 2] = c[2]; dst[o + 3] = c[3];
+                }
+            }
+        }
+        8 => {
+            // 8bpp: grayscale (VGA mode 13h and similar)
+            for i in 0..npixels {
+                let val = if i < src.len() { src[i] } else { 0 };
+                let o = i * 4;
+                if o + 3 < dst.len() {
+                    dst[o] = val; dst[o + 1] = val; dst[o + 2] = val; dst[o + 3] = 255;
+                }
+            }
+        }
+        16 => {
+            // 16bpp: RGB565
+            for i in 0..npixels {
+                let si = i * 2;
+                let (lo, hi) = if si + 1 < src.len() { (src[si], src[si + 1]) } else { (0, 0) };
+                let pixel = (hi as u16) << 8 | lo as u16;
+                let r = ((pixel >> 11) & 0x1F) as u8;
+                let g = ((pixel >> 5) & 0x3F) as u8;
+                let b = (pixel & 0x1F) as u8;
+                let o = i * 4;
+                if o + 3 < dst.len() {
+                    dst[o] = (r << 3) | (r >> 2);
+                    dst[o + 1] = (g << 2) | (g >> 4);
+                    dst[o + 2] = (b << 3) | (b >> 2);
+                    dst[o + 3] = 255;
+                }
+            }
+        }
+        24 => {
+            // 24bpp: BGR → RGBA
+            for i in 0..npixels {
+                let si = i * 3;
+                let o = i * 4;
+                if si + 2 < src.len() && o + 3 < dst.len() {
+                    dst[o] = src[si + 2]; dst[o + 1] = src[si + 1]; dst[o + 2] = src[si]; dst[o + 3] = 255;
+                }
+            }
+        }
+        32 => {
+            // 32bpp: BGRX → RGBA
+            for i in 0..npixels {
+                let si = i * 4;
+                let o = i * 4;
+                if si + 3 < src.len() && o + 3 < dst.len() {
+                    dst[o] = src[si + 2]; dst[o + 1] = src[si + 1]; dst[o + 2] = src[si]; dst[o + 3] = 255;
+                }
+            }
+        }
+        _ => {
+            // Unknown BPP: fill black
+            for o in (0..npixels * 4).step_by(4) {
+                if o + 3 < dst.len() {
+                    dst[o] = 0; dst[o + 1] = 0; dst[o + 2] = 0; dst[o + 3] = 255;
                 }
             }
         }
