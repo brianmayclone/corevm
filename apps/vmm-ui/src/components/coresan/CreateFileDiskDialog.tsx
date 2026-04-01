@@ -96,12 +96,12 @@ export default function CreateFileDiskDialog({
 
         {isCluster && (
           <FormField label="Target Host">
-            <Select value={hostId} onChange={e => setHostId(e.target.value)}>
-              <option value="">Select host...</option>
-              {sanHosts.map(h => (
-                <option key={h.id} value={h.id}>{h.hostname} ({h.san_address})</option>
-              ))}
-            </Select>
+            <Select value={hostId} onChange={e => setHostId(e.target.value)}
+              options={[
+                { value: '', label: 'Select host...' },
+                ...sanHosts.map(h => ({ value: h.id, label: `${h.hostname} (${h.san_address})` })),
+              ]}
+            />
           </FormField>
         )}
 
@@ -110,11 +110,12 @@ export default function CreateFileDiskDialog({
         </FormField>
 
         <FormField label="Filesystem">
-          <Select value={fsType} onChange={e => setFsType(e.target.value)}>
-            <option value="ext4">ext4</option>
-            <option value="xfs">XFS</option>
-          </Select>
-        </FormField>
+          <Select value={fsType} onChange={e => setFsType(e.target.value)}
+            options={[
+              { value: 'ext4', label: 'ext4' },
+              { value: 'xfs', label: 'XFS' },
+            ]}
+          />
 
         <FormField label="Name (optional)">
           <TextInput value={name} onChange={e => setName(e.target.value)} placeholder="test-disk-1" />
