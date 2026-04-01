@@ -526,6 +526,26 @@ export interface S3CredentialCreateResponse {
   secret_key: string
 }
 
+// ── iSCSI Block Storage ──────────────────────────────────────────────
+
+export interface IscsiAcl {
+  id: string
+  volume_id: string
+  volume_name: string
+  initiator_iqn: string
+  comment: string
+  created_at: string
+}
+
+export interface IscsiTarget {
+  volume_id: string
+  volume_name: string
+  iqn: string
+  portals: string[]
+  alua_state: string
+  status: string
+}
+
 // ── CoreSAN Chunk Map (Allocation Details) ──────────────────────────────
 
 export interface ChunkMapEntry {

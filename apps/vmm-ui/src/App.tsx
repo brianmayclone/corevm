@@ -20,6 +20,7 @@ import StorageDisks from './pages/StorageDisks'
 import StorageQos from './pages/StorageQos'
 import StorageCoresan from './pages/StorageCoresan'
 import StorageObjectStorage from './pages/StorageObjectStorage'
+import StorageBlockStorage from './pages/StorageBlockStorage'
 import VolumeChunkMap from './components/coresan/VolumeChunkMap'
 import Networks from './pages/Networks'
 import NetworkOverview from './pages/NetworkOverview'
@@ -109,6 +110,7 @@ export default function App() {
             <Route path="coresan" element={<StorageCoresan />} />
             <Route path="coresan/volume/:volumeId/chunks" element={<VolumeChunkMap />} />
             <Route path="object-storage" element={<StorageObjectStorage />} />
+            <Route path="block-storage" element={<StorageBlockStorage />} />
           </Route>
           <Route path="storage/wizard" element={<StorageWizard />} />
           {/* Standalone mode: traditional network pages */}

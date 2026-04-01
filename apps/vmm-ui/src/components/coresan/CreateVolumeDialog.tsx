@@ -155,10 +155,24 @@ export default function CreateVolumeDialog({
                 className="rounded border-vmm-border" />
               S3 Object Storage
             </label>
+            <label className="flex items-center gap-2 text-sm text-vmm-text cursor-pointer">
+              <input type="checkbox" checked={newVolProtocols.includes('iscsi')}
+                onChange={e => {
+                  if (e.target.checked) setNewVolProtocols([...newVolProtocols, 'iscsi'])
+                  else setNewVolProtocols(newVolProtocols.filter(p => p !== 'iscsi'))
+                }}
+                className="rounded border-vmm-border" />
+              iSCSI Block Storage
+            </label>
           </div>
           {newVolProtocols.includes('s3') && (
             <p className="text-xs text-vmm-muted mt-1">
               S3 access requires vmm-s3gw running on the host. Manage keys in Object Storage page.
+            </p>
+          )}
+          {newVolProtocols.includes('iscsi') && (
+            <p className="text-xs text-vmm-muted mt-1">
+              iSCSI access requires vmm-iscsi running on the host. Manage ACLs in Block Storage page.
             </p>
           )}
         </FormField>
