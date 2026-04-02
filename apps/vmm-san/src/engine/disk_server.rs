@@ -258,54 +258,49 @@ async fn handle_connection(
                 }
 
                 let offset = req.offset;
-                let chunk_idx = (offset / sess.chunk_size) as u32;
-                let local_offset = (offset % sess.chunk_size) as usize;
 
                 tracing::trace!(
-                    "Disk server WRITE: offset={} size={} chunk_idx={} local_offset={} file_id={}",
-                    offset, data.len(), chunk_idx, local_offset, sess.file_id
+                    "Disk server WRITE: offset={} size={} file_id={}",
+                    offset, data.len(), sess.file_id
                 );
 
-                // Write to cache
-                let buf = sess.cache.entry(chunk_idx).or_insert_with(|| {
-                    // Check if chunk exists on disk
-                    let has_data = {
-                        let db = state.db.read();
-                        db.query_row(
-                            "SELECT COUNT(*) FROM chunk_replicas cr
-                             JOIN file_chunks fc ON fc.id = cr.chunk_id
-                             WHERE fc.file_id = ?1 AND fc.chunk_index = ?2
-                               AND cr.node_id = ?3 AND cr.state = 'synced'",
-                            rusqlite::params![sess.file_id, chunk_idx, &state.node_id],
-                            |row| row.get::<_, i64>(0),
-                        ).unwrap_or(0) > 0
-                    };
+                // Split write across chunk boundaries and patch each chunk's cache buffer.
+                let chunk_size = sess.chunk_size;
+                let mut remaining = &data[..];
+                let mut write_off = offset;
 
-                    let chunk_data = if has_data {
-                        let db = state.db.read();
-                        crate::storage::chunk::read_chunk_data(
-                            &db, sess.file_id, chunk_idx as u64 * sess.chunk_size,
-                            sess.chunk_size, &sess.volume_id, &state.node_id, sess.chunk_size,
-                        ).unwrap_or_else(|_| vec![0u8; sess.chunk_size as usize])
-                    } else {
-                        vec![0u8; sess.chunk_size as usize]
-                    };
+                while !remaining.is_empty() {
+                    let chunk_idx = (write_off / chunk_size) as u32;
+                    let local_offset = (write_off % chunk_size) as usize;
+                    let space_in_chunk = chunk_size as usize - local_offset;
+                    let write_len = remaining.len().min(space_in_chunk);
 
-                    let now = std::time::Instant::now();
-                    ChunkBuf { data: chunk_data, dirty: false, first_dirty: now, last_write: now }
-                });
+                    let buf = sess.cache.entry(chunk_idx).or_insert_with(|| {
+                        let chunk_data = {
+                            let db = state.db.read();
+                            crate::storage::chunk::read_chunk_data(
+                                &db, sess.file_id, chunk_idx as u64 * chunk_size,
+                                chunk_size, &sess.volume_id, &state.node_id, chunk_size,
+                            ).unwrap_or_else(|_| vec![0u8; chunk_size as usize])
+                        };
+                        let now = std::time::Instant::now();
+                        ChunkBuf { data: chunk_data, dirty: false, first_dirty: now, last_write: now }
+                    });
 
-                // Patch data into buffer
-                let end = local_offset + data.len();
-                if buf.data.len() < end {
-                    buf.data.resize(end, 0);
+                    let end = local_offset + write_len;
+                    if buf.data.len() < end {
+                        buf.data.resize(chunk_size as usize, 0);
+                    }
+                    buf.data[local_offset..end].copy_from_slice(&remaining[..write_len]);
+                    if !buf.dirty {
+                        buf.first_dirty = std::time::Instant::now();
+                    }
+                    buf.dirty = true;
+                    buf.last_write = std::time::Instant::now();
+
+                    remaining = &remaining[write_len..];
+                    write_off += write_len as u64;
                 }
-                buf.data[local_offset..end].copy_from_slice(&data);
-                if !buf.dirty {
-                    buf.first_dirty = std::time::Instant::now();
-                }
-                buf.dirty = true;
-                buf.last_write = std::time::Instant::now();
 
                 // Flush stale chunks (>5s idle or >10s dirty)
                 flush_stale(&state, sess);
@@ -408,27 +403,43 @@ fn flush_stale(state: &CoreSanState, sess: &mut DiskSession) {
     }
 
     for idx in stale {
-        if let Some(buf) = sess.cache.remove(&idx) {
+        if let Some(buf) = sess.cache.get(&idx) {
             if buf.dirty {
                 write_chunk(state, sess, idx, &buf.data);
             }
+        }
+        // Mark as clean but keep in cache — removing would lose data
+        // if a new write hits the same chunk before the next load.
+        if let Some(buf) = sess.cache.get_mut(&idx) {
+            buf.dirty = false;
         }
     }
 }
 
 /// Flush ALL dirty chunks to disk + trigger replication.
 fn flush_all(state: &CoreSanState, sess: &mut DiskSession) {
-    let dirty: Vec<(u32, Vec<u8>)> = sess.cache.drain()
+    let dirty_indices: Vec<u32> = sess.cache.iter()
         .filter(|(_, b)| b.dirty)
-        .map(|(k, b)| (k, b.data))
+        .map(|(k, _)| *k)
         .collect();
 
-    for (idx, data) in &dirty {
-        write_chunk(state, sess, *idx, data);
+    for idx in &dirty_indices {
+        if let Some(buf) = sess.cache.get(idx) {
+            write_chunk(state, sess, *idx, &buf.data);
+        }
     }
 
-    if !dirty.is_empty() {
-        tracing::info!("Disk server: flushed {} chunks for file_id={}", dirty.len(), sess.file_id);
+    // Mark all flushed chunks as clean but keep them in cache.
+    // This avoids losing data when reads come in after flush
+    // and prevents unnecessary disk re-reads.
+    for idx in &dirty_indices {
+        if let Some(buf) = sess.cache.get_mut(idx) {
+            buf.dirty = false;
+        }
+    }
+
+    if !dirty_indices.is_empty() {
+        tracing::info!("Disk server: flushed {} chunks for file_id={}", dirty_indices.len(), sess.file_id);
 
         // Trigger push replication
         let version = {
