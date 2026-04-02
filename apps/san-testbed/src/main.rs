@@ -7,6 +7,8 @@ mod witness;
 mod cli;
 mod partition;
 mod scenarios;
+mod io_harness;
+mod io_tests;
 
 use context::TestContext;
 
@@ -38,6 +40,13 @@ async fn main() {
         println!("  Transfer:  transfer-small, transfer-large, transfer-throughput");
         println!("  Cross:     cross-node-read");
         println!("  Other:     repair-leader-only, all");
+        println!("  I/O:       io-sequential, io-random-write, io-partial-chunk,");
+        println!("             io-overwrite, io-benchmark, io-all");
+        println!();
+        println!("Options:");
+        println!("  --nodes N            Number of nodes (default: 3)");
+        println!("  --scenario <name>    Run automated scenario");
+        println!("  --seed N             RNG seed for io-random-write (default: 12345)");
         return;
     }
 
@@ -46,6 +55,12 @@ async fn main() {
         .and_then(|i| args.get(i + 1))
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(3);
+
+    let io_seed: u64 = args.iter()
+        .position(|a| a == "--seed")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(12345);
 
     let scenario = args.iter()
         .position(|a| a == "--scenario")
@@ -58,12 +73,12 @@ async fn main() {
     if let Some(scenario_name) = scenario {
         // Run automated scenario(s)
         if scenario_name == "all" {
-            let results = scenarios::run_all().await;
+            let results = scenarios::run_all(io_seed).await;
             scenarios::print_results(&results);
             let failed = results.iter().any(|r| !r.passed);
             std::process::exit(if failed { 1 } else { 0 });
         } else {
-            match scenarios::run_single(&scenario_name).await {
+            match scenarios::run_single(&scenario_name, io_seed).await {
                 Some(result) => {
                     scenarios::print_results(&[result.clone()]);
                     std::process::exit(if result.passed { 0 } else { 1 });

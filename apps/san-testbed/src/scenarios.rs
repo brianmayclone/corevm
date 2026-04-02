@@ -38,7 +38,7 @@ macro_rules! run_scenario {
     }};
 }
 
-pub async fn run_all() -> Vec<ScenarioResult> {
+pub async fn run_all(_seed: u64) -> Vec<ScenarioResult> {
     let mut results = Vec::new();
 
     results.push(run_scenario!("quorum-degraded", 3, scenario_quorum_degraded));
@@ -60,7 +60,7 @@ pub async fn run_all() -> Vec<ScenarioResult> {
     results
 }
 
-pub async fn run_single(name: &str) -> Option<ScenarioResult> {
+pub async fn run_single(name: &str, _seed: u64) -> Option<ScenarioResult> {
     match name {
         "quorum-degraded" => Some(run_scenario!(name, 3, scenario_quorum_degraded)),
         "quorum-fenced" => Some(run_scenario!(name, 3, scenario_quorum_fenced)),

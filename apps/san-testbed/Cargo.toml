@@ -22,3 +22,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rustyline = "15"
 libc = "0.2"
+rand = "0.8"
