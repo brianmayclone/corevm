@@ -354,6 +354,7 @@ pub(crate) fn bsp_loop(
         }
         // Check stop flag.
         if control.stop.load(Ordering::Relaxed) {
+            eprintln!("[bsp] STOP flag detected at iter {} — exiting loop", bsp_iterations);
             control.exited.store(true, Ordering::Relaxed);
             break;
         }

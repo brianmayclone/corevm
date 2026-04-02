@@ -26,9 +26,12 @@ impl VmControlHandle {
 
     /// Signal all vCPU threads to stop and kick them out of KVM_RUN.
     pub fn request_stop(&self) {
+        eprintln!("[control] request_stop called: setting stop=true, cancelling {} vCPUs (handle={})",
+            self.num_cpus, self.handle);
         self.control.stop.store(true, Ordering::Relaxed);
         for cpu_id in 0..self.num_cpus {
-            crate::ffi::corevm_cancel_vcpu(self.handle, cpu_id);
+            let rc = crate::ffi::corevm_cancel_vcpu(self.handle, cpu_id);
+            eprintln!("[control] cancel_vcpu({}) = {}", cpu_id, rc);
         }
     }
 

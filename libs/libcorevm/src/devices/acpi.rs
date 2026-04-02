@@ -221,7 +221,9 @@ impl IoHandler for AcpiPm {
                 // SLP_EN (bit 13) + SLP_TYP (bits 12:10) = S5 → shutdown.
                 let slp_en = (val >> 13) & 1;
                 let slp_typ = (val >> 10) & 0x7;
+                eprintln!("[acpi] PM1a_CNT write: val=0x{:04X} slp_en={} slp_typ={}", val, slp_en, slp_typ);
                 if slp_en == 1 && slp_typ == 5 {
+                    eprintln!("[acpi] SHUTDOWN REQUESTED (SLP_EN=1, SLP_TYP=5)");
                     self.shutdown_requested = true;
                 }
             }
