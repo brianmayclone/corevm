@@ -158,54 +158,91 @@ async fn consolidate_sha256(state: &CoreSanState, volume_id: &str, sha256: &str)
 
     let mut saved = 0u64;
 
-    // For each backend, ensure the .dedup/<sha256> file exists
+    // Phase 1: Create dedup files on ALL backends. If any backend fails,
+    // abort the entire consolidation — never delete positional files
+    // without confirmed dedup copies on every backend.
+    let mut all_backends_ok = true;
     for (backend_id, backend_path) in &backend_ids {
         let dedup_path = chunk::dedup_chunk_path(backend_path, volume_id, sha256);
 
-        if !dedup_path.exists() {
-            // Find a source chunk on this backend
-            let source_path = find_source_chunk(state, volume_id, &chunks, backend_id);
-            if let Some(src) = source_path {
-                let data = tokio::fs::read(&src).await
-                    .map_err(|e| format!("Read source chunk: {}", e))?;
-
-                // Verify SHA256
-                let actual_sha = format!("{:x}", Sha256::digest(&data));
-                if actual_sha != sha256 {
-                    return Err(format!("SHA256 mismatch: expected {}, got {}", sha256, actual_sha));
-                }
-
-                if let Some(parent) = dedup_path.parent() {
-                    tokio::fs::create_dir_all(parent).await
-                        .map_err(|e| format!("Create .dedup dir: {}", e))?;
-                }
-
-                // Atomic write: tmp → fsync → rename
-                let tmp = dedup_path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
-                tokio::fs::write(&tmp, &data).await
-                    .map_err(|e| format!("Write dedup tmp: {}", e))?;
-                if let Ok(f) = tokio::fs::File::open(&tmp).await {
-                    f.sync_all().await.ok();
-                }
-                tokio::fs::rename(&tmp, &dedup_path).await
-                    .map_err(|e| format!("Rename dedup: {}", e))?;
-            }
+        if dedup_path.exists() {
+            continue; // Already consolidated on this backend
         }
 
-        // Insert/update dedup_store
-        {
-            let db = state.db.write();
-            let ref_count = chunks.len() as i64;
-            db.execute(
-                "INSERT INTO dedup_store (sha256, volume_id, backend_id, size_bytes, ref_count)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(sha256, volume_id, backend_id) DO UPDATE SET ref_count = ?5",
-                rusqlite::params![sha256, volume_id, backend_id, chunk_size, ref_count],
-            ).ok();
+        // Find a source chunk on this backend
+        let source_path = find_source_chunk(state, volume_id, &chunks, backend_id);
+        let src = match source_path {
+            Some(s) => s,
+            None => {
+                tracing::warn!(
+                    "Dedup: no source chunk for sha256={} on backend {} — aborting consolidation",
+                    &sha256[..16.min(sha256.len())], backend_id
+                );
+                all_backends_ok = false;
+                break;
+            }
+        };
+
+        let data = tokio::fs::read(&src).await
+            .map_err(|e| format!("Read source chunk: {}", e))?;
+
+        // Verify SHA256
+        let actual_sha = format!("{:x}", Sha256::digest(&data));
+        if actual_sha != sha256 {
+            tracing::error!(
+                "Dedup: SHA256 mismatch on backend {}: expected {}, got {} — aborting",
+                backend_id, &sha256[..16.min(sha256.len())], &actual_sha[..16.min(actual_sha.len())]
+            );
+            all_backends_ok = false;
+            break;
+        }
+
+        if let Some(parent) = dedup_path.parent() {
+            tokio::fs::create_dir_all(parent).await
+                .map_err(|e| format!("Create .dedup dir: {}", e))?;
+        }
+
+        // Atomic write: tmp → fsync → rename
+        let tmp = dedup_path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
+        tokio::fs::write(&tmp, &data).await
+            .map_err(|e| format!("Write dedup tmp: {}", e))?;
+        if let Ok(f) = tokio::fs::File::open(&tmp).await {
+            f.sync_all().await.ok();
+        }
+        tokio::fs::rename(&tmp, &dedup_path).await
+            .map_err(|e| format!("Rename dedup: {}", e))?;
+    }
+
+    if !all_backends_ok {
+        // Consolidation failed — do NOT update DB or delete positional files.
+        // The chunks remain as-is, no data is lost.
+        return Ok(0);
+    }
+
+    // Phase 2: Verify ALL dedup files exist before touching the database.
+    for (backend_id, backend_path) in &backend_ids {
+        let dedup_path = chunk::dedup_chunk_path(backend_path, volume_id, sha256);
+        if !dedup_path.exists() {
+            tracing::error!(
+                "Dedup: dedup file missing on backend {} after creation — aborting",
+                backend_id
+            );
+            return Ok(0);
         }
     }
 
-    // Update all file_chunks to point to the dedup store
+    // Phase 3: Update database — dedup_store entries and file_chunks pointer.
+    for (backend_id, _backend_path) in &backend_ids {
+        let db = state.db.write();
+        let ref_count = chunks.len() as i64;
+        db.execute(
+            "INSERT INTO dedup_store (sha256, volume_id, backend_id, size_bytes, ref_count)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(sha256, volume_id, backend_id) DO UPDATE SET ref_count = ?5",
+            rusqlite::params![sha256, volume_id, backend_id, chunk_size, ref_count],
+        ).ok();
+    }
+
     {
         let db = state.db.write();
         db.execute(
@@ -216,7 +253,7 @@ async fn consolidate_sha256(state: &CoreSanState, volume_id: &str, sha256: &str)
         ).ok();
     }
 
-    // Delete old positional chunk files
+    // Phase 4: Only NOW delete positional chunk files — dedup copies are confirmed.
     for (_chunk_id, file_id, chunk_index, size) in &chunks {
         for (_backend_id, backend_path) in &backend_ids {
             let old_path = chunk::chunk_path(backend_path, volume_id, *file_id, *chunk_index);
