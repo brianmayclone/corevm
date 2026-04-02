@@ -11,9 +11,17 @@ pub const REQUEST_MAGIC: u32 = 0x53414E31; // "SAN1"
 /// Protocol magic bytes for responses
 pub const RESPONSE_MAGIC: u32 = 0x53414E52; // "SANR"
 
-/// Socket path template: `/run/vmm-san/{volume_id}.sock`
+/// Returns the socket directory. Reads `VMM_SAN_SOCK_DIR` env var,
+/// defaults to `/run/vmm-san`.
+pub fn socket_dir() -> String {
+    std::env::var("VMM_SAN_SOCK_DIR")
+        .unwrap_or_else(|_| "/run/vmm-san".to_string())
+}
+
+/// Socket path template: `$VMM_SAN_SOCK_DIR/{volume_id}.sock`
+/// Defaults to `/run/vmm-san/` if the env var is not set.
 pub fn socket_path(volume_id: &str) -> String {
-    format!("/run/vmm-san/{}.sock", volume_id)
+    format!("{}/{}.sock", socket_dir(), volume_id)
 }
 
 /// Request commands

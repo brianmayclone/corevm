@@ -11,9 +11,9 @@ pub const OBJ_REQUEST_MAGIC: u32 = 0x4F424A53; // "OBJS"
 /// Protocol magic for object responses
 pub const OBJ_RESPONSE_MAGIC: u32 = 0x4F424A52; // "OBJR"
 
-/// Socket path template for object sockets: `/run/vmm-san/obj-{volume_id}.sock`
+/// Socket path template for object sockets: `$VMM_SAN_SOCK_DIR/obj-{volume_id}.sock`
 pub fn object_socket_path(volume_id: &str) -> String {
-    format!("/run/vmm-san/obj-{}.sock", volume_id)
+    format!("{}/obj-{}.sock", crate::san_disk::socket_dir(), volume_id)
 }
 
 /// Object storage commands

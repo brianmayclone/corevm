@@ -296,7 +296,7 @@ async fn main() {
     tracing::info!("iSCSI block server started (UDS per iSCSI-enabled volume)");
 
     engine::mgmt_server::spawn(Arc::clone(&state));
-    tracing::info!("Mgmt server started ({})", vmm_core::san_mgmt::MGMT_SOCKET_PATH);
+    tracing::info!("Mgmt server started ({})", vmm_core::san_mgmt::mgmt_socket_path());
 
     engine::smart_monitor::spawn(Arc::clone(&state));
     tracing::info!("SMART monitor started ({}s interval)", 300);

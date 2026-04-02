@@ -13,15 +13,15 @@ use sha2::{Sha256, Digest};
 
 /// Spawn the management UDS listener.
 pub fn spawn(state: Arc<CoreSanState>) {
-    std::fs::create_dir_all("/run/vmm-san").ok();
+    std::fs::create_dir_all(vmm_core::san_disk::socket_dir()).ok();
 
-    let sock_path = MGMT_SOCKET_PATH;
+    let sock_path = mgmt_socket_path();
 
     // Remove stale socket
-    std::fs::remove_file(sock_path).ok();
+    std::fs::remove_file(&sock_path).ok();
 
     tokio::spawn(async move {
-        let listener = match UnixListener::bind(sock_path) {
+        let listener = match UnixListener::bind(&sock_path) {
             Ok(l) => l,
             Err(e) => {
                 tracing::error!("Mgmt server: cannot bind {}: {}", sock_path, e);
@@ -30,7 +30,7 @@ pub fn spawn(state: Arc<CoreSanState>) {
         };
 
         // Make socket world-accessible
-        std::fs::set_permissions(sock_path,
+        std::fs::set_permissions(&sock_path,
             std::os::unix::fs::PermissionsExt::from_mode(0o666)).ok();
 
         tracing::info!("Mgmt server: listening on {}", sock_path);

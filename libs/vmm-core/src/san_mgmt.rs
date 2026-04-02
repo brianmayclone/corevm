@@ -9,7 +9,9 @@ pub const MGMT_REQUEST_MAGIC: u32 = 0x4D474D54; // "MGMT"
 pub const MGMT_RESPONSE_MAGIC: u32 = 0x4D474D52; // "MGMR"
 
 /// Management socket path
-pub const MGMT_SOCKET_PATH: &str = "/run/vmm-san/mgmt.sock";
+pub fn mgmt_socket_path() -> String {
+    format!("{}/mgmt.sock", crate::san_disk::socket_dir())
+}
 
 /// Management commands
 #[repr(u32)]

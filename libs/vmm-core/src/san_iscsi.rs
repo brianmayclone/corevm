@@ -11,9 +11,9 @@ pub const ISCSI_REQUEST_MAGIC: u32 = 0x49534353; // "ISCS"
 /// Protocol magic for iSCSI block responses
 pub const ISCSI_RESPONSE_MAGIC: u32 = 0x49534352; // "ISCR"
 
-/// Socket path template for iSCSI block sockets: `/run/vmm-san/blk-{volume_id}.sock`
+/// Socket path template for iSCSI block sockets: `$VMM_SAN_SOCK_DIR/blk-{volume_id}.sock`
 pub fn block_socket_path(volume_id: &str) -> String {
-    format!("/run/vmm-san/blk-{}.sock", volume_id)
+    format!("{}/blk-{}.sock", crate::san_disk::socket_dir(), volume_id)
 }
 
 /// Block I/O commands

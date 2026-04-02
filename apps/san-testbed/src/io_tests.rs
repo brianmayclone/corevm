@@ -6,13 +6,65 @@ use crate::scenarios::ScenarioResult;
 use rand::prelude::*;
 
 const CHUNK_SIZE: u64 = 4 * 1024 * 1024; // 4 MB
-const SOCKET_PATH: &str = "/run/vmm-san/testbed-vol.sock";
+const VOLUME_ID: &str = "testbed-vol";
+
+fn socket_path() -> String {
+    let dir = std::env::var("VMM_SAN_SOCK_DIR")
+        .unwrap_or_else(|_| "/run/vmm-san".to_string());
+    format!("{}/{}.sock", dir, VOLUME_ID)
+}
+
+/// Create the file in the SAN via HTTP API so that file_map entry exists,
+/// then open the UDS connection for direct I/O.
+async fn open_harness(ctx: &TestContext, rel_path: &str, file_size: u64) -> Result<IoHarness, String> {
+    // Create initial file via HTTP (writes a single zero byte to ensure file_map entry)
+    let initial = vec![0u8; 1];
+    let status = ctx.write_file(1, VOLUME_ID, rel_path, &initial).await?;
+    if status >= 400 {
+        return Err(format!("Failed to pre-create file {} via HTTP: status {}", rel_path, status));
+    }
+    tracing::debug!("Pre-created file '{}' via HTTP API", rel_path);
+
+    IoHarness::open(&socket_path(), rel_path, file_size).await
+}
 
 /// Helper: create single-node context (reuses existing infra).
 async fn single_node_context() -> Result<TestContext, String> {
+    // Remove stale socket from previous runs or production instances
+    std::fs::remove_file(&socket_path()).ok();
+    tracing::info!("Cleaned stale socket (if any) at {}", &socket_path());
+
     let ctx = TestContext::new(1).await?;
-    // Wait for node + disk server to be ready
-    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+    // Wait for node health via HTTP first
+    tracing::info!("Waiting for node 1 health check on {}...", ctx.nodes[0].address());
+    ctx.wait_node_healthy(1).await?;
+    tracing::info!("Node 1 healthy, waiting for UDS socket at {}...", &socket_path());
+
+    // Then wait for the UDS socket to appear (disk_server starts after HTTP)
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if std::path::Path::new(&socket_path()).exists() {
+            tracing::info!("Socket found, connecting...");
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            // Dump node log for debugging
+            let log = ctx.read_log(1);
+            let last_lines: Vec<&str> = log.lines().rev().take(30).collect();
+            for line in last_lines.iter().rev() {
+                tracing::error!("vmm-san log: {}", line);
+            }
+            // Also list what's in /run/vmm-san/
+            let entries: Vec<String> = std::fs::read_dir("/run/vmm-san")
+                .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect())
+                .unwrap_or_default();
+            tracing::error!("Contents of /run/vmm-san/: {:?}", entries);
+            return Err(format!("Socket {} did not appear within 30s", &socket_path()));
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
     Ok(ctx)
 }
 
@@ -41,7 +93,7 @@ pub async fn scenario_io_sequential() -> ScenarioResult {
 
         let file_size: u64 = 32 * 1024 * 1024; // 32 MB
         let block_size: usize = 64 * 1024; // 64 KB
-        let mut harness = IoHarness::open(SOCKET_PATH, "io-seq-test.img", file_size).await?;
+        let mut harness = open_harness(&ctx, "io-seq-test.img", file_size).await?;
 
         // Write sequential blocks with deterministic pattern
         let mut offset: u64 = 0;
@@ -75,7 +127,7 @@ pub async fn scenario_io_random_write(seed: u64) -> ScenarioResult {
         let mut ctx = single_node_context().await?;
 
         let file_size: u64 = 16 * 1024 * 1024; // 16 MB
-        let mut harness = IoHarness::open(SOCKET_PATH, "io-rand-test.img", file_size).await?;
+        let mut harness = open_harness(&ctx, "io-rand-test.img", file_size).await?;
 
         // Pre-fill with 0xAA
         let fill_block = vec![0xAAu8; 64 * 1024];
@@ -126,7 +178,7 @@ pub async fn scenario_io_partial_chunk() -> ScenarioResult {
         let mut ctx = single_node_context().await?;
 
         let file_size: u64 = 12 * 1024 * 1024; // 12 MB (3 chunks)
-        let mut harness = IoHarness::open(SOCKET_PATH, "io-partial-test.img", file_size).await?;
+        let mut harness = open_harness(&ctx, "io-partial-test.img", file_size).await?;
 
         // Pre-fill entire file with 0x55 so we can detect corruption
         let fill = vec![0x55u8; 64 * 1024];
@@ -210,7 +262,7 @@ pub async fn scenario_io_overwrite() -> ScenarioResult {
         let mut ctx = single_node_context().await?;
 
         let file_size: u64 = 8 * 1024 * 1024; // 8 MB
-        let mut harness = IoHarness::open(SOCKET_PATH, "io-overwrite-test.img", file_size).await?;
+        let mut harness = open_harness(&ctx, "io-overwrite-test.img", file_size).await?;
 
         // Fill with pattern A (0xAA)
         let fill_a = vec![0xAAu8; 64 * 1024];
@@ -259,7 +311,7 @@ pub async fn scenario_io_benchmark() -> ScenarioResult {
         let mut ctx = single_node_context().await?;
 
         let file_size: u64 = 64 * 1024 * 1024; // 64 MB
-        let mut harness = IoHarness::open(SOCKET_PATH, "io-bench.img", file_size).await?;
+        let mut harness = open_harness(&ctx, "io-bench.img", file_size).await?;
 
         // ── Sequential write (64KB blocks) ──
         harness.reset_stats();

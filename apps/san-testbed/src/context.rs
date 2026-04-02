@@ -9,8 +9,8 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
-const BASE_PORT: u16 = 7442;
-const WITNESS_PORT: u16 = 9443;
+const BASE_PORT: u16 = 17442;
+const WITNESS_PORT: u16 = 19443;
 const PEER_SECRET: &str = "testbed-secret";
 
 #[derive(Debug, Deserialize)]
@@ -36,6 +36,13 @@ impl TestContext {
     pub async fn new(num_nodes: usize) -> Result<Self, String> {
         let temp_dir = TempDir::new()
             .map_err(|e| format!("Cannot create temp dir: {}", e))?;
+
+        // Use a testbed-local socket directory to avoid colliding with production
+        let sock_dir = temp_dir.path().join("sockets");
+        std::fs::create_dir_all(&sock_dir)
+            .map_err(|e| format!("Cannot create socket dir: {}", e))?;
+        std::env::set_var("VMM_SAN_SOCK_DIR", &sock_dir);
+        tracing::info!("Socket directory: {}", sock_dir.display());
 
         let vmm_san_binary = find_vmm_san_binary();
         tracing::info!("Using vmm-san binary: {}", vmm_san_binary.display());

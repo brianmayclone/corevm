@@ -42,7 +42,7 @@ pub fn spawn_all(state: Arc<CoreSanState>) {
     };
 
     // Ensure socket directory exists
-    std::fs::create_dir_all("/run/vmm-san").ok();
+    std::fs::create_dir_all(vmm_core::san_disk::socket_dir()).ok();
 
     for (vol_id, vol_name) in volumes {
         spawn_volume_listener(state.clone(), vol_id, vol_name);
@@ -52,7 +52,7 @@ pub fn spawn_all(state: Arc<CoreSanState>) {
 /// Spawn a single UDS listener for a volume.
 pub fn spawn_volume_listener(state: Arc<CoreSanState>, volume_id: String, volume_name: String) {
     // Ensure socket directory exists
-    std::fs::create_dir_all("/run/vmm-san").ok();
+    std::fs::create_dir_all(vmm_core::san_disk::socket_dir()).ok();
 
     let sock_path = socket_path(&volume_id);
 
