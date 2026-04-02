@@ -231,12 +231,8 @@ pub fn read_chunk_data(
                         if actual_sha != *expected_sha {
                             tracing::warn!("Chunk SHA256 MISMATCH on read: {}/{}/idx{} backend={} — trying next replica",
                                 volume_id, file_id, range.chunk_index, backend_id);
-                            db.execute(
-                                "UPDATE chunk_replicas SET state = 'error'
-                                 WHERE chunk_id = (SELECT id FROM file_chunks WHERE file_id = ?1 AND chunk_index = ?2)
-                                   AND backend_id = ?3",
-                                rusqlite::params![file_id, range.chunk_index, backend_id],
-                            ).ok();
+                            // Note: cannot mark as 'error' here — we're on a read-only connection.
+                            // The integrity engine will detect and flag corrupt replicas.
                             continue; // Try next replica — this one is corrupt
                         }
                         // SHA verified — extract the requested range
@@ -270,23 +266,11 @@ pub fn read_chunk_data(
                         }
                         Err(e) => {
                             tracing::warn!("Chunk read error on backend {}: {} — trying fallback", backend_id, e);
-                            db.execute(
-                                "UPDATE chunk_replicas SET state = 'error'
-                                 WHERE chunk_id = (SELECT id FROM file_chunks WHERE file_id = ?1 AND chunk_index = ?2)
-                                   AND backend_id = ?3",
-                                rusqlite::params![file_id, range.chunk_index, backend_id],
-                            ).ok();
                             continue;
                         }
                     }
                 }
                 Err(_) => {
-                    db.execute(
-                        "UPDATE chunk_replicas SET state = 'error'
-                         WHERE chunk_id = (SELECT id FROM file_chunks WHERE file_id = ?1 AND chunk_index = ?2)
-                           AND backend_id = ?3",
-                        rusqlite::params![file_id, range.chunk_index, backend_id],
-                    ).ok();
                     continue;
                 }
             }

@@ -10,45 +10,52 @@ use crate::engine::push_replicator::WriteSender;
 /// Read/write database pool for SQLite WAL mode.
 ///
 /// SQLite in WAL mode allows concurrent readers alongside a single writer.
-/// We use two separate connections to exploit this:
-/// - `read`: for SELECT-only queries (never blocks writes)
-/// - `write`: for INSERT/UPDATE/DELETE (never blocks reads)
+/// We use a pool of read connections to prevent reader serialization:
+/// - `read_pool`: N read connections — callers never block each other
+/// - `write`: single write connection (SQLite only allows one writer)
 ///
-/// Callers use `db.read()` or `db.write()` instead of `db.lock().unwrap()`.
+/// Callers use `db.read()` or `db.write()`.
 pub struct DbPool {
-    read: Mutex<Connection>,
+    read_pool: Vec<Mutex<Connection>>,
+    read_next: std::sync::atomic::AtomicUsize,
     write: Mutex<Connection>,
 }
 
+const READ_POOL_SIZE: usize = 8;
+
 impl DbPool {
-    /// Create a new pool with separate read and write connections to the same database.
+    /// Create a new pool with multiple read connections and one write connection.
     pub fn new(db_path: &std::path::Path) -> Result<Self, String> {
         let write = Connection::open(db_path)
             .map_err(|e| format!("Cannot open write connection: {}", e))?;
         write.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
             .map_err(|e| format!("Write PRAGMA failed: {}", e))?;
-        // Busy timeout: wait up to 5 seconds if the write lock is held
         write.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(|e| format!("Write busy_timeout: {}", e))?;
 
-        let read = Connection::open(db_path)
-            .map_err(|e| format!("Cannot open read connection: {}", e))?;
-        read.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA query_only=ON;")
-            .map_err(|e| format!("Read PRAGMA failed: {}", e))?;
-        read.busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(|e| format!("Read busy_timeout: {}", e))?;
+        let mut read_pool = Vec::with_capacity(READ_POOL_SIZE);
+        for i in 0..READ_POOL_SIZE {
+            let read = Connection::open(db_path)
+                .map_err(|e| format!("Cannot open read connection {}: {}", i, e))?;
+            read.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA query_only=ON;")
+                .map_err(|e| format!("Read PRAGMA {} failed: {}", i, e))?;
+            read.busy_timeout(std::time::Duration::from_secs(5))
+                .map_err(|e| format!("Read busy_timeout {}: {}", i, e))?;
+            read_pool.push(Mutex::new(read));
+        }
 
         Ok(Self {
-            read: Mutex::new(read),
+            read_pool,
+            read_next: std::sync::atomic::AtomicUsize::new(0),
             write: Mutex::new(write),
         })
     }
 
-    /// Acquire the read connection (SELECT only).
-    /// Multiple concurrent readers are possible in WAL mode, but this Mutex
-    /// serializes access to this particular Connection object.
+    /// Acquire a read connection (SELECT only).
+    /// Round-robins across the pool so concurrent readers don't serialize.
     pub fn read(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.read.lock().unwrap()
+        let idx = self.read_next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % self.read_pool.len();
+        self.read_pool[idx].lock().unwrap()
     }
 
     /// Acquire the write connection (INSERT/UPDATE/DELETE).
