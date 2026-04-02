@@ -38,7 +38,7 @@ macro_rules! run_scenario {
     }};
 }
 
-pub async fn run_all(_seed: u64) -> Vec<ScenarioResult> {
+pub async fn run_all(seed: u64) -> Vec<ScenarioResult> {
     let mut results = Vec::new();
 
     results.push(run_scenario!("quorum-degraded", 3, scenario_quorum_degraded));
@@ -57,10 +57,13 @@ pub async fn run_all(_seed: u64) -> Vec<ScenarioResult> {
     results.push(run_scenario!("cross-node-read", 3, scenario_cross_node_read));
     results.push(run_scenario!("replication-verify", 3, scenario_replication_verify));
 
+    // I/O validation and performance scenarios
+    results.extend(crate::io_tests::run_all_io(seed).await);
+
     results
 }
 
-pub async fn run_single(name: &str, _seed: u64) -> Option<ScenarioResult> {
+pub async fn run_single(name: &str, seed: u64) -> Option<ScenarioResult> {
     match name {
         "quorum-degraded" => Some(run_scenario!(name, 3, scenario_quorum_degraded)),
         "quorum-fenced" => Some(run_scenario!(name, 3, scenario_quorum_fenced)),
@@ -77,6 +80,25 @@ pub async fn run_single(name: &str, _seed: u64) -> Option<ScenarioResult> {
         "transfer-throughput" => Some(run_scenario!(name, 3, scenario_transfer_throughput)),
         "cross-node-read" => Some(run_scenario!(name, 3, scenario_cross_node_read)),
         "replication-verify" => Some(run_scenario!(name, 3, scenario_replication_verify)),
+        // I/O scenarios
+        "io-sequential" => Some(crate::io_tests::scenario_io_sequential().await),
+        "io-random-write" => Some(crate::io_tests::scenario_io_random_write(seed).await),
+        "io-partial-chunk" => Some(crate::io_tests::scenario_io_partial_chunk().await),
+        "io-overwrite" => Some(crate::io_tests::scenario_io_overwrite().await),
+        "io-benchmark" => Some(crate::io_tests::scenario_io_benchmark().await),
+        "io-all" => {
+            let results = crate::io_tests::run_all_io(seed).await;
+            let any_failed = results.iter().any(|r| !r.passed);
+            let messages: Vec<String> = results.iter()
+                .map(|r| format!("{}: {}", r.name, if r.passed { "OK" } else { &r.message }))
+                .collect();
+            Some(ScenarioResult {
+                name: "io-all".to_string(),
+                passed: !any_failed,
+                message: messages.join("; "),
+                duration: results.iter().map(|r| r.duration).sum(),
+            })
+        }
         _ => None,
     }
 }
