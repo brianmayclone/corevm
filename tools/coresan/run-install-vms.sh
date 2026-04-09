@@ -51,7 +51,7 @@ DISK_SYS_SIZE="20G"
 DISK_DATA_SIZE="40G"
 SUBNET="192.168.100"        # Subnet for auto-created bridge
 QEMU_BIN="qemu-system-x86_64"
-VM_PORTS=(22 9443 8443 7443 7444)   # Ports to forward from host→VM (WSL2 mirrored mode)
+VM_PORTS=(22 9443 8443 7443 7444)   # Ports to forward from host→VM
 
 # ── Parse args ───────────────────────────────────────────────────
 
@@ -297,12 +297,12 @@ setup_bridge_network() {
     ok "${#TAP_DEVICES[@]} tap devices created on $BRIDGE_NAME"
 }
 
-# ── Port forwarding (WSL2 mirrored mode) ───────────────────────
+# ── Port forwarding (host → VM) ──────────────────────────────────
 #
 # DNAT rules forward host ports to each VM's bridge IP so that
-# Windows can reach the VMs via localhost when WSL2 mirrored
-# networking is enabled. Each VM gets an offset: VM1 → base port,
-# VM2 → base port + 100, etc. SSH is special: 2201, 2202, ...
+# the host can reach VMs via localhost. Each VM gets an offset:
+# VM1 → base port, VM2 → base port + 100, etc.
+# SSH is special: 2201, 2202, ...
 #
 # Example for VM 1 (192.168.100.101):
 #   localhost:2201  → 192.168.100.101:22
@@ -312,6 +312,20 @@ setup_bridge_network() {
 #   localhost:2202  → 192.168.100.102:22
 #   localhost:9543  → 192.168.100.102:9443
 #   localhost:8543  → 192.168.100.102:8443
+
+# ── Deterministic MAC + IP per VM ────────────────────────────────
+#
+# VM 1 → MAC 52:54:00:c5:00:01  IP .101
+# VM 2 → MAC 52:54:00:c5:00:02  IP .102
+# …stable across restarts.
+
+mac_for_vm() {
+    printf "52:54:00:c5:00:%02x" "$1"
+}
+
+ip_for_vm() {
+    echo "${SUBNET}.$((100 + $1))"
+}
 
 DNAT_RULES=()
 
@@ -346,20 +360,6 @@ cleanup_port_forwarding() {
 
 setup_bridge_network
 setup_port_forwarding
-
-# ── Deterministic MAC + IP per VM ────────────────────────────────
-#
-# VM 1 → MAC 52:54:00:c5:00:01  IP .101
-# VM 2 → MAC 52:54:00:c5:00:02  IP .102
-# …stable across restarts.
-
-mac_for_vm() {
-    printf "52:54:00:c5:00:%02x" "$1"
-}
-
-ip_for_vm() {
-    echo "${SUBNET}.$((100 + $1))"
-}
 
 # ── Start DHCP server on bridge ──────────────────────────────────
 
@@ -473,9 +473,9 @@ for i in "${VM_SLOTS[@]}"; do
     echo "  VM ${i}:   $(ip_for_vm "$i")  ($(mac_for_vm "$i"))"
 done
 echo ""
-info "Port forwarding (WSL2 → VM, accessible from Windows via localhost):"
+info "Port forwarding (host → VM, accessible via localhost):"
 for i in "${VM_SLOTS[@]}"; do
-    local offset=$(( (i - 1) * 100 ))
+    offset=$(( (i - 1) * 100 ))
     echo "  VM ${i}:"
     for port in "${VM_PORTS[@]}"; do
         if [[ "$port" -eq 22 ]]; then
